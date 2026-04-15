@@ -17,6 +17,10 @@ CONTAINER_CMD ?= podman
 # opencode agent image loaded into kind for session pods
 OPENCODE_IMAGE ?= opencode-golang:latest
 
+# Crush agent image
+CRUSH_IMAGE   ?= crush:latest
+CRUSH_VERSION ?= 0.1.127
+
 # Kubernetes
 NAMESPACE    ?= swarmer
 KIND_CLUSTER ?= swarmer
@@ -28,9 +32,9 @@ AUTH_HASH_FILE ?= auth/password.hash
 #  Phony targets
 # ──────────────────────────────────────────────────────────────
 .PHONY: setup-auth install dev lint db-reset \
-        image-build image-push \
+        image-build image-push image-build-crush \
         k8s-deploy k8s-auth-secret k8s-delete k8s-connect \
-        kind-create kind-load kind-load-opencode kind-deploy kind-delete kind-connect \
+        kind-create kind-load kind-load-opencode kind-load-crush kind-deploy kind-delete kind-connect \
         help
 
 # ──────────────────────────────────────────────────────────────
@@ -146,6 +150,21 @@ kind-load-opencode:  ## Load the opencode-golang image into the kind cluster as 
 	  kind load docker-image opencode-golang:latest --name $(KIND_CLUSTER); \
 	fi
 	@echo "✓ opencode image loaded as opencode-golang:latest"
+
+image-build-crush:  ## Build the Crush agent container image
+	$(CONTAINER_CMD) build -f Containerfile.crush \
+	  --build-arg CRUSH_VERSION=$(CRUSH_VERSION) \
+	  -t $(CRUSH_IMAGE) .
+	@echo "Built: $(CRUSH_IMAGE)"
+
+kind-load-crush:  ## Load the Crush agent image into kind
+	@echo "Loading $(CRUSH_IMAGE) into kind cluster '$(KIND_CLUSTER)'..."
+	@if [ "$(CONTAINER_CMD)" = "podman" ]; then \
+	  podman save $(CRUSH_IMAGE) | kind load image-archive /dev/stdin --name $(KIND_CLUSTER); \
+	else \
+	  kind load docker-image $(CRUSH_IMAGE) --name $(KIND_CLUSTER); \
+	fi
+	@echo "✓ Crush image loaded."
 
 kind-deploy:  ## Create kind cluster + build image + deploy swarmer  (one-shot local dev)
 	@test -f $(AUTH_HASH_FILE) || (echo "Run 'make setup-auth' first." && exit 1)
