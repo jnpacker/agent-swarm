@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
 
 from swarmer import k8s
+from swarmer.config import settings
 from swarmer.database import get_db
 from swarmer.deps import require_auth
 from swarmer.flash import flash
@@ -91,12 +92,16 @@ async def workspace_create(
             status_code=422,
         )
 
-    # Best-effort: create K8s namespace and default opencode config
+    # Best-effort: create K8s namespace and agent config for all registered tools
+    eff_ns = k8s.effective_namespace(namespace)
     try:
-        k8s.ensure_namespace(namespace)
-        k8s.apply_opencode_config(namespace)
+        if not settings.k8s_namespace:
+            k8s.ensure_namespace(eff_ns)
+        from swarmer.agent_tools.registry import all_tools
+        for tool in all_tools():
+            k8s.apply_agent_config(eff_ns, agent_tool=tool.name)
     except Exception as exc:
-        flash(request, f"Workspace created but K8s namespace creation failed: {exc}", "warning")
+        flash(request, f"Workspace created but K8s setup failed: {exc}", "warning")
 
     flash(request, f"Workspace '{ws.display_name}' created.", "success")
     return RedirectResponse(url=f"/workspaces/{ws.id}", status_code=302)
@@ -115,7 +120,7 @@ async def workspace_detail(
     ws = await db.get(Workspace, ws_id)
     if ws is None:
         return RedirectResponse(url="/workspaces", status_code=302)
-    ns_status = k8s.get_namespace_status(ws.namespace)
+    ns_status = k8s.get_namespace_status(ws.k8s_namespace)
     result = await db.execute(
         select(Session)
         .where(Session.workspace_id == ws_id)
@@ -204,7 +209,8 @@ async def workspace_delete(
 
     # Delete K8s namespace first; abort if it fails for a non-404 reason
     try:
-        k8s.delete_namespace(ws.namespace)
+        if not settings.k8s_namespace:
+            k8s.delete_namespace(ws.k8s_namespace)
     except Exception as exc:
         return templates.TemplateResponse(
             "workspaces/_delete_confirm.html",
