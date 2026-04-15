@@ -21,6 +21,7 @@
     <thead>
       <tr>
         <th>Name</th>
+        <th>Tool</th>
         <th>Mode</th>
         <th>Status</th>
         <th>GitHub PAT</th>
@@ -35,6 +36,10 @@
         <td>
           <a href="/workspaces/{{ ws.id }}/sessions/{{ s.id }}"
              class="fw-semibold text-decoration-none">{{ s.name }}</a>
+        </td>
+
+        <td>
+          <span class="badge bg-dark">{{ s.agent_tool | capitalize }}</span>
         </td>
 
         <td>
@@ -83,7 +88,7 @@
     <h5 class="text-muted">No sessions yet</h5>
     <p class="text-muted">
       Sessions represent a PVC-backed workspace where git repos are cloned
-      and opencode runs.
+      and the agent tool runs.
     </p>
     <a href="/workspaces/{{ ws.id }}/sessions/new" class="btn btn-primary">Create first session</a>
   </div>

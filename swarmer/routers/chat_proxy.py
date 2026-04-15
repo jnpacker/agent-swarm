@@ -157,7 +157,7 @@ async def _proxy_root(
     if err:
         return Response(err, status_code=503 if "running" in err else 404, media_type="text/plain")
 
-    local_port = await _acquire_portforward(session.id, session.pod_name, ws_obj.namespace)
+    local_port = await _acquire_portforward(session.id, session.pod_name, ws_obj.k8s_namespace)
 
     if not settings.k8s_in_cluster:
         # Dev mode: browser and port-forward are on the same machine.
@@ -187,7 +187,7 @@ async def _chat_http_proxy(
         return Response(err, status_code=503 if "running" in err else 404, media_type="text/plain")
 
     try:
-        local_port = await _acquire_portforward(session.id, session.pod_name, ws_obj.namespace)
+        local_port = await _acquire_portforward(session.id, session.pod_name, ws_obj.k8s_namespace)
     except Exception as exc:
         log.warning("Could not establish port-forward for session %d: %s", sid, exc)
         return Response(f"Could not connect to session: {exc}", status_code=503, media_type="text/plain")
@@ -287,7 +287,7 @@ async def chat_ws_proxy(
         return
 
     try:
-        local_port = await _acquire_portforward(session.id, session.pod_name, ws_obj.namespace)
+        local_port = await _acquire_portforward(session.id, session.pod_name, ws_obj.k8s_namespace)
     except Exception as exc:
         log.warning("Port-forward failed for WS session %d: %s", sid, exc)
         await websocket.close(code=4004, reason="Could not connect to session")

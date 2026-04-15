@@ -1,8 +1,6 @@
 from pathlib import Path
 from pydantic_settings import BaseSettings
 
-LANGUAGE_OPTIONS = ("golang", "python")
-
 
 class Settings(BaseSettings):
     auth_hash_file: Path = Path("auth/password.hash")
@@ -10,19 +8,16 @@ class Settings(BaseSettings):
     k8s_in_cluster: bool = False
     host: str = "0.0.0.0"
     port: int = 8080
-    agent_image: str = "opencode-golang:latest"
-    agent_image_python: str = ""
+    agent_image: str = "ghcr.io/anomalyco/opencode:latest"
+    agent_image_opencode: str = "ghcr.io/anomalyco/opencode:latest"
+    agent_image_crush: str = "registry.access.redhat.com/ubi9/ubi:latest"
+    crush_version: str = "0.57.0"
+    default_agent_tool: str = "opencode"
+    crush_server_port: int = 4096
     agent_image_pull_secret: str = ""
+    k8s_namespace: str = ""
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
-
-    def image_for_language(self, language: str) -> str:
-        """Return the container image for the given language variant."""
-        if language == "python":
-            if self.agent_image_python:
-                return self.agent_image_python
-            return self.agent_image.replace("golang", "python")
-        return self.agent_image
 
 
 settings = Settings()
