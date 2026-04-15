@@ -42,13 +42,25 @@
         <div class="form-text">Required for cloning private repositories.</div>
       </div>
 
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Agent Tool</label>
+        <select class="form-select" name="agent_tool" id="agent-tool">
+          {% for tool in agent_tools %}
+          <option value="{{ tool.name }}"
+                  {% if tool.name == default_agent_tool %}selected{% endif %}>
+            {{ tool.display_name }}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+
       <div id="prompt-row">
         <div class="mb-3">
           <label class="form-label fw-semibold">Instruction Prompt</label>
           <textarea class="form-control" name="instruction_prompt" rows="4"
-                    placeholder="Describe the task for opencode to perform…">{{ form.instruction_prompt if form else '' }}</textarea>
+                    placeholder="Describe the task for the agent to perform…">{{ form.instruction_prompt if form else '' }}</textarea>
           <div class="form-text">
-            Passed as the argument to <code>opencode run</code>.
+            The prompt passed to the agent in prompt mode.
           </div>
         </div>
       </div>
@@ -101,8 +113,8 @@
         <div class="card-body">
           <select class="form-select mb-2" name="mode" id="mode"
                   onchange="document.getElementById('prompt-row').style.display = this.value === 'prompt' ? '' : 'none'">
-            <option value="prompt">Prompt — runs opencode run with the prompt below, then exits</option>
-            <option value="server">Server — runs opencode serve (API access, persistent)</option>
+            <option value="prompt">Prompt — run a one-shot prompt, then exit</option>
+            <option value="server">Server — persistent API access</option>
             <option value="tui">TUI — interactive terminal in the browser</option>
           </select>
           <div class="form-text text-muted small">
@@ -131,9 +143,9 @@
               <input class="form-check-input" type="checkbox" name="resume"
                      id="resume" value="true">
               <label class="form-check-label" for="resume">
-                Resume last opencode session on re-launch
+                Resume last session on re-launch
               </label>
-              <div class="form-text">Passes <code>--continue</code> to opencode.</div>
+              <div class="form-text">Passes <code>--continue</code> to the agent.</div>
             </div>
           </div>
           <hr class="my-3">

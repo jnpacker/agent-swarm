@@ -34,7 +34,9 @@ async def migrate_db() -> None:
 
     migrations = [
         "ALTER TABLE sessions ADD COLUMN privileged BOOLEAN NOT NULL DEFAULT 0",
-        "ALTER TABLE sessions ADD COLUMN language VARCHAR(32) NOT NULL DEFAULT 'golang'",
+        "ALTER TABLE sessions ADD COLUMN agent_tool VARCHAR(32) NOT NULL DEFAULT 'opencode'",
+        "ALTER TABLE opencode_secrets ADD COLUMN anthropic_api_key_enc TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE opencode_secrets ADD COLUMN openai_api_key_enc TEXT NOT NULL DEFAULT ''",
     ]
     async with _engine.begin() as conn:
         for stmt in migrations:

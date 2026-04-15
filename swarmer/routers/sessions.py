@@ -12,7 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from swarmer import k8s, k8s_session as k8s_sess
-from swarmer.config import settings, LANGUAGE_OPTIONS
+from swarmer.agent_tools.registry import get as get_tool, all_tools
+from swarmer.config import settings
 from swarmer.database import get_db
 from swarmer.deps import require_auth
 from swarmer.flash import flash
@@ -36,20 +37,16 @@ _CLAUDE_MODELS = [
 ]
 
 
-async def _get_model_options(ws_id: int, db: AsyncSession) -> list[dict]:
-    """Return the available model choices for this workspace's Prompt sessions."""
+async def _get_model_options(
+    ws_id: int, db: AsyncSession, agent_tool: str = "opencode"
+) -> list[dict]:
+    """Return the available model choices for this workspace's sessions."""
+    tool = get_tool(agent_tool)
     result = await db.execute(
         select(OpencodeSecret).where(OpencodeSecret.workspace_id == ws_id)
     )
     oc = result.scalar_one_or_none()
-    options = []
-    if oc and oc.google_api_key_enc:
-        for value, label in _GEMINI_MODELS:
-            options.append({"value": value, "label": label, "group": "Gemini"})
-    if oc and oc.has_adc:
-        for value, label in _CLAUDE_MODELS:
-            options.append({"value": value, "label": label, "group": "Claude (Vertex)"})
-    return options
+    return tool.get_model_options(oc)
 
 def _github_slug(url: str) -> str | None:
     """Extract 'owner/repo' from a GitHub URL, or None if not a GitHub URL."""
@@ -144,19 +141,6 @@ async def session_list(
 # Create
 # ============================================================
 
-async def _image_status(namespace: str) -> dict[str, bool]:
-    """Return reachability status for each language image variant."""
-    results = await asyncio.gather(
-        *[k8s.check_image_reachable(settings.image_for_language(lang), namespace)
-          for lang in LANGUAGE_OPTIONS],
-        return_exceptions=True,
-    )
-    return {
-        lang: (r is True)
-        for lang, r in zip(LANGUAGE_OPTIONS, results)
-    }
-
-
 @router.get("/workspaces/{ws_id}/sessions/new", dependencies=[Depends(require_auth)])
 async def session_new(
     ws_id: int, request: Request, db: AsyncSession = Depends(get_db)
@@ -169,17 +153,10 @@ async def session_new(
     )
     pats = pats_result.scalars().all()
     model_options = await _get_model_options(ws_id, db)
-    image_status = await _image_status(ws.namespace)
     return templates.TemplateResponse(
         "sessions/new.html",
-        {
-            "request": request,
-            "ws": ws,
-            "pats": pats,
-            "model_options": model_options,
-            "image_status": image_status,
-            "language_options": LANGUAGE_OPTIONS,
-        },
+        {"request": request, "ws": ws, "pats": pats, "model_options": model_options,
+         "agent_tools": all_tools(), "default_agent_tool": settings.default_agent_tool},
     )
 
 
@@ -195,7 +172,7 @@ async def session_create(
     privileged: bool = Form(False),
     mode: str = Form("prompt"),
     model: str = Form(""),
-    language: str = Form("golang"),
+    agent_tool: str = Form("opencode"),
     db: AsyncSession = Depends(get_db),
 ):
     ws = await _get_workspace(ws_id, db)
@@ -205,8 +182,11 @@ async def session_create(
     pat_id = int(github_pat_id) if github_pat_id else None
     if mode not in ("tui", "server", "prompt"):
         mode = "prompt"
-    if language not in LANGUAGE_OPTIONS:
-        language = "golang"
+
+    try:
+        get_tool(agent_tool)
+    except ValueError:
+        agent_tool = "opencode"
 
     session = Session(
         workspace_id=ws_id,
@@ -214,11 +194,11 @@ async def session_create(
         name=name.strip(),
         mode=mode,
         model=model.strip(),
-        language=language,
         persist=persist,
         resume=resume,
         privileged=privileged,
         instruction_prompt=instruction_prompt.strip(),
+        agent_tool=agent_tool,
     )
     db.add(session)
     try:
@@ -279,12 +259,11 @@ async def session_detail(
     # Fetch live K8s detail for the initial page render
     status_detail = ""
     if session.pod_name:
-        _, status_detail = k8s.get_pod_status(session.pod_name, ws.namespace)
+        _, status_detail = k8s.get_pod_status(session.pod_name, ws.k8s_namespace)
 
-    model_options = await _get_model_options(ws_id, db)
+    model_options = await _get_model_options(ws_id, db, session.agent_tool)
     pat_token = session.github_pat.pat if session.github_pat else None
     repo_info = await _fetch_repo_info(session.repos, pat_token)
-    image_status = await _image_status(ws.namespace)
 
     return templates.TemplateResponse(
         "sessions/detail.html",
@@ -300,8 +279,7 @@ async def session_detail(
             "status_detail": status_detail,
             "model_options": model_options,
             "repo_info": repo_info,
-            "image_status": image_status,
-            "language_options": LANGUAGE_OPTIONS,
+            "agent_tools": all_tools(),
         },
     )
 
@@ -326,7 +304,7 @@ async def session_edit(
     privileged: bool = Form(False),
     mode: str = Form("prompt"),
     model: str = Form(""),
-    language: str = Form("golang"),
+    agent_tool: str = Form("opencode"),
     db: AsyncSession = Depends(get_db),
 ):
     session = await db.get(Session, sid)
@@ -346,8 +324,11 @@ async def session_edit(
     if mode in ("tui", "server", "prompt"):
         session.mode = mode
     session.model = model.strip()
-    if language in LANGUAGE_OPTIONS:
-        session.language = language
+    try:
+        get_tool(agent_tool)
+        session.agent_tool = agent_tool
+    except ValueError:
+        pass
     await db.commit()
     flash(request, "Session updated.", "success")
     return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}", status_code=302)
@@ -386,7 +367,7 @@ async def session_launch(
     # Ensure PVC exists; if it was deleted (persist=False), a new one is created
     # with the same suffix as the pod about to be launched.
     try:
-        pvc_name = k8s_sess.ensure_session_pvc(ws.namespace, session.id, suffix, session.pvc_name)
+        pvc_name = k8s_sess.ensure_session_pvc(ws.k8s_namespace, session.id, suffix, session.pvc_name)
         if pvc_name != session.pvc_name:
             session.pvc_name = pvc_name
     except Exception as exc:
@@ -406,28 +387,31 @@ async def session_launch(
     try:
         pod_spec = k8s_sess.build_session_pod(
             session=session,
-            namespace=ws.namespace,
-            image=settings.image_for_language(session.language),
+            namespace=ws.k8s_namespace,
+            image=settings.agent_image,
             suffix=suffix,
             image_pull_secret=k8s.PULL_SECRET_NAME,
             has_adc=has_adc,
             has_gemini=has_gemini,
             privileged=session.privileged,
+            agent_tool=session.agent_tool,
         )
         from kubernetes import client as k8s_client
 
         v1 = k8s_client.CoreV1Api()
 
         if session.pod_name:
-            k8s.delete_pod(session.pod_name, ws.namespace)
+            k8s.delete_pod(session.pod_name, ws.k8s_namespace)
 
-        pod = v1.create_namespaced_pod(ws.namespace, pod_spec)
+        pod = v1.create_namespaced_pod(ws.k8s_namespace, pod_spec)
         session.pod_name = pod.metadata.name
         session.phase = "pending"
 
         # Create a Service for server-mode sessions (exposes opencode serve port)
         if session.mode == "server":
-            k8s_sess.create_session_service(session.id, ws.namespace)
+            tool = get_tool(session.agent_tool)
+            port = tool.get_server_port() or 4096
+            k8s_sess.create_session_service(session.id, ws.k8s_namespace, port=port)
 
         await db.commit()
     except Exception as exc:
@@ -452,13 +436,13 @@ async def session_stop(
         return RedirectResponse(url=f"/workspaces/{ws_id}/sessions", status_code=302)
 
     if session.pod_name:
-        k8s.delete_pod(session.pod_name, ws.namespace)
+        k8s.delete_pod(session.pod_name, ws.k8s_namespace)
         if session.mode == "server":
-            k8s.delete_service(f"session-{session.id}-svc", ws.namespace)
+            k8s.delete_service(f"session-{session.id}-svc", ws.k8s_namespace)
 
     if not session.persist and session.pvc_name:
         try:
-            k8s_sess.delete_session_pvc(ws.namespace, session.pvc_name)
+            k8s_sess.delete_session_pvc(ws.k8s_namespace, session.pvc_name)
             session.pvc_name = None
         except Exception as exc:
             flash(request, f"PVC deletion failed: {exc}", "warning")
@@ -491,9 +475,9 @@ async def session_status(
 
     status_detail = ""
     if session.pod_name:
-        phase, status_detail = k8s.get_pod_status(session.pod_name, ws.namespace)
+        phase, status_detail = k8s.get_pod_status(session.pod_name, ws.k8s_namespace)
         session.phase = phase
-        logs = k8s.get_pod_logs(session.pod_name, ws.namespace)
+        logs = k8s.get_pod_logs(session.pod_name, ws.k8s_namespace)
         if logs:
             session.last_output = logs
         await db.commit()
@@ -582,7 +566,7 @@ async def session_delete(
 
     if session.pvc_name:
         try:
-            k8s_sess.delete_session_pvc(ws.namespace, session.pvc_name)
+            k8s_sess.delete_session_pvc(ws.k8s_namespace, session.pvc_name)
         except Exception as exc:
             flash(request, f"PVC deletion failed: {exc}", "warning")
 
@@ -677,7 +661,8 @@ async def session_set_model(
 
     if session.is_active and session.pod_name:
         try:
-            k8s.exec_model_json(session.pod_name, ws.namespace, session.model)
+            tool = get_tool(session.agent_tool)
+            tool.exec_model_update(session.pod_name, ws.k8s_namespace, session.model)
             flash(request, "Model applied to running pod.", "success")
         except Exception as exc:
             flash(request, f"Model saved but could not apply to running pod: {exc}", "warning")
