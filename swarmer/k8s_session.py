@@ -2,9 +2,7 @@
 Kubernetes operations specific to sessions:
 PVC management, pod spec generation, and Service management.
 """
-import json
 import logging
-import shlex
 
 log = logging.getLogger(__name__)
 
@@ -69,35 +67,24 @@ def build_session_pod(
     has_adc: bool = False,
     has_gemini: bool = False,
     privileged: bool = False,
-) -> "client.V1Pod":
-    """
-    Build a V1Pod spec for the given session.
+    agent_tool: str = "opencode",
+):  # -> client.V1Pod
+    """Build a V1Pod spec for the given session.
 
-    Modes:
-    - prompt: opencode run --model <model> [--continue] "<prompt>"
-    - server: opencode serve --hostname 0.0.0.0
-    - tui:    sleep infinity (user connects via kubectl exec / xterm.js)
-
-    has_adc: when True, the opencode-secret contains an
-    'application_default_credentials.json' key that is projected as a file
-    and GOOGLE_APPLICATION_CREDENTIALS is set to point at it.
-    Either has_adc, a GOOGLE_API_KEY in the secret, or both may be present.
+    Delegates tool-specific behavior (commands, config paths, env vars)
+    to the AgentToolStrategy identified by *agent_tool*.
     """
     from kubernetes import client
+    from swarmer.agent_tools.registry import get as get_tool
+
+    tool = get_tool(agent_tool)
 
     pvc_name = session.pvc_name
     pat = session.github_pat  # may be None
 
     # ---------- env ----------
-    # envFrom (below) injects all opencode-secret keys as env vars:
-    # GOOGLE_API_KEY, GOOGLE_CLOUD_PROJECT, VERTEX_LOCATION, …
-    # GOOGLE_APPLICATION_CREDENTIALS is added only when ADC JSON is present.
-    env = []
-    if has_adc:
-        env.append(client.V1EnvVar(
-            name="GOOGLE_APPLICATION_CREDENTIALS",
-            value="/app/gcloud/credentials.json",
-        ))
+    env = list(tool.get_extra_env(has_adc))
+    env.append(client.V1EnvVar(name="HOME", value="/workspace"))
     if pat:
         env.append(
             client.V1EnvVar(
@@ -133,10 +120,13 @@ def build_session_pod(
             ),
         ),
         client.V1Volume(
-            name="opencode-config",
-            config_map=client.V1ConfigMapVolumeSource(name="opencode-config"),
+            name="agent-config",
+            config_map=client.V1ConfigMapVolumeSource(
+                name=tool.get_config_map_name()
+            ),
         ),
     ]
+    volumes.extend(tool.get_extra_volumes(has_adc))
 
     volume_mounts = [
         client.V1VolumeMount(
@@ -144,34 +134,12 @@ def build_session_pod(
             mount_path="/workspace",
         ),
         client.V1VolumeMount(
-            name="opencode-config",
-            mount_path="/root/.config/opencode",
+            name="agent-config",
+            mount_path=tool.get_config_mount_path(),
             read_only=True,
         ),
     ]
-
-    if has_adc:
-        volumes.append(
-            client.V1Volume(
-                name="gcloud-creds",
-                secret=client.V1SecretVolumeSource(
-                    secret_name="opencode-secret",
-                    items=[
-                        client.V1KeyToPath(
-                            key="application_default_credentials.json",
-                            path="credentials.json",
-                        )
-                    ],
-                ),
-            )
-        )
-        volume_mounts.append(
-            client.V1VolumeMount(
-                name="gcloud-creds",
-                mount_path="/app/gcloud",
-                read_only=True,
-            )
-        )
+    volume_mounts.extend(tool.get_extra_volume_mounts(has_adc))
 
     # ---------- init container (git clone) ----------
     init_containers = []
@@ -184,9 +152,6 @@ def build_session_pod(
                 f"/workspace/{repo.local_path}"
             )
 
-        # Credential setup: write a .git-credentials file so git can authenticate
-        # over HTTPS without any interactive prompt.  The file is written only when
-        # a PAT is assigned; public repos work without it.
         credential_setup = (
             "if [ -n \"${GITHUB_PAT}\" ]; then "
             "git config --global credential.helper store && "
@@ -237,77 +202,30 @@ def build_session_pod(
             )
         )
 
-    # ---------- resolve model (all modes) ----------
+    # ---------- resolve model ----------
     if session.model:
         model = session.model
-    elif has_adc:
-        model = "google-vertex-anthropic/claude-sonnet-4-6@default"
-    elif has_gemini:
-        model = "google/gemini-2.5-flash"
     else:
-        model = "google/gemini-2.5-flash"  # safest unauthenticated fallback
+        model = tool.get_default_model(has_adc, has_gemini)
 
-    # Write providerID + modelID into opencode's state file so it picks the
-    # right model automatically in every session mode (prompt / server / TUI).
-    # We use a shell preamble so the parent directory is guaranteed to exist.
-    if "/" in model:
-        provider_id, model_id = model.split("/", 1)
-        model_json = json.dumps({
-            "recent": [{"providerID": provider_id, "modelID": model_id}],
-            "favorite": [],
-            "variant": {f"{provider_id}/{model_id}": "default"},
-        })
-        model_setup = (
-            "mkdir -p /root/.local/state/opencode && "
-            f"printf '%s' {shlex.quote(model_json)} "
-            "> /root/.local/state/opencode/model.json && "
-        )
-    else:
-        model_setup = ""
-
-    # Symlink opencode's share dir into the PVC so session history persists
-    # across pod restarts. Must run before opencode starts.
-    share_setup = (
-        "mkdir -p /workspace/.opencode /root/.local/share && "
-        "rm -rf /root/.local/share/opencode && "
-        "ln -sf /workspace/.opencode /root/.local/share/opencode && "
-    )
+    model_setup = tool.build_model_setup_cmd(model)
+    share_setup = tool.build_share_setup_cmd()
 
     # ---------- main container command ----------
     ports = []
     if session.mode == "server":
-        main_cmd = "opencode serve --hostname 0.0.0.0 --port 4096"
         restart_policy = "Always"
-        ports = [client.V1ContainerPort(container_port=4096, name="opencode")]
+        ports = tool.get_server_mode_ports()
     elif session.mode == "tui":
-        # Pod stays alive; user connects via xterm.js + kubectl exec
-        main_cmd = "sleep infinity"
         restart_policy = "Always"
-    else:  # prompt
-        prompt_text = session.instruction_prompt or ""
-        if session.repos:
-            repo_lines = ["\n\nContext Repositories"]
-            for repo in session.repos:
-                repo_lines.append(f"- {repo.repo_url} ({repo.branch}) /workspace/{repo.local_path}")
-            prompt_text = prompt_text + "\n".join(repo_lines)
-        cmd_parts = ["opencode", "run", "--model", model]
-        if session.resume:
-            cmd_parts.append("--continue")
-        if prompt_text:
-            cmd_parts.append(prompt_text)
-        main_cmd = " ".join(shlex.quote(p) for p in cmd_parts)
+    else:
         restart_policy = "Never"
 
+    main_cmd = tool.build_main_cmd(session, model)
     args = ["sh", "-c", share_setup + model_setup + main_cmd]
 
-    # ---------- envFrom (opencode-secret provides GCP + Gemini creds) ----------
-    env_from = [
-        client.V1EnvFromSource(
-            secret_ref=client.V1SecretEnvSource(
-                name="opencode-secret", optional=True
-            )
-        )
-    ]
+    # ---------- envFrom ----------
+    env_from = tool.get_env_from_sources()
 
     # ---------- container ----------
     security_context = None
@@ -318,8 +236,8 @@ def build_session_pod(
         )
 
     container = client.V1Container(
-        name="opencode",
-        image=image,
+        name=tool.get_container_name(),
+        image=tool.get_image(),
         image_pull_policy="IfNotPresent",
         working_dir="/workspace",
         args=args,
@@ -331,8 +249,8 @@ def build_session_pod(
         tty=session.mode == "tui",
         security_context=security_context,
         resources=client.V1ResourceRequirements(
-            requests={"memory": "512Mi", "cpu": "500m"},
-            limits={"memory": "2Gi", "cpu": "2000m"},
+            requests={"memory": "256Mi", "cpu": "100m"},
+            limits={"memory": "512Mi", "cpu": "200m"},
         ),
     )
 
@@ -350,6 +268,7 @@ def build_session_pod(
             labels={
                 "app": "swarmer-session",
                 "session-id": str(session.id),
+                "agent-tool": agent_tool,
             },
         ),
         spec=client.V1PodSpec(
@@ -362,7 +281,9 @@ def build_session_pod(
     )
 
 
-def create_session_service(session_id: int, namespace: str) -> str:
+def create_session_service(
+    session_id: int, namespace: str, port: int = 4096, port_name: str = "agent"
+) -> str:
     """Create a ClusterIP Service for an interactive (server-mode) session.
     Returns the service name."""
     from kubernetes import client
@@ -380,7 +301,9 @@ def create_session_service(session_id: int, namespace: str) -> str:
                     spec=client.V1ServiceSpec(
                         selector={"session-id": str(session_id)},
                         ports=[
-                            client.V1ServicePort(port=4096, target_port=4096, name="opencode")
+                            client.V1ServicePort(
+                                port=port, target_port=port, name=port_name
+                            )
                         ],
                         type="ClusterIP",
                     ),
@@ -389,4 +312,3 @@ def create_session_service(session_id: int, namespace: str) -> str:
         else:
             raise
     return svc_name
-
