@@ -79,7 +79,7 @@
     </form>
     {% endif %}
 
-    {% if session.mode == 'server' and session.agent_tool != 'crush' %}
+    {% if session.mode == 'server' %}
     <a href="/workspaces/{{ ws.id }}/sessions/{{ session.id }}/chat"
        target="_blank" rel="noopener"
        class="btn btn-info btn-sm{% if session.phase != 'running' %} d-none{% endif %}"

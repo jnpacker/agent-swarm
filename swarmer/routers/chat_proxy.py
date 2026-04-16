@@ -25,6 +25,7 @@ import httpx
 import websockets
 from fastapi import APIRouter, Depends, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse, Response
+from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from swarmer.config import settings
@@ -35,6 +36,7 @@ from swarmer.models.workspace import Workspace
 
 router = APIRouter()
 log = logging.getLogger(__name__)
+templates = Jinja2Templates(directory="swarmer/templates")
 
 _HOP_BY_HOP = frozenset({
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -67,7 +69,7 @@ async def _wait_for_port(port: int, timeout: float = 8.0) -> bool:
     return False
 
 
-async def _acquire_portforward(session_id: int, pod_name: str, namespace: str) -> int:
+async def _acquire_portforward(session_id: int, pod_name: str, namespace: str, remote_port: int = 4096) -> int:
     """Return a local port connected via kubectl port-forward to the session pod."""
     async with _pf_lock:
         existing = _portforwards.get(session_id)
@@ -83,7 +85,7 @@ async def _acquire_portforward(session_id: int, pod_name: str, namespace: str) -
         proc = await asyncio.create_subprocess_exec(
             "kubectl", "port-forward",
             f"pod/{pod_name}",
-            f"{local_port}:4096",
+            f"{local_port}:{remote_port}",
             "-n", namespace,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
@@ -157,6 +159,24 @@ async def _proxy_root(
     if err:
         return Response(err, status_code=503 if "running" in err else 404, media_type="text/plain")
 
+    # Crush sessions: serve the built-in chat UI
+    if session.agent_tool == "crush":
+        from swarmer.agent_tools.registry import get as get_tool
+        tool = get_tool("crush")
+        # Ensure port-forward is established
+        port = tool.get_server_port() or 4096
+        await _acquire_portforward(session.id, session.pod_name, ws_obj.k8s_namespace, port)
+        return templates.TemplateResponse(
+            "sessions/crush_chat.html",
+            {
+                "request": request,
+                "ws": ws_obj,
+                "session": session,
+                "model_name": session.model.split("/")[-1] if session.model else "default",
+                "provider_name": session.model.split("/")[0] if "/" in session.model else "default",
+            },
+        )
+
     local_port = await _acquire_portforward(session.id, session.pod_name, ws_obj.k8s_namespace)
 
     if not settings.k8s_in_cluster:
@@ -181,6 +201,8 @@ async def _chat_http_proxy(
     path: str,
     db: AsyncSession,
 ) -> Response:
+    from starlette.responses import StreamingResponse
+
     ws_obj, session = await _load(ws_id, sid, db)
     err = _session_ok(ws_obj, session, ws_id)
     if err:
@@ -200,6 +222,35 @@ async def _chat_http_proxy(
     fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
     fwd_headers["x-opencode-directory"] = "/workspace"
 
+    # Check if the request wants SSE (event-stream)
+    accept = request.headers.get("accept", "")
+    is_sse = "text/event-stream" in accept or "/events" in path
+
+    if is_sse:
+        # Stream SSE responses — long-lived connection, no timeout buffering
+        client = httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=None, write=10, pool=10))
+
+        async def sse_generator():
+            try:
+                async with client.stream(
+                    "GET",
+                    upstream_url,
+                    headers=fwd_headers,
+                ) as resp:
+                    async for chunk in resp.aiter_bytes():
+                        yield chunk
+            except Exception as exc:
+                log.warning("SSE stream error for session %d: %s", sid, exc)
+            finally:
+                await client.aclose()
+
+        return StreamingResponse(
+            sse_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # Standard request/response proxy
     try:
         async with httpx.AsyncClient() as client:
             upstream_resp = await client.request(
