@@ -114,6 +114,21 @@
           <input type="hidden" name="name" value="{{ session.name }}">
 
           <div class="row align-items-center mb-3">
+            <label class="col-5 text-muted small col-form-label-sm">Agent Tool</label>
+            <div class="col-7">
+              <select name="agent_tool" class="form-select form-select-sm"
+                      {% if session.is_active %}disabled title="Stop session to change tool"{% endif %}>
+                {% for tool in agent_tools %}
+                <option value="{{ tool.name }}"
+                        {{ 'selected' if session.agent_tool == tool.name }}>
+                  {{ tool.display_name }}
+                </option>
+                {% endfor %}
+              </select>
+            </div>
+          </div>
+
+          <div class="row align-items-center mb-3">
             <label class="col-5 text-muted small col-form-label-sm">Mode</label>
             <div class="col-7">
               <select name="mode" class="form-select form-select-sm"
@@ -204,7 +219,7 @@
           <div class="mb-3">
             <label class="text-muted small form-label">Instruction Prompt</label>
             <textarea class="form-control form-control-sm" name="instruction_prompt"
-                      rows="3" placeholder="Describe the task for opencode to run…"
+                      rows="3" placeholder="Describe the task for the agent to run…"
                       {% if session.is_active %}disabled{% endif %}>{{ session.instruction_prompt }}</textarea>
           </div>
 

@@ -39,6 +39,7 @@
     <thead>
       <tr>
         <th>Name</th>
+        <th>Tool</th>
         <th>Mode</th>
 
         <th>Status</th>
@@ -53,6 +54,9 @@
         <td>
           <a href="/workspaces/{{ ws.id }}/sessions/{{ s.id }}"
              class="fw-semibold text-decoration-none">{{ s.name }}</a>
+        </td>
+        <td>
+          <span class="badge bg-dark">{{ s.agent_tool | capitalize }}</span>
         </td>
         <td>
           <span class="badge bg-{{ 'info' if s.mode == 'server' else ('primary' if s.mode == 'tui' else 'secondary') }}">
