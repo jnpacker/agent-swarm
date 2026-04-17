@@ -4,9 +4,19 @@ All functions use the official kubernetes-client Python library.
 """
 import base64
 import logging
-import re
 
 log = logging.getLogger(__name__)
+
+
+def effective_namespace(workspace_namespace: str) -> str:
+    """Return the K8s namespace to use for a workspace.
+
+    When ``settings.k8s_namespace`` is set, all workspaces share that
+    single namespace (useful in ephemeral/shared clusters).  Otherwise
+    the workspace's own derived namespace is used.
+    """
+    from swarmer.config import settings
+    return settings.k8s_namespace or workspace_namespace
 
 
 def _b64(value: str) -> str:
@@ -73,63 +83,34 @@ def get_namespace_status(namespace: str) -> str:
 
 # ---------- ConfigMap helpers ----------
 
-def _build_opencode_config(secret=None) -> str:
-    """Return opencode.json content tailored to the available credentials.
-
-    Model priority:
-      1. Vertex AI ADC present  → Claude Sonnet 4.6 (best capability)
-      2. Google API key present → Gemini 2.5 Flash  (fast, no ADC needed)
-      3. Neither               → no default model   (opencode will prompt)
-    """
-    import json
-
-    if secret and secret.has_adc:
-        model = "google-vertex-anthropic/claude-sonnet-4-6@default"
-    elif secret and secret.google_api_key_enc:
-        model = "google/gemini-2.5-flash"
-    else:
-        model = None
-
-    config: dict = {
-        "$schema": "https://opencode.ai/config.json",
-        "disabled_providers": ["opencode"],
-        "server": {
-            "hostname": "0.0.0.0",
-            "port": 4096,
-        },
-    }
-    if model:
-        config["model"] = model
-
-    return json.dumps(config, indent=2)
-
-
-def apply_opencode_config(namespace: str, secret=None) -> None:
-    """Create or update the opencode ConfigMap in the given namespace.
-
-    Pass the workspace's OpencodeSecret so the correct default model is set.
-    When called without a secret (e.g. at workspace creation), no model default
-    is written and opencode will fall back to its own picker.
-    """
+def apply_agent_config(
+    namespace: str, secret=None, agent_tool: str = "opencode"
+) -> None:
+    """Create or update the agent tool's ConfigMap in the given namespace."""
     from kubernetes import client
+    from swarmer.agent_tools.registry import get as get_tool
+
+    tool = get_tool(agent_tool)
+    cm_name = tool.get_config_map_name()
+    data = tool.build_config_data(secret)
 
     v1 = client.CoreV1Api()
     body = client.V1ConfigMap(
-        metadata=client.V1ObjectMeta(name="opencode-config", namespace=namespace),
-        data={
-            "opencode.json": _build_opencode_config(secret),
-            # Mounted at /etc/gitconfig in session pods so git trusts directories
-            # owned by root when opencode runs as a non-root user (e.g. node).
-            "gitconfig": "[safe]\n\tdirectory = *\n",
-        },
+        metadata=client.V1ObjectMeta(name=cm_name, namespace=namespace),
+        data=data,
     )
     try:
-        v1.replace_namespaced_config_map("opencode-config", namespace, body)
+        v1.replace_namespaced_config_map(cm_name, namespace, body)
     except client.exceptions.ApiException as exc:
         if exc.status == 404:
             v1.create_namespaced_config_map(namespace, body)
         else:
             raise
+
+
+def apply_opencode_config(namespace: str, secret=None) -> None:
+    """Backward-compat wrapper — delegates to apply_agent_config."""
+    apply_agent_config(namespace, secret=secret, agent_tool="opencode")
 
 
 # ---------- Secret helpers ----------
@@ -164,18 +145,31 @@ def _delete_secret(namespace: str, name: str) -> None:
             raise
 
 
+def apply_agent_secret(
+    namespace: str, secret, agent_tool: str = "opencode"
+) -> None:
+    """Sync the agent tool's K8s Secret from the DB model."""
+    from swarmer.agent_tools.registry import get as get_tool
+
+    tool = get_tool(agent_tool)
+    data = tool.build_k8s_secret_data(secret)
+    if data:
+        _apply_secret(namespace, tool.get_secret_name(), data)
+
+
+def sync_all_agent_secrets(namespace: str, secret) -> None:
+    """Sync K8s Secrets for every registered agent tool."""
+    from swarmer.agent_tools.registry import all_tools
+
+    for tool in all_tools():
+        data = tool.build_k8s_secret_data(secret)
+        if data:
+            _apply_secret(namespace, tool.get_secret_name(), data)
+
+
 def apply_opencode_secret(namespace: str, secret) -> None:
-    """Sync opencode-secret K8s Secret from the DB model."""
-    data = {
-        "GOOGLE_CLOUD_PROJECT": _b64(secret.google_cloud_project),
-        "VERTEX_LOCATION": _b64(secret.vertex_location),
-        "GOOGLE_API_KEY": _b64(secret.google_api_key),
-    }
-    if secret.has_adc:
-        data["application_default_credentials.json"] = _b64(
-            secret.application_default_credentials
-        )
-    _apply_secret(namespace, "opencode-secret", data)
+    """Backward-compat wrapper — delegates to apply_agent_secret."""
+    apply_agent_secret(namespace, secret, agent_tool="opencode")
 
 
 def apply_github_pat_secret(namespace: str, pat) -> None:
@@ -426,34 +420,19 @@ async def check_image_reachable(image: str, namespace: str) -> bool:
     return False
 
 
-def exec_model_json(pod_name: str, namespace: str, model: str) -> None:
-    """Write opencode model.json into a running pod via kubectl exec."""
-    import json
-    import shlex
-    from kubernetes import client
-    from kubernetes.stream import stream
+def exec_model_update(
+    pod_name: str, namespace: str, model: str, agent_tool: str = "opencode"
+) -> None:
+    """Update model selection on a running pod via the tool's strategy."""
+    from swarmer.agent_tools.registry import get as get_tool
 
-    if "/" not in model:
-        return
-    provider_id, model_id = model.split("/", 1)
-    model_data = {
-        "recent": [{"providerID": provider_id, "modelID": model_id}],
-        "favorite": [],
-        "variant": {f"{provider_id}/{model_id}": "default"},
-    }
-    model_json = json.dumps(model_data)
-    cmd = [
-        "sh", "-c",
-        "mkdir -p /root/.local/state/opencode && "
-        f"printf '%s' {shlex.quote(model_json)} > /root/.local/state/opencode/model.json",
-    ]
-    v1 = client.CoreV1Api()
-    stream(
-        v1.connect_get_namespaced_pod_exec,
-        pod_name, namespace,
-        command=cmd,
-        stderr=True, stdin=False, stdout=True, tty=False,
-    )
+    tool = get_tool(agent_tool)
+    tool.exec_model_update(pod_name, namespace, model)
+
+
+def exec_model_json(pod_name: str, namespace: str, model: str) -> None:
+    """Backward-compat wrapper — delegates to exec_model_update."""
+    exec_model_update(pod_name, namespace, model, agent_tool="opencode")
 
 
 def delete_service(service_name: str, namespace: str) -> None:
