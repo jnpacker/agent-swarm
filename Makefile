@@ -28,6 +28,9 @@ KIND_CLUSTER ?= swarmer
 # Auth hash file (written by setup-auth)
 AUTH_HASH_FILE ?= auth/password.hash
 
+# agent-containers build defaults (registry + image tag shared with sibling repo)
+AC_DEFAULTS ?= ../agent-containers/.push-defaults
+
 # ──────────────────────────────────────────────────────────────
 #  Phony targets
 # ──────────────────────────────────────────────────────────────
@@ -35,11 +38,21 @@ AUTH_HASH_FILE ?= auth/password.hash
         image-build image-push image-build-crush \
         k8s-deploy k8s-auth-secret k8s-delete k8s-connect \
         kind-create kind-load kind-load-opencode kind-load-crush kind-deploy kind-delete kind-connect \
-        help
+        sync-images help
 
 # ──────────────────────────────────────────────────────────────
 #  Developer tooling
 # ──────────────────────────────────────────────────────────────
+
+sync-images:  ## Sync AGENT_IMAGE / AGENT_IMAGE_OPENCODE / AGENT_IMAGE_PYTHON in .env from ../agent-containers/.push-defaults
+	@test -f $(AC_DEFAULTS) || (echo "$(AC_DEFAULTS) not found — run 'make publish' in ../agent-containers first" && exit 1)
+	$(eval AC_REGISTRY := $(shell grep '^REGISTRY=' $(AC_DEFAULTS) | cut -d= -f2-))
+	$(eval AC_TAG      := $(shell grep '^IMAGE_TAG=' $(AC_DEFAULTS) | cut -d= -f2-))
+	@echo "Syncing agent images → $(AC_REGISTRY)/opencode-{golang,python}:$(AC_TAG)"
+	@sed -i "s|^AGENT_IMAGE=.*|AGENT_IMAGE=$(AC_REGISTRY)/opencode-golang:$(AC_TAG)|" .env
+	@sed -i "s|^AGENT_IMAGE_OPENCODE=.*|AGENT_IMAGE_OPENCODE=$(AC_REGISTRY)/opencode-golang:$(AC_TAG)|" .env
+	@sed -i "s|^AGENT_IMAGE_PYTHON=.*|AGENT_IMAGE_PYTHON=$(AC_REGISTRY)/opencode-python:$(AC_TAG)|" .env
+	@echo "Updated .env"
 
 setup-auth:  ## Prompt for a password and write argon2 hash to auth/password.hash
 	@python3 scripts/setup_auth.py
@@ -65,7 +78,7 @@ db-reset:  ## Delete the SQLite database (forces fresh schema on next start)
 #  Container image
 # ──────────────────────────────────────────────────────────────
 
-image-build:  ## Build the swarmer container image  (IMAGE, IMAGE_TAG, REGISTRY)
+image-build: sync-images  ## Build the swarmer container image  (IMAGE, IMAGE_TAG, REGISTRY)
 	$(CONTAINER_CMD) build -f Containerfile -t $(IMAGE_REF) .
 	@echo "Built: $(IMAGE_REF)"
 

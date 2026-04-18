@@ -5,7 +5,7 @@
 ## Context
 Adding the first git repository to a newly created session returned HTTP 500. The page never refreshed to show the new entry. The server log showed:
 
-```
+```text
 sqlalchemy.exc.MissingGreenlet: greenlet_spawn has not been called; can't call await_only() here.
 ```
 

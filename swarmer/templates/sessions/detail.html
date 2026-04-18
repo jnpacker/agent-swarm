@@ -6,25 +6,6 @@
 <link rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
 {% endif %}
-<style>
-  /* Save button: amber when the form has unsaved changes */
-  .btn-save-dirty {
-    --bs-btn-color: #000;
-    --bs-btn-bg: #d97706;
-    --bs-btn-border-color: #d97706;
-    --bs-btn-hover-bg: #b45309;
-    --bs-btn-hover-border-color: #b45309;
-    --bs-btn-active-bg: #92400e;
-    --bs-btn-active-border-color: #92400e;
-    color: var(--bs-btn-color);
-    background-color: var(--bs-btn-bg);
-    border-color: var(--bs-btn-border-color);
-  }
-  .btn-save-dirty:hover {
-    background-color: var(--bs-btn-hover-bg);
-    border-color: var(--bs-btn-hover-border-color);
-  }
-</style>
 {% endblock %}
 
 {% block content %}
@@ -69,16 +50,6 @@
   {% include "sessions/_status_badge.html" %}
 
   <div class="d-flex gap-2 ms-2" id="session-actions">
-    {% if session.is_active %}
-    <form method="post" action="/workspaces/{{ ws.id }}/sessions/{{ session.id }}/stop">
-      <button type="submit" class="btn btn-warning btn-sm" id="stop-btn">■ Stop</button>
-    </form>
-    {% else %}
-    <form method="post" action="/workspaces/{{ ws.id }}/sessions/{{ session.id }}/launch">
-      <button type="submit" class="btn btn-success btn-sm">▶ Launch</button>
-    </form>
-    {% endif %}
-
     {% if session.mode == 'server' %}
     <a href="/workspaces/{{ ws.id }}/sessions/{{ session.id }}/chat"
        target="_blank" rel="noopener"
@@ -108,25 +79,38 @@
       <div class="card-header fw-semibold">Configuration</div>
       <div class="card-body">
 
-        {# All settings in one Save form #}
+        {# Launch / Stop buttons — must live OUTSIDE cfg-edit-form to avoid nested-form parsing bugs #}
+        <div class="mb-3">
+          <div class="d-flex gap-2 flex-wrap align-items-center">
+            <div id="launch-stop"
+                 {% if not session.is_active %}style="display:none"{% endif %}>
+              <form method="post"
+                    action="/workspaces/{{ ws.id }}/sessions/{{ session.id }}/stop">
+                <button type="submit" id="launch-stop-btn"
+                        class="btn btn-warning btn-sm">&#9632; Stop</button>
+              </form>
+            </div>
+            {% for tool in agent_tools %}
+            <form method="post"
+                  action="/workspaces/{{ ws.id }}/sessions/{{ session.id }}/launch">
+              <input type="hidden" name="agent_tool" value="{{ tool.name }}">
+              <button type="submit"
+                      class="btn btn-sm launch-tool-btn {% if session.is_active %}btn-outline-secondary{% elif tool_image_available[tool.name] %}btn-success{% else %}btn-outline-secondary{% endif %}"
+                      data-available="{{ 'true' if tool_image_available[tool.name] else 'false' }}"
+                      {% if session.is_active or not tool_image_available[tool.name] %}disabled{% endif %}>
+                ▶ {{ tool.display_name }}
+              </button>
+            </form>
+            {% endfor %}
+          </div>
+        </div>
+
+        {# Configuration form — no nested forms so all fields are correctly owned by this form #}
         <form method="post" id="cfg-edit-form"
               action="/workspaces/{{ ws.id }}/sessions/{{ session.id }}/edit">
           <input type="hidden" name="name" value="{{ session.name }}">
-
-          <div class="row align-items-center mb-3">
-            <label class="col-5 text-muted small col-form-label-sm">Agent Tool</label>
-            <div class="col-7">
-              <select name="agent_tool" class="form-select form-select-sm"
-                      {% if session.is_active %}disabled title="Stop session to change tool"{% endif %}>
-                {% for tool in agent_tools %}
-                <option value="{{ tool.name }}"
-                        {{ 'selected' if session.agent_tool == tool.name }}>
-                  {{ tool.display_name }}
-                </option>
-                {% endfor %}
-              </select>
-            </div>
-          </div>
+          <input type="hidden" name="agent_tool" value="{{ session.agent_tool }}" id="cfg_agent_tool">
+          <input type="hidden" name="save_config" value="1">
 
           <div class="row align-items-center mb-3">
             <label class="col-5 text-muted small col-form-label-sm">Mode</label>
@@ -137,25 +121,6 @@
                 <option value="server" {{ 'selected' if session.mode == 'server' }}>Server</option>
                 <option value="tui"    {{ 'selected' if session.mode == 'tui' }}>TUI</option>
               </select>
-            </div>
-          </div>
-
-          <div class="row align-items-center mb-3">
-            <label class="col-5 text-muted small col-form-label-sm">Agent Image</label>
-            <div class="col-7">
-              <select name="language" class="form-select form-select-sm"
-                      {% if session.is_active %}disabled title="Stop session to change image"{% endif %}>
-                {% for lang in language_options %}
-                <option value="{{ lang }}" {{ 'selected' if session.language == lang }}>opencode-{{ lang }}</option>
-                {% endfor %}
-              </select>
-              <div class="form-text">
-                {% for lang in language_options %}
-                <span class="me-2 text-{{ 'success' if image_status[lang] else 'danger' }}">
-                  {{ '✓' if image_status[lang] else '✗' }} {{ lang }}
-                </span>
-                {% endfor %}
-              </div>
             </div>
           </div>
 
@@ -215,8 +180,8 @@
             </div>
           </div>
 
-          {% if session.mode == 'prompt' %}
-          <div class="mb-3">
+          <div class="mb-3" id="cfg-instruction-section"
+               {% if session.mode != 'prompt' %}style="display:none"{% endif %}>
             <label class="text-muted small form-label">Instruction Prompt</label>
             <textarea class="form-control form-control-sm" name="instruction_prompt"
                       rows="3" placeholder="Describe the task for the agent to run…"
@@ -247,44 +212,15 @@
           <input type="hidden" name="model" value="{{ session.model }}">
           {% endif %}
 
-          {% else %}
-          <input type="hidden" name="instruction_prompt" value="{{ session.instruction_prompt }}">
-
-          {% if model_options %}
-          <div class="mb-3">
-            <label class="text-muted small form-label">Model</label>
-            <select class="form-select form-select-sm" name="model"
-                    {% if session.is_active %}disabled{% endif %}>
-              {% set ns = namespace(prev_group="") %}
-              {% for opt in model_options %}
-                {% if opt.group != ns.prev_group %}
-                  {% if ns.prev_group %}</optgroup>{% endif %}
-                  <optgroup label="{{ opt.group }}">
-                  {% set ns.prev_group = opt.group %}
-                {% endif %}
-                <option value="{{ opt.value }}"
-                        {{ 'selected' if session.model == opt.value or (loop.first and not session.model) }}>
-                  {{ opt.label }}
-                </option>
-              {% endfor %}
-              {% if ns.prev_group %}</optgroup>{% endif %}
-            </select>
-          </div>
-          {% else %}
-          <input type="hidden" name="model" value="{{ session.model }}">
-          {% endif %}
-
-          {% endif %}
-
           <div class="text-muted small mb-3">
             PVC: <code class="font-monospace">{{ session.pvc_name or '—' }}</code>
           </div>
 
-          {% if not session.is_active %}
-          <button type="submit" class="btn btn-sm btn-outline-secondary" id="cfg-save-btn">Save</button>
-          {% else %}
-          <p class="text-muted small mb-0">Stop the session to edit settings.</p>
-          {% endif %}
+          <p class="text-muted small mb-0{% if not session.is_active %} d-none{% endif %}"
+             id="cfg-stop-msg">Stop the session to edit settings.</p>
+          <div id="cfg-save-indicator"
+               class="text-muted small{% if session.is_active %} d-none{% endif %}"
+               style="min-height:1.25em"></div>
         </form>
 
       </div>
@@ -302,12 +238,12 @@
 
   </div>{# /col-md-5 #}
 
-  {# Right column: last output (prompt) or git repos (server/TUI) #}
-  <div class="col-md-7">
+  {# Right column: last output (prompt, scrollable) or git repos (server/TUI) #}
+  <div class="col-md-7 d-flex flex-column">
 
     {% if session.mode == 'prompt' %}
-    <div class="card mb-3">
-      <div class="card-header fw-semibold d-flex justify-content-between align-items-center">
+    <div class="card d-flex flex-column flex-grow-1" style="min-height:0">
+      <div class="card-header fw-semibold d-flex justify-content-between align-items-center flex-shrink-0">
         <span>Last Output</span>
         {% if session.last_output %}
         <form method="post"
@@ -317,7 +253,7 @@
         </form>
         {% endif %}
       </div>
-      <div class="card-body p-0">
+      <div class="card-body p-0 flex-grow-1 overflow-auto">
         {% include "sessions/_last_output.html" with context %}
       </div>
     </div>
@@ -358,7 +294,7 @@
 </div>
 {% endif %}
 
-{# ── TUI mode: full-width terminal, then collapsed last output ── #}
+{# ── TUI mode: full-width terminal below the two-column row ── #}
 {% if session.mode == 'tui' %}
 <div class="row mt-3">
   <div class="col-12">
@@ -384,69 +320,95 @@
     {% endif %}
   </div>
 </div>
-
-<div class="row mt-3">
-  <div class="col-12">
-    <div class="card">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <button class="btn btn-link p-0 fw-semibold text-decoration-none text-reset"
-                type="button"
-                data-bs-toggle="collapse"
-                data-bs-target="#tui-last-output"
-                aria-expanded="false"
-                aria-controls="tui-last-output">
-          Last Output <span class="text-muted small ms-1">▾</span>
-        </button>
-        {% if session.last_output %}
-        <form method="post"
-              action="/workspaces/{{ ws.id }}/sessions/{{ session.id }}/clear-output">
-          <button type="submit" class="btn btn-link btn-sm text-muted p-0"
-                  title="Clear output">Clear</button>
-        </form>
-        {% endif %}
-      </div>
-      <div class="collapse" id="tui-last-output">
-        <div class="card-body p-0">
-          {% include "sessions/_last_output.html" with context %}
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
 {% endif %}
 
 {% endblock %}
 
 {% block scripts %}
 <script>
-// ── Save-button dirty state ──────────────────────────────────────────────────
+// ── Auto-save configuration fields ───────────────────────────────────────────
 (function () {
   const form = document.getElementById('cfg-edit-form');
-  const btn  = document.getElementById('cfg-save-btn');
-  if (!form || !btn) return;
+  if (!form) return;
+  const indicator = document.getElementById('cfg-save-indicator');
 
-  // Snapshot every editable field's initial value.
-  const fields = () => form.querySelectorAll(
-    'input:not([type=hidden]), select, textarea'
-  );
-  const snapshot = {};
-  fields().forEach(el => {
-    snapshot[el.id || el.name] = el.type === 'checkbox' ? el.checked : el.value;
-  });
+  let savePromise = Promise.resolve();
+  let saving = false;
+  let pendingTextareaChange = false;
 
-  function checkDirty() {
-    let dirty = false;
-    fields().forEach(el => {
-      const key = el.id || el.name;
-      const val = el.type === 'checkbox' ? el.checked : el.value;
-      if (val !== snapshot[key]) dirty = true;
-    });
-    btn.classList.toggle('btn-outline-secondary', !dirty);
-    btn.classList.toggle('btn-save-dirty', dirty);
+  function showStatus(msg, cls) {
+    if (!indicator || indicator.classList.contains('d-none')) return;
+    indicator.textContent = msg;
+    indicator.className = cls + ' small';
   }
 
-  form.addEventListener('change', checkDirty);
-  form.addEventListener('input',  checkDirty);
+  // Returns a promise that resolves when the save completes.
+  // If a save is already in-flight, returns that same promise (no double-post).
+  function doSave() {
+    if (saving) return savePromise;
+    saving = true;
+    showStatus('Saving…', 'text-muted');
+    const data = new FormData(form);
+    savePromise = fetch(form.action, { method: 'POST', body: data, redirect: 'manual' })
+      .then(() => {
+        showStatus('Saved', 'text-success');
+        setTimeout(() => { if (indicator && indicator.textContent === 'Saved') indicator.textContent = ''; }, 2000);
+      })
+      .catch(() => showStatus('Save failed', 'text-danger'))
+      .finally(() => { saving = false; });
+    return savePromise;
+  }
+
+  // Mode select: toggle instruction-prompt visibility immediately, then submit
+  // so the browser follows the redirect and re-renders the correct layout.
+  const modeSelect = form.querySelector('select[name=mode]');
+  if (modeSelect) {
+    modeSelect.addEventListener('change', () => {
+      const section = document.getElementById('cfg-instruction-section');
+      if (section) section.style.display = modeSelect.value === 'prompt' ? '' : 'none';
+      form.submit();
+    });
+  }
+
+  // All other selects and checkboxes: save immediately on change.
+  form.querySelectorAll('select:not([name=mode]), input[type=checkbox]').forEach(el => {
+    el.addEventListener('change', doSave);
+  });
+
+  // Textarea: track edits and save on blur.
+  form.querySelectorAll('textarea').forEach(el => {
+    el.addEventListener('input', () => { pendingTextareaChange = true; });
+    el.addEventListener('blur', async () => {
+      if (!pendingTextareaChange) return;
+      pendingTextareaChange = false;
+      await doSave();
+    });
+  });
+
+  // Submit all config fields together with the launch request so settings
+  // are saved atomically — no separate fetch that could be lost on navigation.
+  document.querySelectorAll('.launch-tool-btn').forEach(btn => {
+    btn.closest('form').addEventListener('submit', function (e) {
+      e.preventDefault();
+      const launchForm = this;
+      const agentTool = launchForm.querySelector('input[name=agent_tool]').value;
+      const data = new FormData(form);
+      data.set('agent_tool', agentTool);
+      const tempForm = document.createElement('form');
+      tempForm.method = 'POST';
+      tempForm.action = launchForm.action;
+      tempForm.style.display = 'none';
+      for (const [key, value] of data.entries()) {
+        const input = document.createElement('input');
+        input.type = 'hidden';
+        input.name = key;
+        input.value = value;
+        tempForm.appendChild(input);
+      }
+      document.body.appendChild(tempForm);
+      tempForm.submit();
+    });
+  });
 })();
 
 function syncResume() {
@@ -478,6 +440,18 @@ document.addEventListener('htmx:afterSwap', function () {
   const isRunning = badge && badge.classList.contains('bg-success');
   const isActive  = isRunning || (badge && badge.classList.contains('bg-warning'));
 
+  // ── Config form: enable/disable fields and swap stop-message ↔ indicator ──
+  const cfgForm = document.getElementById('cfg-edit-form');
+  if (cfgForm) {
+    cfgForm.querySelectorAll('select, input[type=checkbox], textarea').forEach(el => {
+      el.disabled = isActive;
+    });
+  }
+  const stopMsg = document.getElementById('cfg-stop-msg');
+  if (stopMsg) stopMsg.classList.toggle('d-none', !isActive);
+  const saveInd = document.getElementById('cfg-save-indicator');
+  if (saveInd) saveInd.classList.toggle('d-none', isActive);
+
   // ── Rename controls: hide when session becomes active ──
   if (isActive) {
     const renameForm = document.getElementById('rename-form');
@@ -490,6 +464,23 @@ document.addEventListener('htmx:afterSwap', function () {
       if (renameBtn) renameBtn.style.display = 'none';
     }
   }
+
+  // ── Launch row: show/hide stop, dim/restore tool buttons ──
+  const isSucceeded = badge && badge.classList.contains('bg-primary');
+  const launchStop = document.getElementById('launch-stop');
+  if (launchStop) launchStop.style.display = (isActive || isSucceeded) ? '' : 'none';
+
+  document.querySelectorAll('.launch-tool-btn').forEach(btn => {
+    const avail = btn.dataset.available === 'true';
+    btn.disabled = isActive || isSucceeded || !avail;
+    if (isActive || isSucceeded) {
+      btn.classList.remove('btn-success', 'btn-secondary');
+      btn.classList.add('btn-outline-secondary');
+    } else {
+      btn.classList.remove('btn-outline-secondary');
+      btn.classList.add(avail ? 'btn-success' : 'btn-secondary');
+    }
+  });
 
   {% if session.mode == 'tui' %}
   // ── TUI: reload once when pod transitions to running so the terminal
@@ -507,12 +498,16 @@ document.addEventListener('htmx:afterSwap', function () {
 
   {% if session.mode == 'prompt' %}
   // ── Prompt: relabel Stop → Clean up once the session succeeds ──
-  const isSucceeded = badge && badge.classList.contains('bg-primary');
-  if (isSucceeded) {
-    const stopBtn = document.getElementById('stop-btn');
-    if (stopBtn) {
-      stopBtn.textContent = '↺ Clean up';
-      stopBtn.classList.replace('btn-warning', 'btn-outline-secondary');
+  const launchStopBtn = document.getElementById('launch-stop-btn');
+  if (launchStopBtn) {
+    if (isSucceeded) {
+      launchStopBtn.textContent = '↺ Clean up';
+      launchStopBtn.classList.remove('btn-warning');
+      launchStopBtn.classList.add('btn-outline-secondary');
+    } else {
+      launchStopBtn.textContent = '■ Stop';
+      launchStopBtn.classList.add('btn-warning');
+      launchStopBtn.classList.remove('btn-outline-secondary');
     }
   }
   {% endif %}
