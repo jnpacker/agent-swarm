@@ -23,20 +23,6 @@ from swarmer.models.session import Session
 from swarmer.models.session_repo import SessionRepo
 from swarmer.models.workspace import Workspace
 
-# Model options offered in Prompt mode.
-# Each entry: (value_passed_to_opencode_run, display_label, requires)
-# requires: "gemini" | "claude"
-_GEMINI_MODELS = [
-    ("google/gemini-2.5-flash",  "Gemini 2.5 Flash (fast)"),
-    ("google/gemini-2.5-pro",    "Gemini 2.5 Pro"),
-]
-_CLAUDE_MODELS = [
-    ("google-vertex-anthropic/claude-haiku-4-5@20251001",  "Claude Haiku 4.5 (fast)"),
-    ("google-vertex-anthropic/claude-sonnet-4-6@default",  "Claude Sonnet 4.6 (balanced)"),
-    ("google-vertex-anthropic/claude-opus-4-6@default",    "Claude Opus 4.6 (most capable)"),
-]
-
-
 async def _get_model_options(
     ws_id: int, db: AsyncSession, agent_tool: str = "opencode"
 ) -> list[dict]:
@@ -307,6 +293,13 @@ async def session_detail(
             "model_options": model_options,
             "repo_info": repo_info,
             "agent_tools": all_tools(),
+            "tool_image_available": dict(zip(
+                [t.name for t in all_tools()],
+                await asyncio.gather(*[
+                    k8s.get_image_available(t.get_image(), k8s.effective_namespace(ws.k8s_namespace))
+                    for t in all_tools()
+                ]),
+            )),
         },
     )
 
@@ -373,6 +366,16 @@ async def session_launch(
     ws_id: int,
     sid: int,
     request: Request,
+    agent_tool: str = Form(""),
+    save_config: str = Form(""),
+    name: str = Form(""),
+    github_pat_id: str = Form(""),
+    instruction_prompt: str = Form(""),
+    persist: bool = Form(False),
+    resume: bool = Form(False),
+    privileged: bool = Form(False),
+    mode: str = Form(""),
+    model: str = Form(""),
     db: AsyncSession = Depends(get_db),
 ):
     ws = await _get_workspace(ws_id, db)
@@ -386,6 +389,27 @@ async def session_launch(
 
     if session.is_active:
         return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}", status_code=302)
+
+    if save_config:
+        if name.strip():
+            session.name = name.strip()
+        session.github_pat_id = int(github_pat_id) if github_pat_id else None
+        session.instruction_prompt = instruction_prompt.strip()
+        session.persist = persist
+        session.resume = resume
+        session.privileged = privileged
+        if mode in ("tui", "server", "prompt"):
+            session.mode = mode
+        session.model = model.strip()
+
+    if agent_tool:
+        try:
+            get_tool(agent_tool)
+            if agent_tool != session.agent_tool:
+                session.agent_tool = agent_tool
+                session.model = ""  # stale model from previous tool may be incompatible
+        except ValueError:
+            pass
 
     # Generate a shared suffix so the pod and PVC share the same identifier
     import secrets as _secrets

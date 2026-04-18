@@ -61,6 +61,14 @@ class AgentToolStrategy(ABC):
     def get_server_mode_ports(self) -> list:
         ...
 
+    def get_tui_binary(self) -> str:
+        """Return the binary name to exec in TUI mode. Defaults to tool name."""
+        return self.name
+
+    def is_valid_model(self, model: str) -> bool:
+        """Return True if *model* is a valid/compatible model string for this tool."""
+        return True
+
     @abstractmethod
     def get_model_options(self, secret=None) -> list[dict]:
         ...

@@ -2,10 +2,27 @@
 Kubernetes utility functions used across the dashboard.
 All functions use the official kubernetes-client Python library.
 """
+import asyncio
 import base64
 import logging
+import time
 
 log = logging.getLogger(__name__)
+
+_image_cache: dict[tuple[str, str], tuple[bool, float]] = {}
+_IMAGE_CACHE_TTL = 300  # seconds
+
+
+async def get_image_available(image: str, namespace: str) -> bool:
+    if not image:
+        return False
+    key = (image, namespace)
+    cached = _image_cache.get(key)
+    if cached is not None and time.monotonic() - cached[1] < _IMAGE_CACHE_TTL:
+        return cached[0]
+    result = await check_image_reachable(image, namespace)
+    _image_cache[key] = (result, time.monotonic())
+    return result
 
 
 def effective_namespace(workspace_namespace: str) -> str:
@@ -375,13 +392,9 @@ async def check_image_reachable(image: str, namespace: str) -> bool:
         "application/vnd.oci.image.index.v1+json,"
         "*/*"
     )
-    headers: dict[str, str] = {"Accept": accept}
-    if auth_b64:
-        headers["Authorization"] = f"Basic {auth_b64}"
-
     try:
         async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as http:
-            r = await http.get(url, headers=headers)
+            r = await http.get(url, headers={"Accept": accept})
             log.debug("check_image_reachable: GET %s → %s", url, r.status_code)
             if r.status_code == 200:
                 return True
@@ -407,13 +420,17 @@ async def check_image_reachable(image: str, namespace: str) -> bool:
                             decoded = base64.b64decode(auth_b64).decode()
                             user, _, pwd = decoded.partition(":")
                             creds = (user, pwd)
-                        tr = await http.get(realm, params=token_params, auth=creds)
-                        log.debug("check_image_reachable: token fetch → %s", tr.status_code)
-                        if tr.status_code == 200:
-                            token = tr.json().get("token") or tr.json().get("access_token", "")
-                            mr = await http.get(url, headers={"Authorization": f"Bearer {token}"})
-                            log.debug("check_image_reachable: manifest (bearer) → %s", mr.status_code)
-                            return mr.status_code == 200
+                        for attempt_creds in ([creds, None] if creds else [None]):
+                            tr = await http.get(realm, params=token_params, auth=attempt_creds)
+                            log.debug("check_image_reachable: token fetch (creds=%s) → %s",
+                                      attempt_creds is not None, tr.status_code)
+                            if tr.status_code == 200:
+                                token = tr.json().get("token") or tr.json().get("access_token", "")
+                                mr = await http.get(url, headers={"Authorization": f"Bearer {token}", "Accept": accept})
+                                log.debug("check_image_reachable: manifest (bearer) → %s", mr.status_code)
+                                if mr.status_code == 200:
+                                    return True
+                                break
             log.warning("check_image_reachable: unhandled response %s for %s", r.status_code, url)
     except Exception as exc:
         log.warning("check_image_reachable: HTTP error for %s: %s", url, exc)

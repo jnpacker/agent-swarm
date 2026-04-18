@@ -18,22 +18,15 @@ class OpenCodeStrategy(AgentToolStrategy):
 
     @property
     def display_name(self) -> str:
-        return "OpenCode"
+        return "OpenCode (Golang)"
 
     def get_image(self) -> str:
-        return settings.agent_image
+        return settings.agent_image_opencode
 
     def get_config_map_name(self) -> str:
         return "opencode-config"
 
     def build_config_data(self, secret=None) -> dict[str, str]:
-        if secret and getattr(secret, "has_adc", False):
-            model = "google-vertex-anthropic/claude-sonnet-4-6@default"
-        elif secret and getattr(secret, "google_api_key_enc", ""):
-            model = "google/gemini-2.5-flash"
-        else:
-            model = None
-
         config: dict = {
             "$schema": "https://opencode.ai/config.json",
             "disabled_providers": ["opencode"],
@@ -42,8 +35,6 @@ class OpenCodeStrategy(AgentToolStrategy):
                 "port": 4096,
             },
         }
-        if model:
-            config["model"] = model
 
         return {
             "opencode.json": json.dumps(config, indent=2),
@@ -51,12 +42,15 @@ class OpenCodeStrategy(AgentToolStrategy):
         }
 
     def get_config_mount_path(self) -> str:
-        return "/workspace/.config/opencode"
+        return "/root/.config/opencode"
 
     def get_secret_name(self) -> str:
         return "opencode-secret"
 
     def get_container_name(self) -> str:
+        return "opencode"
+
+    def get_tui_binary(self) -> str:
         return "opencode"
 
     def get_server_port(self) -> int | None:
@@ -70,6 +64,10 @@ class OpenCodeStrategy(AgentToolStrategy):
             "mkdir -p /workspace/.opencode $HOME/.local/share && "
             "rm -rf $HOME/.local/share/opencode && "
             "ln -sf /workspace/.opencode $HOME/.local/share/opencode && "
+            "find /workspace/.opencode -name '*.db-wal' -o -name '*.db-shm' | xargs rm -f 2>/dev/null; "
+            "[ -n \"$GOOGLE_API_KEY\" ] && "
+            "printf '{\"google\":{\"type\":\"api\",\"key\":\"%s\"}}' \"$GOOGLE_API_KEY\" "
+            "> /workspace/.opencode/auth.json; "
         )
 
     def build_model_setup_cmd(self, model: str) -> str:
@@ -110,10 +108,13 @@ class OpenCodeStrategy(AgentToolStrategy):
         from kubernetes import client
         return [client.V1ContainerPort(container_port=4096, name="opencode")]
 
+    def is_valid_model(self, model: str) -> bool:
+        return model.startswith("google-vertex-anthropic/") or model.startswith("google/")
+
     def get_model_options(self, secret=None) -> list[dict]:
         _GEMINI_MODELS = [
-            ("google/gemini-2.5-flash", "Gemini 2.5 Flash (fast)"),
-            ("google/gemini-2.5-pro", "Gemini 2.5 Pro"),
+            ("google/gemini-3-flash-preview", "Gemini 3 Flash (fast)"),
+            ("google/gemini-3-pro-preivew", "Gemini 3 Pro"),
         ]
         _CLAUDE_MODELS = [
             ("google-vertex-anthropic/claude-haiku-4-5@20251001", "Claude Haiku 4.5 (fast)"),
@@ -133,9 +134,9 @@ class OpenCodeStrategy(AgentToolStrategy):
         if has_adc:
             return "google-vertex-anthropic/claude-sonnet-4-6@default"
         elif has_gemini:
-            return "google/gemini-2.5-flash"
+            return "google/gemini-3-flash-preview"
         else:
-            return "google/gemini-2.5-flash"
+            return "google/gemini-3-flash-preview"
 
     def exec_model_update(self, pod_name: str, namespace: str, model: str) -> None:
         if "/" not in model:

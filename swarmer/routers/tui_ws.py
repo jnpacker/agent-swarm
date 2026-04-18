@@ -90,7 +90,9 @@ async def session_tui(
     loop = asyncio.get_running_loop()
 
     try:
-        tui_cmd_parts = [tool.name]
+        tui_cmd_parts = [tool.get_tui_binary()]
+        if session.model:
+            tui_cmd_parts.extend(["--model", session.model])
         if session.resume:
             tui_cmd_parts.append("--continue")
         tui_shell = "export PATH=\"$HOME/.local/bin:$PATH\" && exec " + " ".join(tui_cmd_parts)
