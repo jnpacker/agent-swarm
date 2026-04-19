@@ -84,11 +84,22 @@ def build_session_pod(
 
     # ---------- env ----------
     env = list(tool.get_extra_env(has_adc))
-    env.append(client.V1EnvVar(name="HOME", value="/workspace"))
     if pat:
         env.append(
             client.V1EnvVar(
                 name="GITHUB_PAT",
+                value_from=client.V1EnvVarSource(
+                    secret_key_ref=client.V1SecretKeySelector(
+                        name=pat.k8s_secret_name,
+                        key="GITHUB_PAT",
+                        optional=True,
+                    )
+                ),
+            )
+        )
+        env.append(
+            client.V1EnvVar(
+                name="GH_TOKEN",
                 value_from=client.V1EnvVarSource(
                     secret_key_ref=client.V1SecretKeySelector(
                         name=pat.k8s_secret_name,
@@ -135,7 +146,7 @@ def build_session_pod(
         ),
         client.V1VolumeMount(
             name="agent-config",
-            mount_path=tool.get_config_mount_path(),
+            mount_path=tool.get_config_mount_path() + "-ro",
             read_only=True,
         ),
     ]
@@ -203,7 +214,7 @@ def build_session_pod(
         )
 
     # ---------- resolve model ----------
-    if session.model:
+    if session.model and tool.is_valid_model(session.model):
         model = session.model
     else:
         model = tool.get_default_model(has_adc, has_gemini)
@@ -222,7 +233,20 @@ def build_session_pod(
         restart_policy = "Never"
 
     main_cmd = tool.build_main_cmd(session, model)
-    args = ["sh", "-c", share_setup + model_setup + main_cmd]
+    config_path = tool.get_config_mount_path()
+    config_setup = (
+        f'mkdir -p {config_path} && '
+        f'cp -n {config_path}-ro/* {config_path}/ 2>/dev/null || true && '
+    )
+    git_setup = (
+        'if [ -n "${GITHUB_PAT}" ]; then '
+        'git config --global credential.helper store && '
+        'echo "https://${GITHUB_USERNAME}:${GITHUB_PAT}@github.com" > /root/.git-credentials && '
+        'git config --global user.name "${GITHUB_USERNAME}" && '
+        'git config --global user.email "${GITHUB_USERNAME}@users.noreply.github.com"; '
+        'fi && '
+    )
+    command = ["sh", "-c", config_setup + git_setup + share_setup + model_setup + main_cmd]
 
     # ---------- envFrom ----------
     env_from = tool.get_env_from_sources()
@@ -240,7 +264,7 @@ def build_session_pod(
         image=tool.get_image(),
         image_pull_policy="IfNotPresent",
         working_dir="/workspace",
-        args=args,
+        command=command,
         env=env,
         env_from=env_from,
         volume_mounts=volume_mounts,
@@ -249,8 +273,8 @@ def build_session_pod(
         tty=session.mode == "tui",
         security_context=security_context,
         resources=client.V1ResourceRequirements(
-            requests={"memory": "256Mi", "cpu": "100m"},
-            limits={"memory": "512Mi", "cpu": "200m"},
+            requests={"memory": "1Gi", "cpu": "500m"},
+            limits={"memory": "4Gi", "cpu": "2000m"},
         ),
     )
 
