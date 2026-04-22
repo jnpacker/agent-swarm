@@ -3,6 +3,7 @@
 # ──────────────────────────────────────────────────────────────
 #  Variables (override on the command line or in .env)
 # ──────────────────────────────────────────────────────────────
+-include .env
 
 # Container image settings
 IMAGE        ?= swarmer
@@ -17,13 +18,20 @@ CONTAINER_CMD ?= podman
 # opencode agent image loaded into kind for session pods
 OPENCODE_IMAGE ?= opencode-golang:latest
 
+# Agent tool images (overridable via .env or command line)
+AGENT_IMAGE_OPENCODE ?= quay.io/jpacker/opencode-golang:0.2
+AGENT_IMAGE_PYTHON   ?= quay.io/jpacker/opencode-python:0.2
+AGENT_IMAGE_CRUSH    ?= ghcr.io/gurnben/crush-container:latest
+
 # Crush agent image
 CRUSH_IMAGE   ?= crush:latest
 CRUSH_VERSION ?= 0.1.127
 
 # Kubernetes
-NAMESPACE    ?= swarmer
-KIND_CLUSTER ?= swarmer
+NAMESPACE            ?= swarmer
+KIND_CLUSTER         ?= swarmer
+OPENSHIFT_OAUTH_URL  ?=
+SWARMER_HOST         ?=
 
 # agent-containers build defaults (registry + image tag shared with sibling repo)
 AC_DEFAULTS ?= ../agent-containers/.push-defaults
@@ -35,6 +43,7 @@ AC_DEFAULTS ?= ../agent-containers/.push-defaults
         install dev lint db-reset \
         image-build image-push image-build-crush \
         k8s-deploy k8s-delete k8s-connect \
+        openshift-deploy \
         kind-create kind-load kind-load-opencode kind-load-crush kind-deploy kind-delete kind-connect \
         sync-images help
 
@@ -150,18 +159,98 @@ k8s-deploy:  ## Deploy swarmer to the current kubectl context  (IMAGE_REF, NAMES
 	kubectl apply -f k8s/swarmer/service.yaml
 	# 2. Secret key (create or update from local key file)
 	$(MAKE) k8s-secret NAMESPACE=$(NAMESPACE)
-	# 3. Deployment — substitute SWARMER_IMAGE placeholder then apply
-	sed "s|SWARMER_IMAGE|$(IMAGE_REF)|g" k8s/swarmer/deployment.yaml \
-	  | kubectl apply -f -
+	# 3. Deployment — substitute image + OpenShift OAuth URL placeholders then apply
+	@OAUTH_URL="$(OPENSHIFT_OAUTH_URL)"; \
+	if [ -z "$$OAUTH_URL" ]; then \
+	  DETECTED=$$(kubectl get route oauth-openshift -n openshift-authentication \
+	    -o jsonpath='{.spec.host}' 2>/dev/null); \
+	  if [ -n "$$DETECTED" ]; then \
+	    OAUTH_URL="https://$$DETECTED"; \
+	    echo "Auto-detected OpenShift OAuth URL: $$OAUTH_URL"; \
+	  else \
+	    printf "OPENSHIFT_OAUTH_URL (leave blank for token-paste-only login): "; \
+	    read OAUTH_URL; \
+	  fi; \
+	fi; \
+	sed "s|SWARMER_IMAGE|$(IMAGE_REF)|g; \
+	     s|OPENSHIFT_OAUTH_URL_VALUE|$$OAUTH_URL|g; \
+	     s|REDIRECT_BASE_URL_VALUE||g" \
+	  k8s/swarmer/deployment.yaml | kubectl apply -f -
 	# 4. Wait for rollout
 	kubectl rollout status deployment/swarmer -n $(NAMESPACE) --timeout=120s
 	@echo ""
 	@echo "✓ Swarmer deployed."
-	@echo "  Run 'make k8s-connect' to open the dashboard."
+	@ROUTE=$$(kubectl get route swarmer -n $(NAMESPACE) -o jsonpath='{.spec.host}' 2>/dev/null); \
+	if [ -n "$$ROUTE" ]; then \
+	  echo "  Dashboard → https://$$ROUTE"; \
+	else \
+	  NODE_IP=$$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="ExternalIP")].address}' 2>/dev/null); \
+	  if [ -z "$$NODE_IP" ]; then \
+	    NODE_IP=$$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null); \
+	  fi; \
+	  if [ -n "$$NODE_IP" ]; then \
+	    echo "  Dashboard → http://$$NODE_IP:30080"; \
+	  else \
+	    echo "  Run 'make k8s-connect' to open the dashboard (port-forward to localhost:8080)."; \
+	  fi; \
+	fi
 
 k8s-connect:  ## Port-forward the swarmer dashboard to localhost:8080
 	@echo "Forwarding http://localhost:8080 → swarmer service..."
 	kubectl port-forward -n $(NAMESPACE) service/swarmer 8080:8080
+
+openshift-deploy:  ## Deploy to OpenShift: Route + OAuthClient + app  (SWARMER_HOST=optional)
+	@test -f auth/secret.key || (echo "Run 'make setup-secret' first." && exit 1)
+	@echo "Deploying to OpenShift namespace $(NAMESPACE)..."
+	kubectl apply -f k8s/swarmer/namespace.yaml
+	kubectl apply -f k8s/swarmer/rbac.yaml
+	kubectl apply -f k8s/swarmer/pvc.yaml
+	kubectl apply -f k8s/openshift/service.yaml
+	kubectl apply -f k8s/openshift/route.yaml
+	@if [ -n "$(SWARMER_HOST)" ]; then \
+	  kubectl patch route swarmer -n $(NAMESPACE) --type=merge \
+	    -p "{\"spec\":{\"host\":\"$(SWARMER_HOST)\"}}"; \
+	fi
+	$(MAKE) k8s-secret NAMESPACE=$(NAMESPACE)
+	@echo "Waiting for Route hostname..."
+	@ROUTE_HOST="$(SWARMER_HOST)"; \
+	if [ -z "$$ROUTE_HOST" ]; then \
+	  for i in $$(seq 1 15); do \
+	    ROUTE_HOST=$$(kubectl get route swarmer -n $(NAMESPACE) \
+	      -o jsonpath='{.spec.host}' 2>/dev/null); \
+	    [ -n "$$ROUTE_HOST" ] && break; \
+	    sleep 2; \
+	  done; \
+	fi; \
+	if [ -z "$$ROUTE_HOST" ]; then \
+	  echo "Error: Route hostname not assigned after 30s."; \
+	  echo "       Check: kubectl get route swarmer -n $(NAMESPACE)"; \
+	  exit 1; \
+	fi; \
+	echo "Route: https://$$ROUTE_HOST"; \
+	sed "s|SWARMER_HOST|$$ROUTE_HOST|g" k8s/openshift/oauth-client.yaml | kubectl apply -f -; \
+	echo "OAuthClient registered → https://$$ROUTE_HOST/auth/callback"; \
+	OAUTH_HOST=$$(kubectl get route oauth-openshift -n openshift-authentication \
+	  -o jsonpath='{.spec.host}' 2>/dev/null); \
+	if [ -n "$$OAUTH_HOST" ]; then \
+	  OAUTH_URL="https://$$OAUTH_HOST"; \
+	  echo "Auto-detected OpenShift OAuth URL: $$OAUTH_URL"; \
+	else \
+	  printf "OPENSHIFT_OAUTH_URL (e.g. https://oauth-openshift.apps.example.com): "; \
+	  read OAUTH_URL; \
+	fi; \
+	sed "s|SWARMER_IMAGE|$(IMAGE_REF)|g; \
+	     s|OPENSHIFT_OAUTH_URL_VALUE|$$OAUTH_URL|g; \
+	     s|AGENT_IMAGE_OPENCODE_VALUE|$(AGENT_IMAGE_OPENCODE)|g; \
+	     s|AGENT_IMAGE_PYTHON_VALUE|$(AGENT_IMAGE_PYTHON)|g; \
+	     s|AGENT_IMAGE_CRUSH_VALUE|$(AGENT_IMAGE_CRUSH)|g" \
+	  k8s/openshift/deployment.yaml | kubectl apply -f -
+	kubectl rollout status deployment/swarmer -n $(NAMESPACE) --timeout=120s
+	@echo ""
+	@echo "✓ OpenShift deployment complete."
+	@ROUTE=$$(kubectl get route swarmer -n $(NAMESPACE) \
+	  -o jsonpath='{.spec.host}' 2>/dev/null); \
+	[ -n "$$ROUTE" ] && echo "  Dashboard → https://$$ROUTE" || true
 
 k8s-delete:  ## Remove swarmer from Kubernetes (keeps the kind cluster if any)
 	@echo "Removing swarmer from namespace $(NAMESPACE)..."

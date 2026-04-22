@@ -42,7 +42,9 @@ spec:
             - name: K8S_API_URL
               value: "https://kubernetes.default.svc"
             - name: OPENSHIFT_OAUTH_URL
-              value: ""
+              value: "OPENSHIFT_OAUTH_URL_VALUE"
+            - name: REDIRECT_BASE_URL
+              value: "REDIRECT_BASE_URL_VALUE"
 
           volumeMounts:
             - name: swarmer-data

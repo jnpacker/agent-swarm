@@ -30,8 +30,8 @@ OPENSHIFT_OAUTH_URL="https://${OAUTH_HOST}"
 SWARMER_IMAGE="quay.io/jpacker/swarmer:$(cat VERSION)"
 
 # Agent tool images — update these to match your registry
-AGENT_IMAGE_OPENCODE="ghcr.io/anomalyco/opencode:latest"
-AGENT_IMAGE_PYTHON="ghcr.io/anomalyco/opencode:latest"
+AGENT_IMAGE_OPENCODE="quay.io/jpacker/opencode-golang:0.2"
+AGENT_IMAGE_PYTHON="quay.io/jpacker/opencode-python:0.2"
 AGENT_IMAGE_CRUSH="ghcr.io/gurnben/crush-container:latest"
 
 echo "App domain:   ${APPS_DOMAIN}"
