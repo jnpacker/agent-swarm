@@ -212,6 +212,10 @@ def build_session_pod(
                         name="session-workspace", mount_path="/workspace"
                     )
                 ],
+                resources=client.V1ResourceRequirements(
+                    requests={"memory": "128Mi", "cpu": "100m"},
+                    limits={"memory": "256Mi", "cpu": "200m"},
+                ),
             )
         )
 
@@ -259,10 +263,12 @@ def build_session_pod(
     # namespace's default SA so this is permitted without host-level privileges.
     # The `privileged` flag additionally enables Linux privileged mode (raw
     # sockets, device access, etc.) which is only needed in rare cases.
-    security_context = client.V1SecurityContext(
-        run_as_user=0,
-        privileged=True if privileged else None,
-    )
+    security_context = None
+    if privileged:
+        security_context = client.V1SecurityContext(
+            run_as_user=0,
+            privileged=True,
+        )
 
     container = client.V1Container(
         name=tool.get_container_name(),
@@ -278,8 +284,8 @@ def build_session_pod(
         tty=session.mode == "tui",
         security_context=security_context,
         resources=client.V1ResourceRequirements(
-            requests={"memory": "1Gi", "cpu": "500m"},
-            limits={"memory": "4Gi", "cpu": "2000m"},
+            requests={"memory": "256Mi", "cpu": "100m"},
+            limits={"memory": "512Mi", "cpu": "200m"},
         ),
     )
 
