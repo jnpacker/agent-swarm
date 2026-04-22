@@ -169,7 +169,9 @@ class CrushStrategy(AgentToolStrategy):
 
     def get_extra_env(self, has_adc: bool) -> list:
         from kubernetes import client
-        env = []
+        env = [
+            client.V1EnvVar(name="HOME", value="/workspace"),
+        ]
         if has_adc:
             env.append(client.V1EnvVar(
                 name="GOOGLE_APPLICATION_CREDENTIALS",
