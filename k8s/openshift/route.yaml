@@ -4,7 +4,6 @@ metadata:
   name: swarmer
   namespace: swarmer
 spec:
-  host: SWARMER_HOST
   to:
     kind: Service
     name: swarmer

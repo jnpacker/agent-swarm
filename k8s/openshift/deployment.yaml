@@ -21,7 +21,7 @@ spec:
 
       containers:
         - name: swarmer
-          image: quay.io/jpacker/swarmer:0.1
+          image: SWARMER_IMAGE
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
@@ -42,11 +42,11 @@ spec:
             - name: OPENSHIFT_OAUTH_URL
               value: "OPENSHIFT_OAUTH_URL_VALUE"
             - name: AGENT_IMAGE_OPENCODE
-              value: "quay.io/jpacker/opencode-golang:0.2"
+              value: "AGENT_IMAGE_OPENCODE_VALUE"
             - name: AGENT_IMAGE_PYTHON
-              value: "quay.io/jpacker/opencode-python:0.2"
+              value: "AGENT_IMAGE_PYTHON_VALUE"
             - name: AGENT_IMAGE_CRUSH
-              value: "ghcr.io/gurnben/crush-container:latest"
+              value: "AGENT_IMAGE_CRUSH_VALUE"
             - name: DEFAULT_AGENT_TOOL
               value: "opencode-golang"
 

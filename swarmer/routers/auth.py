@@ -1,3 +1,4 @@
+import secrets
 from urllib.parse import quote
 
 from fastapi import APIRouter, Form, Request
@@ -8,7 +9,7 @@ from starlette.status import HTTP_303_SEE_OTHER
 
 from swarmer import k8s_auth
 from swarmer.config import settings
-from swarmer.crypto import decrypt, encrypt
+from swarmer.crypto import encrypt
 from swarmer.flash import flash
 from swarmer.models.workspace import Workspace
 
@@ -22,11 +23,17 @@ async def login_page(request: Request):
         return RedirectResponse("/workspaces", status_code=HTTP_303_SEE_OTHER)
     openshift_auth_url = None
     if settings.openshift_oauth_url:
-        callback_url = request.url_for("oauth_callback")
+        state = secrets.token_urlsafe(16)
+        request.session["oauth_state"] = state
+        if settings.redirect_base_url:
+            callback_url = f"{settings.redirect_base_url.rstrip('/')}/auth/callback"
+        else:
+            callback_url = str(request.url_for("oauth_callback"))
         openshift_auth_url = (
             f"{settings.openshift_oauth_url}/oauth/authorize"
             f"?client_id=swarmer&response_type=token"
             f"&redirect_uri={quote(str(callback_url), safe='')}"
+            f"&state={state}"
         )
     return templates.TemplateResponse(
         request,
@@ -74,7 +81,11 @@ async def oauth_callback_page(request: Request):
 
 
 @router.post("/auth/callback")
-async def oauth_callback(request: Request, token: str = Form(...)):
+async def oauth_callback(request: Request, token: str = Form(...), state: str = Form("")):
+    expected = request.session.pop("oauth_state", None)
+    if not expected or state != expected:
+        flash(request, "Invalid OAuth state. Please sign in again.", "error")
+        return RedirectResponse("/login", status_code=HTTP_303_SEE_OTHER)
     identity = await _validate_and_login(request, token.strip())
     if identity is None:
         return RedirectResponse("/login", status_code=HTTP_303_SEE_OTHER)

@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     secret_key_file: str = "auth/secret.key"
     openshift_oauth_url: str = ""   # e.g. https://oauth-openshift.apps.example.com
+    redirect_base_url: str = ""     # e.g. https://swarmer-swarmer.apps.example.com  (explicit callback base)
     k8s_api_url: str = "https://kubernetes.default.svc"
     database_url: str = "sqlite+aiosqlite:///data/swarmer.db"
     k8s_in_cluster: bool = False

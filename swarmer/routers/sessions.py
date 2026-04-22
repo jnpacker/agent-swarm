@@ -3,8 +3,6 @@ import logging
 import re
 import uuid
 
-log = logging.getLogger(__name__)
-
 import httpx
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -25,6 +23,9 @@ from swarmer.models.opencode_secret import OpencodeSecret
 from swarmer.models.session import Session
 from swarmer.models.session_repo import SessionRepo
 from swarmer.models.workspace import Workspace
+
+log = logging.getLogger(__name__)
+
 
 async def _get_model_options(
     ws_id: int, db: AsyncSession, agent_tool: str = "opencode-golang"
@@ -146,7 +147,7 @@ async def session_list(
     dirty = False
     for s in sessions:
         if s.phase in ("pending", "running") and s.pod_name:
-            live_phase, _ = k8s.get_pod_status(s.pod_name, ws.k8s_namespace)
+            live_phase, _ = await asyncio.to_thread(k8s.get_pod_status, s.pod_name, ws.k8s_namespace)
             if live_phase != s.phase:
                 s.phase = live_phase
                 dirty = True
@@ -289,7 +290,7 @@ async def session_detail(
     # Fetch live K8s detail for the initial page render and sync phase
     status_detail = ""
     if session.pod_name:
-        live_phase, status_detail = k8s.get_pod_status(session.pod_name, ws.k8s_namespace)
+        live_phase, status_detail = await asyncio.to_thread(k8s.get_pod_status, session.pod_name, ws.k8s_namespace)
         if live_phase != session.phase:
             session.phase = live_phase
             await db.commit()
