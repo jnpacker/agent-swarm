@@ -84,7 +84,8 @@ def build_session_pod(
     pat = session.github_pat  # may be None
 
     # ---------- env ----------
-    env = list(tool.get_extra_env(has_adc))
+    env = [client.V1EnvVar(name="HOME", value="/workspace")]
+    env.extend(tool.get_extra_env(has_adc))
     if pat:
         env.append(
             client.V1EnvVar(
@@ -169,12 +170,12 @@ def build_session_pod(
             "if [ -n \"${GITHUB_PAT}\" ]; then "
             "git config --global credential.helper store && "
             "echo \"https://${GITHUB_USERNAME}:${GITHUB_PAT}@github.com\" "
-            "> /root/.git-credentials; "
+            "> \"${HOME}/.git-credentials\"; "
             "fi"
         )
         full_cmd = credential_setup + " && " + " && ".join(clone_cmds)
 
-        git_env = []
+        git_env = [client.V1EnvVar(name="HOME", value="/workspace")]
         if pat:
             git_env.append(
                 client.V1EnvVar(
@@ -247,7 +248,7 @@ def build_session_pod(
     git_setup = (
         'if [ -n "${GITHUB_PAT}" ] && command -v git >/dev/null 2>&1; then '
         'git config --global credential.helper store && '
-        'echo "https://${GITHUB_USERNAME}:${GITHUB_PAT}@github.com" > /root/.git-credentials && '
+        'echo "https://${GITHUB_USERNAME}:${GITHUB_PAT}@github.com" > "${HOME}/.git-credentials" && '
         'git config --global user.name "${GITHUB_USERNAME}" && '
         'git config --global user.email "${GITHUB_USERNAME}@users.noreply.github.com"; '
         'fi && '
