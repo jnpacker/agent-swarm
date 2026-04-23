@@ -49,6 +49,8 @@
       <th class="pf-v6-c-table__th" role="columnheader">Tool</th>
       <th class="pf-v6-c-table__th" role="columnheader">Mode</th>
       <th class="pf-v6-c-table__th" role="columnheader">Status</th>
+      <th class="pf-v6-c-table__th" role="columnheader">Started</th>
+      <th class="pf-v6-c-table__th" role="columnheader">Duration</th>
       <th class="pf-v6-c-table__th" role="columnheader">GitHub PAT</th>
       <th class="pf-v6-c-table__th" role="columnheader">Persist</th>
       <th class="pf-v6-c-table__th pf-m-fit-content" role="columnheader" style="text-align:right;">Actions</th>
@@ -85,6 +87,12 @@
         {% else %}
           <span class="pf-v6-c-label pf-m-grey"><span class="pf-v6-c-label__content">○ Idle</span></span>
         {% endif %}
+      </td>
+      <td class="pf-v6-c-table__td" role="cell" data-label="Started" style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm); white-space:nowrap;">
+        {{ s.run_started_at.strftime('%b %d %H:%M') if s.run_started_at else '—' }}
+      </td>
+      <td class="pf-v6-c-table__td" role="cell" data-label="Duration" style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm); white-space:nowrap;">
+        {{ s.run_duration if s.run_duration else '—' }}
       </td>
       <td class="pf-v6-c-table__td" role="cell" data-label="GitHub PAT" style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm);">
         {{ s.github_pat.name if s.github_pat else '—' }}
