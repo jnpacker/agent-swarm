@@ -341,14 +341,6 @@ async def session_detail(
     if ws is None or session is None or session.workspace_id != ws_id:
         return RedirectResponse(url=f"/workspaces/{ws_id}/sessions", status_code=302)
 
-    # Generate one-time TUI token for TUI-mode sessions
-    tui_token = None
-    if session.mode == "tui" and session.phase == "running":
-        tui_token = str(uuid.uuid4())
-        tokens = list(request.session.get("tui_tokens", []))
-        tokens.append(tui_token)
-        request.session["tui_tokens"] = tokens
-
     pats_result = await db.execute(
         select(GitHubPAT).where(GitHubPAT.workspace_id == ws_id).order_by(GitHubPAT.name)
     )
@@ -361,6 +353,14 @@ async def session_detail(
         if live_phase != session.phase:
             session.phase = live_phase
             await db.commit()
+
+    # Generate one-time TUI token after K8s sync so phase is current
+    tui_token = None
+    if session.mode == "tui" and session.phase == "running":
+        tui_token = str(uuid.uuid4())
+        tokens = list(request.session.get("tui_tokens", []))
+        tokens.append(tui_token)
+        request.session["tui_tokens"] = tokens
 
     model_options = await _get_model_options(ws_id, db, session.agent_tool)
     pat_token = session.github_pat.pat if session.github_pat else None
@@ -514,9 +514,8 @@ async def session_launch(
 
     # Re-run the anyuid SCC grant in case it failed at workspace creation time
     # (e.g. swarmer lacked the bind permission when the workspace was first set up).
-    if not settings.k8s_namespace:
-        from swarmer import k8s as _k8s
-        _k8s._grant_anyuid_scc(ws.k8s_namespace)
+    from swarmer import k8s as _k8s
+    _k8s._grant_anyuid_scc(ws.k8s_namespace)
 
     # Check whether the workspace has an ADC JSON stored (affects pod spec)
     from swarmer.models.opencode_secret import OpencodeSecret
