@@ -1,10 +1,73 @@
-sessions:
-  # ──────────────────────────────────────────────────────────
-  - date: "2026-04-27"
-    plan: "2026-04-27-sessions-list-launch-refresh.md"
-    title: "Sessions list ACTION column: rename Open to Launch, gate on image availability, auto-refresh every 3s"
-    jira: "ACM-33311"
-    jira_url: "https://redhat.atlassian.net/browse/ACM-33311"
-    status: "Done"
-    pr: "https://github.com/stolostron/agent-swarm/pull/29"
-    summary: "Renamed Open→Launch with image guard and Stop button in Actions column, 3s HTMX refresh, and live ⏱️ elapsed time for active sessions"
+# Plans Index
+
+Parent epic: [ACM-32892](https://redhat.atlassian.net/browse/ACM-32892) — Implement an Agentic SDLC platform, similar to Ambient and KubeOpenCode
+
+## Foundation & Feature Plans
+
+| Plan | Summary | Jira | PR |
+|------|---------|------|-----|
+| [2026-04-14-01-foundation.md](2026-04-14-01-foundation.md) | Bootstrap FastAPI + auth + K8s base | [ACM-32894](https://redhat.atlassian.net/browse/ACM-32894) | [#1](https://github.com/stolostron/agent-swarm/pull/1) |
+| [2026-04-14-02-workspaces.md](2026-04-14-02-workspaces.md) | Workspace CRUD + namespace mgmt | [ACM-32895](https://redhat.atlassian.net/browse/ACM-32895) | [#1](https://github.com/stolostron/agent-swarm/pull/1) |
+| [2026-04-14-03-secrets.md](2026-04-14-03-secrets.md) | Per-workspace secrets + K8s sync | [ACM-32896](https://redhat.atlassian.net/browse/ACM-32896) | [#1](https://github.com/stolostron/agent-swarm/pull/1) |
+| [2026-04-14-04-sessions.md](2026-04-14-04-sessions.md) | Session lifecycle + TUI xterm.js | [ACM-32897](https://redhat.atlassian.net/browse/ACM-32897) | [#1](https://github.com/stolostron/agent-swarm/pull/1) |
+| [2026-04-14-05-pull-secret-tab.md](2026-04-14-05-pull-secret-tab.md) | Pull secret tab + secrets page redesign | [ACM-32898](https://redhat.atlassian.net/browse/ACM-32898) | [#2](https://github.com/stolostron/agent-swarm/pull/2) |
+| [2026-04-14-06-ui-tui-improvements.md](2026-04-14-06-ui-tui-improvements.md) | Branding, TUI full-width, model default | [ACM-32899](https://redhat.atlassian.net/browse/ACM-32899) | [#2](https://github.com/stolostron/agent-swarm/pull/2) |
+| [2026-04-14-07-model-id-fixes.md](2026-04-14-07-model-id-fixes.md) | Model ID format + all-mode picker | [ACM-32900](https://redhat.atlassian.net/browse/ACM-32900) | [#2](https://github.com/stolostron/agent-swarm/pull/2) |
+| [2026-04-15-09-context-repositories-prompt-injection.md](2026-04-15-09-context-repositories-prompt-injection.md) | Inject cloned repos into prompt | [ACM-32956](https://redhat.atlassian.net/browse/ACM-32956) | [#2](https://github.com/stolostron/agent-swarm/pull/2) |
+| [2026-04-15-08-multi-agent-tool-architecture.md](2026-04-15-08-multi-agent-tool-architecture.md) | AgentToolStrategy + Crush support design | — | [#4](https://github.com/stolostron/agent-swarm/pull/4) |
+| [2026-04-15-09-execution-plan.md](2026-04-15-09-execution-plan.md) | 5-phase Crush integration execution plan | — | [#4](https://github.com/stolostron/agent-swarm/pull/4) |
+| [2026-04-15-11-language-image-selector.md](2026-04-15-11-language-image-selector.md) | Per-session language/image selector | — | [#4](https://github.com/stolostron/agent-swarm/pull/4) |
+| [2026-04-17-14-agent-launch-buttons.md](2026-04-17-14-agent-launch-buttons.md) | Per-tool launch buttons with availability | — | [#4](https://github.com/stolostron/agent-swarm/pull/4) |
+| [2026-04-17-15-config-autosave.md](2026-04-17-15-config-autosave.md) | Config auto-save on change | — | [#7](https://github.com/stolostron/agent-swarm/pull/7) |
+| [2026-04-20-k8s-token-auth.md](2026-04-20-k8s-token-auth.md) | K8s bearer token auth + OpenShift OAuth | — | [#12](https://github.com/stolostron/agent-swarm/pull/12) |
+| [2026-04-21-coderabbit-fixes.md](2026-04-21-coderabbit-fixes.md) | CodeRabbit PR #12 security/async fixes | [ACM-33110](https://redhat.atlassian.net/browse/ACM-33110) | [#12](https://github.com/stolostron/agent-swarm/pull/12) |
+| [2026-04-22-session-launch-ui-refactor.md](2026-04-22-session-launch-ui-refactor.md) | Single Launch button + image dropdown | [ACM-33184](https://redhat.atlassian.net/browse/ACM-33184) | [#16](https://github.com/stolostron/agent-swarm/pull/16) |
+| [2026-04-23-session-prompt-ux.md](2026-04-23-session-prompt-ux.md) | Prompt card, auto pod cleanup, timing | [ACM-33192](https://redhat.atlassian.net/browse/ACM-33192) | [#17](https://github.com/stolostron/agent-swarm/pull/17) |
+| [2026-04-23-ansi-color-output.md](2026-04-23-ansi-color-output.md) | ANSI → HTML spans in session output | [ACM-33206](https://redhat.atlassian.net/browse/ACM-33206) | [#21](https://github.com/stolostron/agent-swarm/pull/21) |
+| [2026-04-23-openshift-deploy-scc-fixes.md](2026-04-23-openshift-deploy-scc-fixes.md) | OAuthClient fix, SCC RoleBinding | [ACM-33229](https://redhat.atlassian.net/browse/ACM-33229) | [#26](https://github.com/stolostron/agent-swarm/pull/26) |
+| [2026-04-23-cve-prompts-repo-design.md](2026-04-23-cve-prompts-repo-design.md) | CVE prompts repo consolidation | — | — (stolostron/cve-prompts) |
+| [2026-04-27-sessions-list-launch-refresh.md](2026-04-27-sessions-list-launch-refresh.md) | Launch/Stop buttons, 3s refresh, elapsed time | [ACM-33311](https://redhat.atlassian.net/browse/ACM-33311) | [#29](https://github.com/stolostron/agent-swarm/pull/29) |
+| [2026-04-28-tui-patch-export.md](2026-04-28-tui-patch-export.md) | TUI patch export with AI-generated commit messages | [ACM-33411](https://redhat.atlassian.net/browse/ACM-33411) | [#32](https://github.com/stolostron/agent-swarm/pull/32) |
+
+## Bug Fixes
+
+| Plan | Summary | Jira | PR |
+|------|---------|------|-----|
+| [2026-04-15-08-fix-pat-form-action-url.md](2026-04-15-08-fix-pat-form-action-url.md) | GitHub PAT form 405 URL bug | [ACM-32955](https://redhat.atlassian.net/browse/ACM-32955) | [#2](https://github.com/stolostron/agent-swarm/pull/2) |
+| [2026-04-15-10-repo-list-local-path-layout.md](2026-04-15-10-repo-list-local-path-layout.md) | Repo list column layout fix | — | [#2](https://github.com/stolostron/agent-swarm/pull/2) |
+| [2026-04-15-12-fix-image-reachability-check.md](2026-04-15-12-fix-image-reachability-check.md) | Image reachability always-false fix | — | [#10](https://github.com/stolostron/agent-swarm/pull/10) |
+| [2026-04-17-13-fix-repo-add-lazy-load.md](2026-04-17-13-fix-repo-add-lazy-load.md) | repo_add 500: SQLAlchemy async lazy-load | [ACM-33014](https://redhat.atlassian.net/browse/ACM-33014) | [#5](https://github.com/stolostron/agent-swarm/pull/5) / [#7](https://github.com/stolostron/agent-swarm/pull/7) |
+| [2026-04-19-16-last-output-panel-fix.md](2026-04-19-16-last-output-panel-fix.md) | Last Output panel height constraint | [ACM-33033](https://redhat.atlassian.net/browse/ACM-33033) | [#9](https://github.com/stolostron/agent-swarm/pull/9) |
+| [2026-04-27-k8s-deploy-agent-image-env.md](2026-04-27-k8s-deploy-agent-image-env.md) | k8s-deploy missing AGENT_IMAGE env vars | [ACM-33310](https://redhat.atlassian.net/browse/ACM-33310) | [#27](https://github.com/stolostron/agent-swarm/pull/27) |
+
+## Sessions
+
+# ──────────────────────────────────────────────────────────
+- date: "2026-04-29"
+  title: "Switch swarmer base image from python:3.12-slim to UBI9"
+  jira: "ACM-33416"
+  jira_url: "https://redhat.atlassian.net/browse/ACM-33416"
+  status: "In Progress"
+  pr: ~
+  summary: "Replace python:3.12-slim with ubi9/python-312-minimal:latest, dropping the apt-get step and adding OpenShift group-writable mount points"
+
+## Future / Open
+
+| Summary | Jira | PR |
+|---------|------|-----|
+| Native Swarmer Bootstrap chat for opencode serve | [ACM-33417](https://redhat.atlassian.net/browse/ACM-33417) | — |
+
+## PRs without a plan file
+
+| PR | Summary | Jira |
+|----|---------|------|
+| [#3](https://github.com/stolostron/agent-swarm/pull/3) | Non-root session pod fix | — |
+| [#6](https://github.com/stolostron/agent-swarm/pull/6) / [#8](https://github.com/stolostron/agent-swarm/pull/8) / [#11](https://github.com/stolostron/agent-swarm/pull/11) / [#18](https://github.com/stolostron/agent-swarm/pull/18) / [#22](https://github.com/stolostron/agent-swarm/pull/22) / [#28](https://github.com/stolostron/agent-swarm/pull/28) | Dependency updates | — |
+| [#13](https://github.com/stolostron/agent-swarm/pull/13) | Crush TUI --model error + OpenShift non-root UID | — |
+| [#14](https://github.com/stolostron/agent-swarm/pull/14) / [#20](https://github.com/stolostron/agent-swarm/pull/20) | PatternFly migration | PEARCH-43 |
+| [#15](https://github.com/stolostron/agent-swarm/pull/15) | Kustomize deployment alternative | — |
+| [#19](https://github.com/stolostron/agent-swarm/pull/19) | Strip whitespace from pasted bearer tokens | — |
+| [#23](https://github.com/stolostron/agent-swarm/pull/23) / [#24](https://github.com/stolostron/agent-swarm/pull/24) | Start timestamp + duration columns | [ACM-33213](https://redhat.atlassian.net/browse/ACM-33213) / [ACM-33220](https://redhat.atlassian.net/browse/ACM-33220) |
+| [#25](https://github.com/stolostron/agent-swarm/pull/25) / [#31](https://github.com/stolostron/agent-swarm/pull/31) | OpenShift SCC + non-root compat | — |
+| [#30](https://github.com/stolostron/agent-swarm/pull/30) | INDEX.md update | — |
+
