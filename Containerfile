@@ -1,8 +1,6 @@
-FROM python:3.12-slim
+FROM registry.access.redhat.com/ubi9/python-312-minimal:latest
 
 WORKDIR /app
-
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies first (cached layer)
 COPY requirements.txt .
@@ -12,7 +10,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY swarmer/ swarmer/
 
 # Directories for mounted volumes (PVC for DB, Secret for auth hash)
-RUN mkdir -p /data /auth
+# Switch to root to create dirs, then back to 1001 for runtime
+USER 0
+RUN mkdir -p /data /auth && \
+    chgrp -R 0 /data /auth && \
+    chmod -R g+rwX /data /auth
+USER 1001
 
 ENV PYTHONUNBUFFERED=1 \
     K8S_IN_CLUSTER=true \
