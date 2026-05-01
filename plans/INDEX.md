@@ -20,6 +20,14 @@ Parent epic: [ACM-32892](https://redhat.atlassian.net/browse/ACM-32892) — Impl
   status: "Done"
   pr: "https://github.com/stolostron/agent-swarm/pull/34"
   summary: "Replaced alpine/git:latest (Docker Hub) with tool.get_image() so the git-init init container reuses the same agent image (OpenCode has git + gh; Crush has git); eliminates Docker Hub dependency"
+# ──────────────────────────────────────────────────────────
+- date: "2026-05-01"
+  title: "Move Launch/Stop controls from Configuration card to status bar"
+  jira: "ACM-33539"
+  jira_url: "https://redhat.atlassian.net/browse/ACM-33539"
+  status: "In Progress"
+  pr: ~
+  summary: "Relocate Clean up, Launch button, image dropdown, and Image Found pill from the Configuration card to the top status bar on the sessions detail page"
 
 ## Foundation & Feature Plans
 
