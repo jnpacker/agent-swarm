@@ -99,8 +99,7 @@
   <form id="repo-picker-confirm-form" style="display:none;"
         hx-post="/workspaces/{{ ws_id }}/sessions/{{ session.id }}/repos"
         hx-target="#repo-list"
-        hx-select="#repo-list"
-        hx-swap="outerHTML"
+        hx-swap="innerHTML"
         hx-on::after-request="document.getElementById('repo-picker-container').innerHTML='';
                                document.getElementById('repo-add-btn').style.display='';">
     <input type="hidden" name="repo_url" id="repo-picker-url-input">
@@ -147,8 +146,7 @@
   <form id="repo-picker-manual-form" style="display:none;"
         hx-post="/workspaces/{{ ws_id }}/sessions/{{ session.id }}/repos"
         hx-target="#repo-list"
-        hx-select="#repo-list"
-        hx-swap="outerHTML"
+        hx-swap="innerHTML"
         hx-on::after-request="document.getElementById('repo-picker-container').innerHTML='';
                                document.getElementById('repo-add-btn').style.display='';">
     <div style="display:flex; flex-direction:column; gap:var(--pf-t--global--spacer--xs);

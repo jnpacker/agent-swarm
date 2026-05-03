@@ -22,7 +22,6 @@ from swarmer.ansi import ansi_to_html
 from swarmer.flash import flash
 from swarmer.github import fetch_repo_info as _fetch_repo_info
 from swarmer.github import list_repos_for_pat as _list_repos_for_pat
-from swarmer.github import github_slug as _github_slug
 from swarmer.models.github_pat import GitHubPAT
 from swarmer.models.opencode_secret import OpencodeSecret
 from swarmer.models.session import CRON_PRESETS, Session
@@ -974,7 +973,7 @@ async def repo_add(
     repo_info = await _fetch_repo_info(session.repos, pat_token)
     return templates.TemplateResponse(
         request,
-        "sessions/_repo_list.html",
+        "sessions/_repo_items.html",
         {"ws_id": ws_id, "session": session, "repo_info": repo_info},
     )
 
@@ -1009,7 +1008,7 @@ async def repo_delete(
     repo_info = await _fetch_repo_info(session.repos, pat_token)
     return templates.TemplateResponse(
         request,
-        "sessions/_repo_list.html",
+        "sessions/_repo_items.html",
         {"ws_id": ws_id, "session": session, "repo_info": repo_info},
     )
 
