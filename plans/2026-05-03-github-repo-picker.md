@@ -256,15 +256,18 @@ User clicks "+"
 | `swarmer/models/github_pat.py` | Edit | Added `github_org: Mapped[str]` column (line 20) |
 | `swarmer/database.py` | Edit | Added `ALTER TABLE github_pats ADD COLUMN github_org TEXT NOT NULL DEFAULT ''` migration |
 | `swarmer/templates/secrets/github_pat_form.html` | Edit | Added "GitHub Org (optional)" form field between Username and Token fields |
-| `swarmer/routers/secrets.py` | Edit | `github_pat_create` and `github_pat_update` now accept and persist `github_org: str = Form("")` |
-| `swarmer/routers/sessions.py` | Edit | Removed inline helper functions (moved to `swarmer/github.py`); imports via `from swarmer.github import ...`; added `GET .../repos/pick` route (`repo_pick`) |
-| `swarmer/templates/sessions/_repo_picker.html` | **New** | HTMX partial: client-side filterable repo list, click-to-select with branch/path confirmation, "Enter URL manually" fallback, cancel |
-| `swarmer/templates/sessions/_repo_list.html` | Edit | "+" button replaced with three-state logic: disabled (session active), hint (no PAT), HTMX picker trigger (PAT selected); old inline form removed |
+| `swarmer/routers/secrets.py` | Edit | `github_pat_create` and `github_pat_update` now accept and persist `github_org: str = Form("")`; PAT update `db.commit()` wrapped in `IntegrityError` handler |
+| `swarmer/routers/sessions.py` | Edit | Removed inline helper functions (moved to `swarmer/github.py`); imports via `from swarmer.github import ...`; added `GET .../repos/pick` route (`repo_pick`); `is_active` guard added to `repo_add`, `repo_delete`, `repo_pick` |
+| `swarmer/templates/sessions/_repo_picker.html` | **New** | HTMX partial: client-side filterable repo list, click-to-select with branch/path confirmation, "Enter URL manually" fallback, cancel; escapes `full_name`/`description`; populates branch from `repo.default_branch` |
+| `swarmer/templates/sessions/_repo_list.html` | Edit | "+" button replaced with three-state logic: disabled (session active), hint (no PAT), HTMX picker trigger (PAT selected); old inline form removed; `#repo-picker-container` moved out |
+| `swarmer/templates/sessions/detail.html` | Edit | `#repo-picker-container` placed as a sibling of `#repo-list` inside the card body (see bug fix below) |
 | `tests/test_list_repos_for_pat.py` | **New** | 8 unit tests for `list_repos_for_pat` using `respx` to mock httpx — no live network required |
 
-### Deviation from plan
+### Deviations from plan
 
-The plan called for `_list_repos_for_pat()` to live in `swarmer/routers/sessions.py` alongside `_fetch_repo_info()`. During implementation, all three GitHub helpers were moved to a new `swarmer/github.py` module so they could be imported by the test suite without pulling in FastAPI/SQLAlchemy. The sessions router imports them via aliases (`_fetch_repo_info`, `_list_repos_for_pat`, `_github_slug`) preserving all existing call sites unchanged.
+**GitHub helpers module**: The plan called for `_list_repos_for_pat()` to live in `swarmer/routers/sessions.py` alongside `_fetch_repo_info()`. During implementation, all three GitHub helpers were moved to a new `swarmer/github.py` module so they could be imported by the test suite without pulling in FastAPI/SQLAlchemy. The sessions router imports them via aliases (`_fetch_repo_info`, `_list_repos_for_pat`, `_github_slug`) preserving all existing call sites unchanged.
+
+**`#repo-picker-container` placement**: The original implementation placed `#repo-picker-container` inside `#repo-list`. This caused a bug where adding a repo via the picker did not refresh the card — the `hx-swap="outerHTML"` on `#repo-list` was silently dropped by HTMX 1.9 because the form triggering the swap was a descendant of the swap target, and was removed from the DOM mid-swap. Fixed by moving `#repo-picker-container` to `detail.html` as a sibling of `#repo-list` inside the card body, so the confirm form's target is never an ancestor of the form itself.
 
 ### Test results
 
