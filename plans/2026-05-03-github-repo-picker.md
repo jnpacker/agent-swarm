@@ -65,7 +65,7 @@ The GitHub REST API supports:
 
 Add a new optional form field after the existing "GitHub Username" field:
 
-```
+```text
 GitHub Org (optional)
   <input name="github_org" placeholder="my-enterprise-org">
   Helper text: "Leave blank to list repos from your personal account.
@@ -88,7 +88,7 @@ GitHub Org (optional)
 
 Add a new HTMX endpoint:
 
-```
+```text
 GET /workspaces/{ws_id}/sessions/{sid}/repos/pick
     ?pat_id={pat_id}
 ```
@@ -114,7 +114,7 @@ GET /workspaces/{ws_id}/sessions/{sid}/repos/pick
 _(New HTMX partial, returned by the endpoint above)_
 
 Structure:
-```
+```text
 ┌─────────────────────────────────────────────────────┐
 │ [🔍 Filter repos...          ] (search input, JS)    │
 │                                                       │
@@ -133,7 +133,7 @@ Behavior:
 - "Cancel" hides the picker and restores the "+" button.
 
 When a repo is selected, a secondary mini-form appears inline:
-```
+```text
 Branch: [main        ]
 Local path: [repo-name   ]
 [Add]  [Back]
@@ -213,7 +213,7 @@ async def _list_repos_for_pat(pat: GitHubPAT) -> list[dict] | str:
 
 ## Data Flow
 
-```
+```text
 User clicks "+"
     │
     ├─ No PAT selected → show inline hint text (no API call)
@@ -268,7 +268,7 @@ The plan called for `_list_repos_for_pat()` to live in `swarmer/routers/sessions
 
 ### Test results
 
-```
+```text
 8 passed in 0.20s
 ```
 

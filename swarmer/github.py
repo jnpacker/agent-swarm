@@ -6,14 +6,30 @@ can be unit-tested without standing up the full application stack.
 
 import asyncio
 import re
+from urllib.parse import urlparse
 
 import httpx
 
 
 def github_slug(url: str) -> str | None:
-    """Extract 'owner/repo' from a GitHub URL, or None if not a GitHub URL."""
-    m = re.search(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", url)
-    return m.group(1) if m else None
+    """Extract 'owner/repo' from a GitHub URL, or None if not a GitHub URL.
+
+    Handles both HTTPS (https://github.com/owner/repo) and SSH
+    (git@github.com:owner/repo) formats.  Only the exact host ``github.com``
+    (or ``www.github.com``) is accepted to prevent false matches on hosts like
+    ``notgithub.com``.
+    """
+    # SSH format: git@github.com:owner/repo[.git]
+    ssh_match = re.match(r"^git@github\.com:(?P<slug>[^/]+/[^/]+?)(?:\.git)?$", url)
+    if ssh_match:
+        return ssh_match.group("slug")
+
+    # HTTPS format: https://github.com/owner/repo[.git]
+    parsed = urlparse(url)
+    if parsed.hostname not in ("github.com", "www.github.com"):
+        return None
+    m = re.match(r"^/(?P<slug>[^/]+/[^/]+?)(?:\.git)?/?$", parsed.path)
+    return m.group("slug") if m else None
 
 
 async def fetch_repo_info(repos: list, pat: str | None) -> dict:
@@ -41,8 +57,11 @@ async def fetch_repo_info(repos: list, pat: str | None) -> dict:
                     "is_public": not data.get("private", True),
                     "can_push": perms.get("push"),
                 }
-            # 404 with no auth → private repo that the token can't see
-            return repo.id, {"is_public": None, "can_push": False if pat else None}
+            # 404 → private repo the token can't see (or doesn't exist)
+            if r.status_code == 404:
+                return repo.id, {"is_public": None, "can_push": False if pat else None}
+            # Any other non-200 (rate-limit, 5xx, …) — don't infer push access
+            return repo.id, {"is_public": None, "can_push": None}
         except Exception:
             return repo.id, {"is_public": None, "can_push": None}
 
