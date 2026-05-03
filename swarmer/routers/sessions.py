@@ -1,11 +1,9 @@
-import asyncio
 import logging
 import re
 import shlex
 import uuid
 from datetime import datetime
 
-import httpx
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -21,6 +19,9 @@ from swarmer.database import get_db
 from swarmer.deps import require_auth
 from swarmer.ansi import ansi_to_html
 from swarmer.flash import flash
+from swarmer.github import fetch_repo_info as _fetch_repo_info
+from swarmer.github import list_repos_for_pat as _list_repos_for_pat
+from swarmer.github import github_slug as _github_slug
 from swarmer.models.github_pat import GitHubPAT
 from swarmer.models.opencode_secret import OpencodeSecret
 from swarmer.models.session import CRON_PRESETS, Session
@@ -56,47 +57,6 @@ async def _get_model_options(
     )
     oc = result.scalar_one_or_none()
     return tool.get_model_options(oc)
-
-def _github_slug(url: str) -> str | None:
-    """Extract 'owner/repo' from a GitHub URL, or None if not a GitHub URL."""
-    m = re.search(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", url)
-    return m.group(1) if m else None
-
-
-async def _fetch_repo_info(repos: list, pat: str | None) -> dict:
-    """Return per-repo visibility and push-access info via the GitHub API.
-
-    Result shape: {repo_id: {"is_public": bool|None, "can_push": bool|None}}
-    None means the check could not be performed (non-GitHub URL, API error, etc.)
-    """
-    headers = {"Accept": "application/vnd.github+json"}
-    if pat:
-        headers["Authorization"] = f"token {pat}"
-
-    async def _check(client: httpx.AsyncClient, repo) -> tuple[int, dict]:
-        slug = _github_slug(repo.repo_url)
-        if not slug:
-            return repo.id, {"is_public": None, "can_push": None}
-        try:
-            r = await client.get(
-                f"https://api.github.com/repos/{slug}", headers=headers
-            )
-            if r.status_code == 200:
-                data = r.json()
-                perms = data.get("permissions", {})
-                return repo.id, {
-                    "is_public": not data.get("private", True),
-                    "can_push": perms.get("push"),
-                }
-            # 404 with no auth → private repo that the token can't see
-            return repo.id, {"is_public": None, "can_push": False if pat else None}
-        except Exception:
-            return repo.id, {"is_public": None, "can_push": None}
-
-    async with httpx.AsyncClient(timeout=5) as client:
-        results = await asyncio.gather(*[_check(client, r) for r in repos])
-    return dict(results)
-
 
 router = APIRouter()
 templates = Jinja2Templates(directory="swarmer/templates")
@@ -1368,4 +1328,48 @@ async def session_download_patch(
         content=session.patch_output,
         media_type="text/x-patch",
         headers={"Content-Disposition": f"attachment; filename=\"{filename}\""},
+    )
+
+
+@router.get(
+    "/workspaces/{ws_id}/sessions/{sid}/repos/pick",
+    dependencies=[Depends(require_auth)],
+    response_class=HTMLResponse,
+)
+async def repo_pick(
+    ws_id: int,
+    sid: int,
+    pat_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return an HTMX partial listing all repos for the selected PAT."""
+    session = await db.get(Session, sid)
+    if session is None or session.workspace_id != ws_id:
+        return HTMLResponse("")
+
+    pat = await db.get(GitHubPAT, pat_id)
+    if pat is None or pat.workspace_id != ws_id:
+        return templates.TemplateResponse(
+            request,
+            "sessions/_repo_picker.html",
+            {"error": "PAT not found.", "repos": [], "truncated": False,
+             "ws_id": ws_id, "session": session},
+        )
+
+    result = await _list_repos_for_pat(pat)
+    if isinstance(result, str):
+        return templates.TemplateResponse(
+            request,
+            "sessions/_repo_picker.html",
+            {"error": result, "repos": [], "truncated": False,
+             "ws_id": ws_id, "session": session},
+        )
+
+    truncated = len(result) >= 500
+    return templates.TemplateResponse(
+        request,
+        "sessions/_repo_picker.html",
+        {"repos": result, "truncated": truncated, "error": None,
+         "ws_id": ws_id, "session": session},
     )
