@@ -275,7 +275,14 @@ async def github_pat_update(
     if pat_value.strip():
         pat.pat = pat_value.strip()
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        flash(request, "A PAT with that name already exists.", "danger")
+        return RedirectResponse(
+            url=f"/workspaces/{ws_id}/secrets/pats/{pat_id}/edit", status_code=302
+        )
 
     try:
         k8s.apply_github_pat_secret(ws.k8s_namespace, pat)

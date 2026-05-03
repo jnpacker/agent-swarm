@@ -1,8 +1,6 @@
 {# HTMX partial — GitHub repository picker #}
 {# Rendered into #repo-picker-container by GET .../repos/pick #}
 
-<div id="repo-picker-container">
-
 {% if error %}
   <div class="pf-v6-c-alert pf-m-danger pf-m-inline" role="alert"
        style="margin-bottom:var(--pf-t--global--spacer--sm);">
@@ -41,8 +39,10 @@
     {% if repos %}
       {% for repo in repos %}
       <div class="repo-picker-row"
-           data-name="{{ repo.full_name }}"
-           data-clone-url="https://github.com/{{ repo.full_name }}.git"
+           data-name="{{ repo.full_name | e }}"
+           data-clone-url="https://github.com/{{ repo.full_name | e }}.git"
+           data-default-branch="{{ repo.default_branch | default('main') | e }}"
+           data-description="{{ repo.description | default('') | e }}"
            style="display:flex; justify-content:space-between; align-items:center;
                   padding:var(--pf-t--global--spacer--xs) var(--pf-t--global--spacer--sm);
                   border-bottom:1px solid var(--pf-t--global--border--color--default);
@@ -52,13 +52,13 @@
            onclick="repopickerSelect(this)">
         <div style="min-width:0; flex:1;">
           <div style="font-size:var(--pf-t--global--font--size--sm); font-weight:var(--pf-t--global--font--weight--body--bold);">
-            {{ repo.full_name }}
+            {{ repo.full_name | e }}
           </div>
           {% if repo.description %}
           <div style="font-size:var(--pf-t--global--font--size--xs);
                       color:var(--pf-t--global--text--color--subtle);
                       white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-            {{ repo.description }}
+            {{ repo.description | e }}
           </div>
           {% endif %}
         </div>
@@ -134,7 +134,8 @@
       <button type="button" class="pf-v6-c-button pf-m-link pf-m-small"
               onclick="document.getElementById('repo-picker-confirm-form').style.display='none';
                        document.getElementById('repo-picker-list').style.display='';
-                       document.getElementById('repo-picker-filter').style.display='';">Back</button>
+                       document.getElementById('repo-picker-filter').style.display='';
+                       document.getElementById('repo-picker-footer').style.display='';">Back</button>
       <button type="button" class="pf-v6-c-button pf-m-link pf-m-small"
               onclick="document.getElementById('repo-picker-container').innerHTML='';
                        document.getElementById('repo-add-btn').style.display='';">Cancel</button>
@@ -196,7 +197,7 @@
                      document.getElementById('repo-picker-filter').style.display='none';
                      document.getElementById('repo-picker-footer').style.display='none';
                      document.getElementById('repo-picker-manual-form').style.display='';">
-      Enter URL manually ▸
+      Enter URL manually &#9658;
     </button>
     <button type="button" class="pf-v6-c-button pf-m-link pf-m-small"
             onclick="document.getElementById('repo-picker-container').innerHTML='';
@@ -205,17 +206,16 @@
 
 {% endif %}
 
-</div>
-
 <script>
 function repopickerSelect(row) {
   var fullName = row.dataset.name;
   var cloneUrl = row.dataset.cloneUrl;
+  var defaultBranch = row.dataset.defaultBranch || 'main';
   var localPath = fullName.split('/').pop();
 
   document.getElementById('repo-picker-url-input').value = cloneUrl;
   document.getElementById('repo-picker-selected-name').textContent = fullName;
-  document.getElementById('repo-picker-branch').value = 'main';
+  document.getElementById('repo-picker-branch').value = defaultBranch;
   document.getElementById('repo-picker-local-path').value = localPath;
 
   // Hide the list and filter, show the confirm form

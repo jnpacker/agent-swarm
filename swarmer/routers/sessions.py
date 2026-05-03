@@ -948,6 +948,8 @@ async def repo_add(
     session = await db.get(Session, sid, options=[selectinload(Session.repos)])
     if session is None or session.workspace_id != ws_id:
         return HTMLResponse("")
+    if session.is_active:
+        return HTMLResponse("", status_code=409)
 
     if not local_path:
         local_path = repo_url.rstrip("/").split("/")[-1].removesuffix(".git")
@@ -988,6 +990,12 @@ async def repo_delete(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    session_check = await db.get(Session, sid)
+    if session_check is None or session_check.workspace_id != ws_id:
+        return HTMLResponse("")
+    if session_check.is_active:
+        return HTMLResponse("", status_code=409)
+
     repo = await db.get(SessionRepo, rid)
     if repo and repo.session_id == sid:
         await db.delete(repo)
@@ -1347,6 +1355,8 @@ async def repo_pick(
     session = await db.get(Session, sid)
     if session is None or session.workspace_id != ws_id:
         return HTMLResponse("")
+    if session.is_active:
+        return HTMLResponse("", status_code=409)
 
     pat = await db.get(GitHubPAT, pat_id)
     if pat is None or pat.workspace_id != ws_id:
