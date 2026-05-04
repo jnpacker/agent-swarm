@@ -309,7 +309,7 @@ def build_session_pod(
         security_context=security_context,
         resources=client.V1ResourceRequirements(
             requests={"memory": "1Gi", "cpu": "500m"},
-            limits={"memory": "2Gi", "cpu": "2000m"},
+            limits={"memory": "4Gi", "cpu": "2000m"},
         ),
     )
 
