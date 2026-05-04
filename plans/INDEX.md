@@ -45,6 +45,15 @@ Parent epic: [ACM-32892](https://redhat.atlassian.net/browse/ACM-32892) — Impl
   pr: "https://github.com/stolostron/agent-swarm/pull/41"
   summary: "Add OSC 52 handler to xterm.js so TUI clipboard copies in the pod reach the user's browser clipboard"
 
+# ──────────────────────────────────────────────────────────
+- date: "2026-05-04"
+  title: "Reduce default workspace PVC size from 10Gi to 5Gi"
+  jira: "ACM-33570"
+  jira_url: "https://redhat.atlassian.net/browse/ACM-33570"
+  status: "Closed"
+  pr: "https://github.com/stolostron/agent-swarm/pull/45"
+  summary: "Reduced default workspace PVC size from 10Gi to 5Gi by updating the storage default in ensure_session_pvc() in swarmer/k8s_session.py."
+
 ## Foundation & Feature Plans
 
 | Plan | Summary | Jira | PR |
