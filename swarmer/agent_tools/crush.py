@@ -249,3 +249,31 @@ class CrushStrategy(AgentToolStrategy):
                 secret.application_default_credentials
             )
         return data
+
+    def build_mcp_config_cmd(self, mcp_servers) -> str:
+        config = {
+            "$schema": "https://charm.land/crush.json",
+            "options": {
+                "disable_metrics": True,
+                "disable_notifications": True,
+                "data_directory": ".crush",
+            },
+        }
+        if mcp_servers:
+            mcp_config = {}
+            for srv in mcp_servers:
+                env_var_name = _mcp_token_env_var(srv.slug)
+                mcp_config[srv.slug] = {
+                    "type": srv.server_type or "http",
+                    "url": srv.server_url,
+                    "headers": {
+                        "Authorization": f"Bearer ${env_var_name}",
+                    },
+                }
+            config["mcp"] = mcp_config
+        config_json = json.dumps(config)
+        config_path = self.get_config_mount_path()
+        return (
+            f"printf '%s' {shlex.quote(config_json)} "
+            f"> {config_path}/crush.json && "
+        )

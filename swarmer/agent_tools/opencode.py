@@ -250,3 +250,32 @@ class OpenCodeStrategy(AgentToolStrategy):
                 secret.application_default_credentials
             )
         return data
+
+    def build_mcp_config_cmd(self, mcp_servers) -> str:
+        config: dict = {
+            "$schema": "https://opencode.ai/config.json",
+            "disabled_providers": ["opencode"],
+            "server": {
+                "hostname": "0.0.0.0",
+                "port": 4096,
+            },
+        }
+        if mcp_servers:
+            mcp_config = {}
+            for srv in mcp_servers:
+                env_var_name = _mcp_token_env_var(srv.slug)
+                mcp_config[srv.slug] = {
+                    "type": "remote",
+                    "url": srv.server_url,
+                    "oauth": False,
+                    "headers": {
+                        "Authorization": f"Bearer {{env:{env_var_name}}}",
+                    },
+                }
+            config["mcp"] = mcp_config
+        config_json = json.dumps(config)
+        config_path = self.get_config_mount_path()
+        return (
+            f"printf '%s' {shlex.quote(config_json)} "
+            f"> {config_path}/opencode.json && "
+        )

@@ -279,7 +279,13 @@ def build_session_pod(
                 f"cd /workspace && "
             )
 
-    command = ["sh", "-c", config_setup + safe_dir_setup + git_setup + share_setup + agent_md_setup + model_setup + branch_setup + main_cmd]
+    # Per-session MCP config override (overwrites the shared ConfigMap config)
+    # mcp_servers=None means "not applicable" (no override needed)
+    # mcp_servers=[] means "explicitly disabled" (write config without MCP)
+    # mcp_servers=[...] means "these specific servers" (write config with them)
+    mcp_config_setup = tool.build_mcp_config_cmd(mcp_servers) if mcp_servers is not None else ""
+
+    command = ["sh", "-c", config_setup + mcp_config_setup + safe_dir_setup + git_setup + share_setup + agent_md_setup + model_setup + branch_setup + main_cmd]
 
     # ---------- envFrom ----------
     env_from = tool.get_env_from_sources()

@@ -100,3 +100,9 @@ class AgentToolStrategy(ABC):
     @abstractmethod
     def build_k8s_secret_data(self, secret) -> dict[str, str]:
         ...
+
+    def build_mcp_config_cmd(self, mcp_servers) -> str:
+        """Return a shell command that writes a session-specific config with the
+        given MCP servers.  Called at pod startup to override the shared ConfigMap.
+        Default implementation returns empty string (no override)."""
+        return ""
