@@ -83,6 +83,7 @@ async def mcp_server_add_from_catalog(
         server_url=entry.get("server_url", ""),
         server_type=entry.get("server_type", "http"),
         jira_server_url=entry.get("default_jira_server_url", ""),
+        user_id=request.session.get("username", ""),
     )
     db.add(server)
     try:
@@ -324,7 +325,6 @@ async def _sync_mcp_to_k8s(ws_id: int, db: AsyncSession, request: Request) -> No
     oc_secret = oc_result.scalar_one_or_none()
 
     try:
-        _k8s.sync_mcp_server_secret(ws.k8s_namespace, mcp_servers)
         for tool in all_tools():
             _k8s.apply_agent_config(
                 ws.k8s_namespace, secret=oc_secret,
