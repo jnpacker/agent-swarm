@@ -116,6 +116,14 @@ Parent epic: [ACM-32892](https://redhat.atlassian.net/browse/ACM-32892) — Impl
 
 # ──────────────────────────────────────────────────────────
 - date: "2026-05-07"
+  title: "Move .push-defaults to agent-swarm as source of truth for REGISTRY and IMAGE_TAG"
+  jira: "ACM-33878"
+  jira_url: "https://redhat.atlassian.net/browse/ACM-33878"
+  status: "Done"
+  pr: "https://github.com/stolostron/agent-swarm/pull/61"
+  summary: "Moved REGISTRY + IMAGE_TAG source of truth to agent-swarm/.push-defaults (checked in); updated agent-containers Makefile and all 6 scripts to resolve from ../agent-swarm first with local fallback for machine-specific fields"
+  
+- date: "2026-05-07"
   title: "Improve secrets security: session-scoped K8s secrets, per-user credential isolation, and cleanup lifecycle"
   jira: "ACM-33880"
   jira_url: "https://redhat.atlassian.net/browse/ACM-33880"
