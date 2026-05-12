@@ -5,7 +5,7 @@ A FastAPI + HTMX dashboard for managing [opencode](https://opencode.ai) agent wo
 ## Capabilities
 
 - **Workspaces** — each workspace maps 1:1 to a Kubernetes namespace; create, rename, and delete workspaces from the UI
-- **Secrets** — Fernet-encrypted storage for OpenCode credentials (GCP/Vertex AI, Gemini), GitHub PATs for HTTPS git auth, and OCI registry pull secrets; all auto-synced to Kubernetes Secret objects
+- **Secrets** — Fernet-encrypted storage for OpenCode credentials (GCP/Vertex AI, Gemini), GitHub PATs for HTTPS git auth, and OCI registry pull secrets; all auto-synced to Kubernetes Secret objects; optional unmanaged Secret `swarmer-agent-extra-env` per workspace injects extra agent env vars
 - **Session lifecycle** — create → launch → monitor → stop → delete sessions backed by Kubernetes Pods and PVCs
 - **Three session modes:**
   - **Prompt** — one-shot: run a prompt, stream output, pod exits when done

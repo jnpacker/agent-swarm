@@ -269,7 +269,7 @@ Use placeholder patterns instead: `<YOUR_PROJECT>`, `example.com`, `your-registr
 - Template directories: plural noun matching the resource
 - HTMX partial templates: prefixed with `_` (e.g., `_status_badge.html`, `_repo_list.html`, `_list_rows.html`)
 - K8s resource names: `session-{session_id}-{suffix}` (pods, PVCs), `session-{session_id}-svc` (services), `session-{session_id}-chat` (routes)
-- K8s secret names: derived from model fields (e.g., `github-pat-{slug}`, `opencode-secret`, `crush-secret`)
+- K8s secret names: derived from model fields (e.g., `github-pat-{slug}`, `opencode-secret`, `crush-secret`); optional unmanaged `swarmer-agent-extra-env` in the workspace namespace injects extra agent env vars (`envFrom`, optional)
 - URL pattern: `/workspaces/{ws_id}/sessions/{sid}/action`
 
 ### Configuration

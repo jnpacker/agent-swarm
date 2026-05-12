@@ -250,6 +250,53 @@ def delete_github_pat_secret(namespace: str, pat) -> None:
 
 MCP_SECRET_NAME = "mcp-server-tokens"
 
+# Optional Opaque Secret in each workspace namespace: keys become env vars in the
+# agent container. Managed via the Swarmer UI or externally (GitOps / kubectl).
+AGENT_EXTRA_ENV_SECRET_NAME = "swarmer-agent-extra-env"
+
+
+def get_extra_env_vars(namespace: str) -> dict[str, str]:
+    """Read the swarmer-agent-extra-env Secret and return decoded key-value pairs.
+
+    Returns an empty dict if the secret does not exist.
+    """
+    from kubernetes import client
+
+    v1 = client.CoreV1Api()
+    try:
+        secret = v1.read_namespaced_secret(AGENT_EXTRA_ENV_SECRET_NAME, namespace)
+    except client.exceptions.ApiException as exc:
+        if exc.status == 404:
+            return {}
+        raise
+    result: dict[str, str] = {}
+    if secret.data:
+        for key, value in secret.data.items():
+            result[key] = base64.b64decode(value).decode()
+    return result
+
+
+def set_extra_env_var(namespace: str, key: str, value: str) -> None:
+    """Add or update a single key in the swarmer-agent-extra-env Secret."""
+    existing = get_extra_env_vars(namespace)
+    existing[key] = value
+    data = {k: _b64(v) for k, v in existing.items()}
+    _apply_secret(namespace, AGENT_EXTRA_ENV_SECRET_NAME, data)
+
+
+def delete_extra_env_var(namespace: str, key: str) -> None:
+    """Remove a single key from the swarmer-agent-extra-env Secret.
+
+    Deletes the secret entirely when the last key is removed.
+    """
+    existing = get_extra_env_vars(namespace)
+    existing.pop(key, None)
+    if existing:
+        data = {k: _b64(v) for k, v in existing.items()}
+        _apply_secret(namespace, AGENT_EXTRA_ENV_SECRET_NAME, data)
+    else:
+        _delete_secret(namespace, AGENT_EXTRA_ENV_SECRET_NAME)
+
 
 def sync_mcp_server_secret(namespace: str, mcp_servers) -> None:
     """Create or update the K8s Secret containing MCP server credentials."""

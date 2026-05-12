@@ -1,0 +1,170 @@
+{% extends "base.html" %}
+{% block title %}Environment Variables — {{ ws.display_name }} — Swarmer{% endblock %}
+
+{% block content %}
+{# ── Breadcrumb ── #}
+<nav class="pf-v6-c-breadcrumb" aria-label="breadcrumb" style="margin-bottom:var(--pf-t--global--spacer--md);">
+  <ol class="pf-v6-c-breadcrumb__list">
+    <li class="pf-v6-c-breadcrumb__item">
+      <span class="pf-v6-c-breadcrumb__item-divider">/</span>
+      <a href="/workspaces" class="pf-v6-c-breadcrumb__link">Workspaces</a>
+    </li>
+    <li class="pf-v6-c-breadcrumb__item">
+      <span class="pf-v6-c-breadcrumb__item-divider">/</span>
+      <a href="/workspaces/{{ ws.id }}" class="pf-v6-c-breadcrumb__link">{{ ws.display_name }}</a>
+    </li>
+    <li class="pf-v6-c-breadcrumb__item">
+      <span class="pf-v6-c-breadcrumb__item-divider">/</span>
+      <span class="pf-v6-c-breadcrumb__link pf-m-current">Environment Variables</span>
+    </li>
+  </ol>
+</nav>
+
+<h1 class="pf-v6-c-title pf-m-2xl" style="margin-bottom:var(--pf-t--global--spacer--xs);">Environment Variables</h1>
+<p style="color:var(--pf-t--global--text--color--subtle); margin-bottom:var(--pf-t--global--spacer--lg);">
+  Extra environment variables injected into every session pod in namespace <code>{{ ws.namespace }}</code>.
+  Stored in the <code>swarmer-agent-extra-env</code> Kubernetes Secret and loaded alongside
+  provider credentials from Secrets.
+</p>
+
+{# ── Current env vars ── #}
+{% if env_vars %}
+<h2 class="pf-v6-c-title pf-m-lg" style="margin-bottom:var(--pf-t--global--spacer--md);">Current Variables</h2>
+<table class="pf-v6-c-table pf-m-grid-md" role="grid" style="margin-bottom:var(--pf-t--global--spacer--xl);">
+  <thead class="pf-v6-c-table__thead">
+    <tr class="pf-v6-c-table__tr" role="row">
+      <th class="pf-v6-c-table__th" role="columnheader">Key</th>
+      <th class="pf-v6-c-table__th" role="columnheader">Value</th>
+      <th class="pf-v6-c-table__th pf-m-fit-content" role="columnheader" style="text-align:right;">Actions</th>
+    </tr>
+  </thead>
+  <tbody class="pf-v6-c-table__tbody" role="rowgroup">
+  {% for key, value in env_vars.items() | sort %}
+    <tr class="pf-v6-c-table__tr" role="row">
+      <td class="pf-v6-c-table__td" role="cell" data-label="Key">
+        <code style="font-weight:var(--pf-t--global--font--weight--heading--bold);">{{ key }}</code>
+      </td>
+      <td class="pf-v6-c-table__td" role="cell" data-label="Value">
+        <span style="display:flex; align-items:center; gap:var(--pf-t--global--spacer--xs);">
+          <code class="ev-value" style="word-break:break-all; letter-spacing:0.1em;">••••••••</code>
+          <span class="ev-value-clear" style="display:none;">
+            <code style="word-break:break-all;">{{ value }}</code>
+          </span>
+          <button type="button" class="pf-v6-c-button pf-m-plain ev-toggle"
+                  aria-label="Show value"
+                  style="color:var(--pf-t--global--text--color--subtle); flex-shrink:0; padding:0 var(--pf-t--global--spacer--xs);">
+            <svg class="ev-icon-show" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 576 512" fill="currentColor">
+              <path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM144 256a144 144 0 1 1 288 0 144 144 0 1 1 -288 0zm144-64c0 35.3-28.7 64-64 64c-7.1 0-13.9-1.2-20.3-3.3c-5.5-1.8-11.9 1.6-11.7 7.4c.3 6.9 1.3 13.8 3.2 20.7c13.7 51.2 66.4 81.6 117.6 67.9s81.6-66.4 67.9-117.6c-11.1-41.5-47.8-69.4-88.6-71.1c-5.8-.2-9.2 6.1-7.4 11.7c2.1 6.4 3.3 13.2 3.3 20.3z"/>
+            </svg>
+            <svg class="ev-icon-hide" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 640 512" fill="currentColor" style="display:none;">
+              <path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c8.4-19.3 10.6-41.4 4.8-63.3c-11.1-41.5-47.8-69.4-88.6-71.1c-5.8-.2-9.2 6.1-7.4 11.7c2.1 6.4 3.3 13.2 3.3 20.3c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zM373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5L373 389.9z"/>
+            </svg>
+          </button>
+        </span>
+      </td>
+      <td class="pf-v6-c-table__td pf-m-fit-content" role="cell" data-label="Actions" style="text-align:right;">
+        <form method="post" action="/workspaces/{{ ws.id }}/env-vars/{{ key | urlencode }}/delete"
+              style="display:inline"
+              onsubmit="return confirm('Delete environment variable \'{{ key }}\'?')">
+          <button type="submit" class="pf-v6-c-button pf-m-danger pf-m-small">Delete</button>
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="pf-v6-c-empty-state" style="margin-bottom:var(--pf-t--global--spacer--xl);">
+  <div class="pf-v6-c-empty-state__content">
+    <h2 class="pf-v6-c-empty-state__title-text">No environment variables set</h2>
+    <div class="pf-v6-c-empty-state__body">
+      Add key-value pairs below to inject them into every session pod.
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<script>
+  document.querySelectorAll('.ev-toggle').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var cell    = btn.closest('td, span');
+      var masked  = cell.querySelector('.ev-value');
+      var clear   = cell.querySelector('.ev-value-clear');
+      var iconShow = btn.querySelector('.ev-icon-show');
+      var iconHide = btn.querySelector('.ev-icon-hide');
+      var showing = clear.style.display !== 'none';
+      masked.style.display  = showing ? '' : 'none';
+      clear.style.display   = showing ? 'none' : '';
+      iconShow.style.display = showing ? '' : 'none';
+      iconHide.style.display = showing ? 'none' : '';
+      btn.setAttribute('aria-label', showing ? 'Show value' : 'Hide value');
+    });
+  });
+</script>
+
+{# ── Add / update variable form ── #}
+<h2 class="pf-v6-c-title pf-m-lg" style="margin-bottom:var(--pf-t--global--spacer--md);">Add / Update Variable</h2>
+<form method="post" action="/workspaces/{{ ws.id }}/env-vars" class="pf-v6-c-form" style="max-width:600px;">
+  <div class="pf-v6-c-form__group">
+    <label class="pf-v6-c-form__label" for="env-key">
+      <span class="pf-v6-c-form__label-text" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">Key</span>
+      <span class="pf-v6-c-form__label-required" aria-hidden="true">&#42;</span>
+    </label>
+    <div class="pf-v6-c-form__group-control">
+      <input type="text" class="pf-v6-c-form-control" id="env-key" name="key"
+             placeholder="MY_VAR" required pattern="[A-Za-z_][A-Za-z0-9_]*"
+             style="font-family:monospace;" autocomplete="off">
+      <div class="pf-v6-c-form__helper-text">
+        <div class="pf-v6-c-helper-text__item">
+          <span class="pf-v6-c-helper-text__item-text">Must start with a letter or underscore. Submitting an existing key overwrites it.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="pf-v6-c-form__group">
+    <label class="pf-v6-c-form__label" for="env-value">
+      <span class="pf-v6-c-form__label-text" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">Value</span>
+      <span class="pf-v6-c-form__label-required" aria-hidden="true">&#42;</span>
+    </label>
+    <div class="pf-v6-c-form__group-control">
+      <div style="display:flex; gap:var(--pf-t--global--spacer--xs); align-items:center;">
+        <input type="password" class="pf-v6-c-form-control" id="env-value" name="value"
+               placeholder="value" required style="font-family:monospace; flex:1;" autocomplete="off">
+        <button type="button" id="env-value-toggle"
+                class="pf-v6-c-button pf-m-plain" aria-label="Show value"
+                style="flex-shrink:0; color:var(--pf-t--global--text--color--subtle);">
+          {# eye icon (shown when input is hidden) #}
+          <svg id="env-value-icon-show" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 576 512" fill="currentColor">
+            <path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM144 256a144 144 0 1 1 288 0 144 144 0 1 1 -288 0zm144-64c0 35.3-28.7 64-64 64c-7.1 0-13.9-1.2-20.3-3.3c-5.5-1.8-11.9 1.6-11.7 7.4c.3 6.9 1.3 13.8 3.2 20.7c13.7 51.2 66.4 81.6 117.6 67.9s81.6-66.4 67.9-117.6c-11.1-41.5-47.8-69.4-88.6-71.1c-5.8-.2-9.2 6.1-7.4 11.7c2.1 6.4 3.3 13.2 3.3 20.3z"/>
+          </svg>
+          {# eye-slash icon (shown when input is visible) #}
+          <svg id="env-value-icon-hide" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 640 512" fill="currentColor" style="display:none;">
+            <path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c8.4-19.3 10.6-41.4 4.8-63.3c-11.1-41.5-47.8-69.4-88.6-71.1c-5.8-.2-9.2 6.1-7.4 11.7c2.1 6.4 3.3 13.2 3.3 20.3c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zM373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5L373 389.9z"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </div>
+  <script>
+    (function () {
+      var inp   = document.getElementById('env-value');
+      var btn   = document.getElementById('env-value-toggle');
+      var iconShow = document.getElementById('env-value-icon-show');
+      var iconHide = document.getElementById('env-value-icon-hide');
+      btn.addEventListener('click', function () {
+        var visible = inp.type === 'text';
+        inp.type = visible ? 'password' : 'text';
+        iconShow.style.display = visible ? '' : 'none';
+        iconHide.style.display = visible ? 'none' : '';
+        btn.setAttribute('aria-label', visible ? 'Show value' : 'Hide value');
+      });
+    })();
+  </script>
+  <div class="pf-v6-c-form__group pf-m-action" style="margin-top:var(--pf-t--global--spacer--md);">
+    <div class="pf-v6-c-form__actions">
+      <button type="submit" class="pf-v6-c-button pf-m-primary">Save Variable</button>
+      <a href="/workspaces/{{ ws.id }}" class="pf-v6-c-button pf-m-link">Cancel</a>
+    </div>
+  </div>
+</form>
+{% endblock %}
