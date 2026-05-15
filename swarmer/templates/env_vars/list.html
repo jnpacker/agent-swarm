@@ -22,7 +22,7 @@
 
 <h1 class="pf-v6-c-title pf-m-2xl" style="margin-bottom:var(--pf-t--global--spacer--xs);">Environment Variables</h1>
 <p style="color:var(--pf-t--global--text--color--subtle); margin-bottom:var(--pf-t--global--spacer--lg);">
-  Extra environment variables injected into every session pod in namespace <code>{{ ws.namespace }}</code>.
+  Extra environment variables injected into every session pod in namespace <code>{{ ws.k8s_namespace }}</code>.
   Stored in the <code>swarmer-agent-extra-env</code> Kubernetes Secret and loaded alongside
   provider credentials from Secrets.
 </p>
@@ -113,7 +113,7 @@
     <div class="pf-v6-c-form__group-control">
       <input type="text" class="pf-v6-c-form-control" id="env-key" name="key"
              placeholder="MY_VAR" required pattern="[A-Za-z_][A-Za-z0-9_]*"
-             style="font-family:monospace;" autocomplete="off">
+             maxlength="255" style="font-family:monospace;" autocomplete="off">
       <div class="pf-v6-c-form__helper-text">
         <div class="pf-v6-c-helper-text__item">
           <span class="pf-v6-c-helper-text__item-text">Must start with a letter or underscore. Submitting an existing key overwrites it.</span>
