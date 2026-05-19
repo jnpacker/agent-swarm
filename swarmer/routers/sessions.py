@@ -29,6 +29,7 @@ from swarmer.models.opencode_secret import OpencodeSecret
 from swarmer.models.session import CRON_PRESETS, Session
 from swarmer.models.session_repo import SessionRepo
 from swarmer.models.workspace import Workspace
+from swarmer.models.workspace_prompt import WorkspacePrompt, WorkspacePromptSource
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +90,17 @@ async def _visible_pats(ws_id: int, db: AsyncSession, user_id: str = "") -> list
 
 async def _get_workspace(ws_id: int, db: AsyncSession) -> Workspace | None:
     return await db.get(Workspace, ws_id)
+
+
+async def _get_prompt_sources(ws_id: int, db: AsyncSession) -> list[WorkspacePromptSource]:
+    """Return all prompt sources and their prompts for this workspace."""
+    result = await db.execute(
+        select(WorkspacePromptSource)
+        .where(WorkspacePromptSource.workspace_id == ws_id)
+        .options(selectinload(WorkspacePromptSource.prompts))
+        .order_by(WorkspacePromptSource.name)
+    )
+    return list(result.scalars().all())
 
 
 # ============================================================
@@ -236,6 +248,7 @@ async def session_new(
     )
     from swarmer.routers.mcp_servers import get_enabled_mcp_servers
     mcp_servers = await get_enabled_mcp_servers(ws_id, db, user_id=_current_user(request))
+    prompt_sources = await _get_prompt_sources(ws_id, db)
     return templates.TemplateResponse(
         request,
         "sessions/new.html",
@@ -248,6 +261,7 @@ async def session_new(
             "default_agent_tool": default_agent_tool,
             "tool_image_available": dict(zip([t.name for t in _tools], _avail, strict=False)),
             "mcp_servers": mcp_servers,
+            "prompt_sources": prompt_sources,
         },
     )
 
@@ -258,6 +272,7 @@ async def session_create(
     request: Request,
     name: str = Form(...),
     github_pat_id: str = Form(""),
+    prompt_id: str = Form(""),
     instruction_prompt: str = Form(""),
     persist: bool = Form(False),
     resume: bool = Form(False),
@@ -272,6 +287,30 @@ async def session_create(
         return RedirectResponse(url="/workspaces", status_code=302)
 
     pat_id = int(github_pat_id) if github_pat_id else None
+    pid = None
+    if prompt_id:
+        try:
+            pid = int(prompt_id)
+            # Verify prompt ownership
+            from swarmer.models.workspace_prompt import WorkspacePrompt, WorkspacePromptSource
+            prompt = await db.get(WorkspacePrompt, pid)
+            if not prompt:
+                flash(request, "Selected prompt not found.", "danger")
+                return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/new", status_code=302)
+
+            # WorkspacePrompt -> WorkspacePromptSource -> Workspace
+            # We need to load the source to check workspace_id
+            result = await db.execute(
+                select(WorkspacePromptSource).where(WorkspacePromptSource.id == prompt.source_id)
+            )
+            source = result.scalar_one_or_none()
+            if not source or source.workspace_id != ws_id:
+                flash(request, "Selected prompt does not belong to this workspace.", "danger")
+                return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/new", status_code=302)
+        except ValueError:
+            flash(request, "Invalid prompt selection.", "danger")
+            return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/new", status_code=302)
+
     if mode not in ("tui", "server", "prompt"):
         mode = "prompt"
 
@@ -292,6 +331,7 @@ async def session_create(
     session = Session(
         workspace_id=ws_id,
         github_pat_id=pat_id,
+        prompt_id=pid,
         name=name.strip(),
         mode=mode,
         model=model.strip(),
@@ -362,7 +402,11 @@ async def session_detail(
     session = await db.get(
         Session,
         sid,
-        options=[selectinload(Session.github_pat), selectinload(Session.repos)],
+        options=[
+            selectinload(Session.github_pat),
+            selectinload(Session.repos),
+            selectinload(Session.prompt),
+        ],
     )
     if ws is None or session is None or session.workspace_id != ws_id:
         return RedirectResponse(url=f"/workspaces/{ws_id}/sessions", status_code=302)
@@ -399,6 +443,7 @@ async def session_detail(
         canonical_agent_tool = session.agent_tool
     from swarmer.routers.mcp_servers import get_enabled_mcp_servers
     mcp_servers = await get_enabled_mcp_servers(ws_id, db, user_id=_current_user(request))
+    prompt_sources = await _get_prompt_sources(ws_id, db)
     return templates.TemplateResponse(
         request,
         "sessions/detail.html",
@@ -419,6 +464,7 @@ async def session_detail(
             "patch_filename": _patch_filename(session),
             "cron_presets": CRON_PRESETS,
             "mcp_servers": mcp_servers,
+            "prompt_sources": prompt_sources,
         },
     )
 
@@ -437,6 +483,7 @@ async def session_edit(
     request: Request,
     name: str = Form(...),
     github_pat_id: str = Form(""),
+    prompt_id: str = Form(""),
     instruction_prompt: str = Form(""),
     persist: bool = Form(False),
     resume: bool = Form(False),
@@ -455,6 +502,30 @@ async def session_edit(
 
     session.name = name.strip()
     session.github_pat_id = int(github_pat_id) if github_pat_id else None
+
+    if prompt_id:
+        try:
+            pid = int(prompt_id)
+            from swarmer.models.workspace_prompt import WorkspacePrompt, WorkspacePromptSource
+            prompt = await db.get(WorkspacePrompt, pid)
+            if not prompt:
+                flash(request, "Selected prompt not found.", "danger")
+                return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}", status_code=302)
+
+            result = await db.execute(
+                select(WorkspacePromptSource).where(WorkspacePromptSource.id == prompt.source_id)
+            )
+            source = result.scalar_one_or_none()
+            if not source or source.workspace_id != ws_id:
+                flash(request, "Selected prompt does not belong to this workspace.", "danger")
+                return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}", status_code=302)
+            session.prompt_id = pid
+        except ValueError:
+            flash(request, "Invalid prompt selection.", "danger")
+            return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}", status_code=302)
+    else:
+        session.prompt_id = None
+
     session.instruction_prompt = instruction_prompt.strip()
     session.persist = persist
     session.resume = resume
@@ -623,6 +694,13 @@ async def _do_launch(session: Session, ws: Workspace, db: AsyncSession, user_id:
 
     session.k8s_secret_names = ",".join(secret_names)
 
+    # Resolve prompt if prompt_id is set
+    resolved_prompt = session.instruction_prompt
+    if session.prompt_id:
+        p = await db.get(WorkspacePrompt, session.prompt_id)
+        if p:
+            resolved_prompt = p.content
+
     pod_spec = k8s_sess.build_session_pod(
         session=session,
         namespace=ws.k8s_namespace,
@@ -637,6 +715,7 @@ async def _do_launch(session: Session, ws: Workspace, db: AsyncSession, user_id:
         agent_secret_name=_agent_secret_name,
         pat_secret_name=_pat_secret_name,
         mcp_secret_name=_mcp_secret_name,
+        resolved_prompt=resolved_prompt,
     )
     from kubernetes import client as k8s_client
 
@@ -679,6 +758,7 @@ async def session_launch(
     save_config: str = Form(""),
     name: str = Form(""),
     github_pat_id: str = Form(""),
+    prompt_id: str = Form(""),
     instruction_prompt: str = Form(""),
     persist: bool = Form(False),
     resume: bool = Form(False),
@@ -703,6 +783,26 @@ async def session_launch(
         if name.strip():
             session.name = name.strip()
         session.github_pat_id = int(github_pat_id) if github_pat_id else None
+        # Persist prompt_id selection
+        if prompt_id:
+            try:
+                pid = int(prompt_id)
+                p = await db.get(WorkspacePrompt, pid)
+                if p:
+                    result = await db.execute(
+                        select(WorkspacePromptSource).where(WorkspacePromptSource.id == p.source_id)
+                    )
+                    source = result.scalar_one_or_none()
+                    if source and source.workspace_id == ws_id:
+                        session.prompt_id = pid
+                    else:
+                        session.prompt_id = None
+                else:
+                    session.prompt_id = None
+            except ValueError:
+                session.prompt_id = None
+        else:
+            session.prompt_id = None
         session.instruction_prompt = instruction_prompt.strip()
         session.persist = persist
         session.resume = resume
@@ -1385,8 +1485,9 @@ async def session_generate_patch(
     session = await db.get(
         Session,
         sid,
-        options=[selectinload(Session.repos)],
+        options=[selectinload(Session.github_pat), selectinload(Session.repos), selectinload(Session.prompt)],
     )
+
     if ws is None or session is None or session.workspace_id != ws_id:
         return RedirectResponse(url=f"/workspaces/{ws_id}/sessions", status_code=302)
 
