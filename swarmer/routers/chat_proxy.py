@@ -30,13 +30,6 @@ _HOP_BY_HOP = frozenset({
     "te", "trailers", "transfer-encoding", "upgrade", "host",
 })
 
-# ── Upstream URL resolution ───────────────────────────────────────────────────
-
-def _get_upstream_base(session_id: int, namespace: str, remote_port: int = 4096) -> str:
-    """Return the ClusterIP Service base URL for the session's agent process."""
-    svc = f"session-{session_id}-svc"
-    return f"http://{svc}.{namespace}.svc.cluster.local:{remote_port}"
-
 
 # ── HTML rewriting (in-cluster only) ─────────────────────────────────────────
 
@@ -77,7 +70,8 @@ def _session_ok(ws_obj, session, ws_id: int) -> str | None:
     """Return an error string if the session can't be proxied, else None."""
     if ws_obj is None or session is None or session.workspace_id != ws_id:
         return "Not found"
-    if session.mode != "server" or not session.is_active or not session.pod_name:
+    has_backend = bool(getattr(session, "sandbox_name", None) or session.pod_name)
+    if session.mode != "server" or not session.is_active or not has_backend:
         return "Session is not running in server mode"
     return None
 
@@ -142,13 +136,19 @@ async def _chat_http_proxy(
     if err:
         return Response(err, status_code=503 if "running" in err else 404, media_type="text/plain")
 
-    from swarmer.k8s import effective_namespace
+    from swarmer.k8s import effective_namespace, get_session_route_host
     namespace = effective_namespace(ws_obj.k8s_namespace)
-    try:
-        upstream_base = _get_upstream_base(session.id, namespace)
-    except Exception as exc:
-        log.warning("Could not connect to session %d: %s", sid, exc)
-        return Response(f"Could not connect to session: {exc}", status_code=503, media_type="text/plain")
+    sandbox_name = getattr(session, "sandbox_name", None)
+    if sandbox_name:
+        return Response(
+            "OpenShell session: use the exec relay endpoint for server-mode proxy.",
+            status_code=503,
+            media_type="text/plain",
+        )
+    route_host = get_session_route_host(session.id, namespace)
+    if not route_host:
+        return Response("No proxy route available for this session.", status_code=503, media_type="text/plain")
+    upstream_base = f"http://{route_host}"
 
     query = str(request.url.query)
     upstream_url = f"{upstream_base}/{path}"
@@ -264,26 +264,29 @@ async def chat_ws_proxy(
         session = await db.get(Session, sid)
         break
 
-    if (
-        ws_obj is None
-        or session is None
-        or session.workspace_id != ws_id
-        or session.mode != "server"
-        or not session.is_active
-        or not session.pod_name
-    ):
+    has_backend = bool(
+        (ws_obj and session and session.workspace_id == ws_id and session.mode == "server"
+         and session.is_active)
+        and (getattr(session, "sandbox_name", None) or session.pod_name)
+    )
+    if not has_backend:
         await websocket.close(code=4004, reason="Session unavailable")
         return
 
-    from swarmer.k8s import effective_namespace
+    from swarmer.k8s import effective_namespace, get_session_route_host
     namespace = effective_namespace(ws_obj.k8s_namespace)
-    try:
-        upstream_base = _get_upstream_base(session.id, namespace)
-    except Exception as exc:
-        log.warning("Could not connect to session %d for WS: %s", sid, exc)
-        await websocket.close(code=4004, reason="Could not connect to session")
+
+    if getattr(session, "sandbox_name", None):
+        log.warning("OpenShell WS proxy not yet implemented via exec relay for session %d", sid)
+        await websocket.close(code=4004, reason="OpenShell exec relay not configured")
         return
 
+    route_host = get_session_route_host(session.id, namespace)
+    if not route_host:
+        await websocket.close(code=4004, reason="No route available for session")
+        return
+
+    upstream_base = f"http://{route_host}"
     query = websocket.url.query
     upstream_url = upstream_base.replace("http://", "ws://") + f"/{path}"
     if query:

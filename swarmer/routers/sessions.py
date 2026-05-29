@@ -748,16 +748,6 @@ async def _do_launch(session: Session, ws: Workspace, db: AsyncSession, user_id:
     session.run_started_at = datetime.utcnow()
     session.run_completed_at = None
 
-    if session.mode == "server":
-        tool = get_tool(session.agent_tool)
-        port = tool.get_server_port() or 4096
-        svc_name = await asyncio.to_thread(
-            k8s_sess.create_session_service, session.id, ws.k8s_namespace, port,
-        )
-        await asyncio.to_thread(
-            k8s.create_session_route, session.id, ws.k8s_namespace, svc_name, port,
-        )
-
     await db.commit()
     if session.mode in ("prompt", "server"):
         from swarmer import log_poller

@@ -62,8 +62,12 @@ async def session_tui(
         await websocket.close(code=4002, reason="Session not found")
         return
 
-    if not session.pod_name or session.phase != "running":
-        log.warning("TUI WS: session %d not running (phase=%s, pod=%s)", sid, session.phase if session else "none", session.pod_name if session else "none")
+    sandbox_name = getattr(session, "sandbox_name", None)
+    if not (sandbox_name or session.pod_name) or session.phase != "running":
+        log.warning("TUI WS: session %d not running (phase=%s, sandbox=%s, pod=%s)",
+                    sid, session.phase if session else "none",
+                    sandbox_name if session else "none",
+                    session.pod_name if session else "none")
         await websocket.close(code=4003, reason="Session not running")
         return
 
@@ -85,31 +89,47 @@ async def session_tui(
         f"{{ {cmd_base} --continue || exec {cmd_base}; }}"
     )
 
-    # ---------- Open kubernetes exec stream ----------
-    from kubernetes import client as k8s_client
-    from kubernetes.stream import stream as k8s_stream
-
-    v1 = k8s_client.CoreV1Api()
-    try:
-        exec_resp = k8s_stream(
-            v1.connect_get_namespaced_pod_exec,
-            pod_name,
-            namespace,
-            container=container_name,
-            command=["sh", "-c", tui_shell],
-            stderr=True,
-            stdin=True,
-            stdout=True,
-            tty=True,
-            _preload_content=False,
-        )
-    except Exception as exc:
-        log.error("TUI exec stream open failed for pod %s: %s", pod_name, exc)
+    # ---------- Open exec stream ----------
+    if sandbox_name:
+        # OpenShell session: use SandboxClient.exec_stream()
+        from swarmer import openshell_client as _oc
         try:
-            await websocket.close(code=4004, reason="Exec failed")
-        except Exception:
-            pass
-        return
+            exec_resp = await _oc._get_client().exec_stream(
+                sandbox_name,
+                ["sh", "-c", tui_shell],
+                tty=True,
+            )
+        except Exception as exc:
+            log.error("TUI exec_stream open failed for sandbox %s: %s", sandbox_name, exc)
+            try:
+                await websocket.close(code=4004, reason="Exec failed")
+            except Exception:
+                pass
+            return
+    else:
+        from kubernetes import client as k8s_client
+        import kubernetes.stream
+        v1 = k8s_client.CoreV1Api()
+        try:
+            exec_resp = kubernetes.stream.stream(
+                v1.connect_get_namespaced_pod_exec,
+                pod_name,
+                namespace,
+                container=container_name,
+                command=["sh", "-c", tui_shell],
+                stderr=True,
+                stdin=True,
+                stdout=True,
+                tty=True,
+                _preload_content=False,
+            )
+        except Exception as exc:
+            log.error("TUI exec stream open failed for pod %s: %s", pod_name, exc)
+            try:
+                await websocket.close(code=4004, reason="Exec failed")
+            except Exception:
+                pass
+            return
 
     # Send initial terminal size (channel 4 = resize)
     try:

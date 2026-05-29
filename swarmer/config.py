@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     agent_image_pull_secret: str = ""
     agent_image_pull_policy: str = "IfNotPresent"
     k8s_namespace: str = ""
+    openshell_gateway_url: str = ""
+    openshell_tls_ca_path: str = ""
+    openshell_tls_cert_path: str = ""
+    openshell_tls_key_path: str = ""
+    openshell_enabled: bool = False
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
