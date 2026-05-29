@@ -216,6 +216,13 @@ Parent epic: [ACM-32892](https://redhat.atlassian.net/browse/ACM-32892) — Impl
   status: "In Progress"
   pr: "https://github.com/stolostron/agent-swarm/pull/92"
   summary: "Standalone Python MCP server in mcp-server/ exposing 12 MVP tools for session discovery, creation, configuration, launch, and output retrieval. Cascading K8s bearer token auth (env var > in-cluster SA > kubeconfig). Sub-task of ACM-34223."
+---
+- date: "2026-05-29"
+  title: "Write full test suite for OpenShell integration: unit, policy, proxy, and e2e cluster validation (OpenShift + Kind)"
+  jira: "ACM-34607"
+  jira_url: "https://redhat.atlassian.net/browse/ACM-34607"
+  pr: ~
+  summary: "Write all three test layers (unit session lifecycle, policy engine, proxy/connectivity) plus a dedicated e2e suite validating sandbox lifecycle against real OpenShift and Kind clusters, including cleanup validation on session stop."
 
 # ──────────────────────────────────────────────────────────
 - date: "2026-05-14"

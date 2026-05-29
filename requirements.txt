@@ -15,3 +15,7 @@ google-auth==2.53.0
 websockets==16.0
 itsdangerous==2.2.0
 croniter==6.2.2
+# OpenShell SDK — alpha; pin once a stable release is tagged on PyPI.
+# Required by swarmer/openshell_client.py (ACM-34583) and tests/test_openshell_*.py.
+# Install: pip install openshell  (or pin: openshell==0.x.x)
+openshell
