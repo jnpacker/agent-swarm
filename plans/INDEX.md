@@ -223,6 +223,13 @@ Parent epic: [ACM-32892](https://redhat.atlassian.net/browse/ACM-32892) — Impl
   jira_url: "https://redhat.atlassian.net/browse/ACM-34607"
   pr: ~
   summary: "Write all three test layers (unit session lifecycle, policy engine, proxy/connectivity) plus a dedicated e2e suite validating sandbox lifecycle against real OpenShift and Kind clusters, including cleanup validation on session stop."
+---
+- date: "2026-05-29"
+  title: "Replace AgentSwarm K8s pod lifecycle with OpenShell sandbox orchestration"
+  jira: "ACM-34583"
+  jira_url: "https://redhat.atlassian.net/browse/ACM-34583"
+  pr: ~
+  summary: "Implement openshell_client.py, migrate credentials from K8s Secrets to OpenShell Providers, rewrite _do_launch(), update chat_proxy.py and tui_ws.py to use exec relay, add sandbox_name to Session model with Alembic migration, and remove all dead K8s pod/PVC/Secret code."
 
 # ──────────────────────────────────────────────────────────
 - date: "2026-05-14"
