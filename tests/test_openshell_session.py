@@ -19,12 +19,38 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-# Inject an openshell SDK stub so imports inside swarmer.openshell_client won't
-# hit a real package that doesn't exist yet.
+# Inject an openshell SDK stub so imports inside swarmer.openshell_client work
+# without a real installed package.
+
+class _SandboxTemplate:
+    def __init__(self):
+        self.image = ""
+        self.environment = {}
+
+class _SandboxSpec:
+    def __init__(self):
+        self.template = _SandboxTemplate()
+        self.environment = {}
+        self.policy = None
+
+    def __repr__(self):
+        return (
+            f"SandboxSpec(image={self.template.image!r}, "
+            f"env={self.environment}, policy={self.policy!r})"
+        )
+
+_proto_stub = MagicMock()
+_proto_stub.openshell_pb2 = MagicMock()
+_proto_stub.openshell_pb2.SandboxSpec = _SandboxSpec
+
 _sdk_stub = MagicMock()
 _sdk_stub.SandboxClient = MagicMock
 _sdk_stub.TlsConfig = MagicMock
+_sdk_stub._proto = _proto_stub
+
 sys.modules.setdefault("openshell", _sdk_stub)
+sys.modules.setdefault("openshell._proto", _proto_stub)
+sys.modules.setdefault("openshell._proto.openshell_pb2", _proto_stub.openshell_pb2)
 
 try:
     import swarmer.openshell_client as oc
@@ -48,14 +74,17 @@ def _require_client():
 
 @pytest.fixture
 def sdk_client():
-    """Mock object mimicking the openshell.SandboxClient interface."""
+    """Mock object mimicking the synchronous openshell.SandboxClient interface."""
     client = MagicMock()
-    client.create = AsyncMock(return_value=MagicMock(name="sandbox-s42-abc1", id="sandbox-s42-abc1"))
-    client.wait_ready = AsyncMock(return_value=None)
-    client.exec = AsyncMock(return_value=MagicMock(exit_code=0, stdout=""))
-    client.exec_stream = AsyncMock(return_value=None)
-    client.delete = AsyncMock(return_value=None)
-    client.provider_create = AsyncMock(return_value=MagicMock(id="provider-001"))
+    # SDK is synchronous — use plain MagicMock (called via run_in_executor)
+    ref = MagicMock()
+    ref.name = "sandbox-s42-abc1"
+    ref.id = "sandbox-s42-abc1"
+    client.create = MagicMock(return_value=ref)
+    client.get = MagicMock(return_value=ref)
+    client.wait_ready = MagicMock(return_value=ref)
+    client.exec = MagicMock(return_value=MagicMock(exit_code=0, stdout=""))
+    client.delete = MagicMock(return_value=True)
     return client
 
 
@@ -101,17 +130,18 @@ def github_pat():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_create_provider_calls_sdk(sdk_client, session, workspace_secret):
-    """create_provider must call SandboxClient.provider_create() once."""
+async def test_create_provider_returns_env_vars(sdk_client, session, workspace_secret):
+    """create_provider must return a dict of env vars built from workspace credentials."""
     _require_client()
-    with patch.object(oc, "_get_client", return_value=sdk_client):
-        await oc.create_provider(
-            session=session,
-            workspace_secret=workspace_secret,
-            github_pat=None,
-            mcp_servers=[],
-        )
-    sdk_client.provider_create.assert_called_once()
+    env_vars = await oc.create_provider(
+        session=session,
+        workspace_secret=workspace_secret,
+        github_pat=None,
+        mcp_servers=[],
+    )
+    assert isinstance(env_vars, dict)
+    assert "GOOGLE_API_KEY" in env_vars
+    assert "ANTHROPIC_API_KEY" in env_vars
 
 
 @pytest.mark.asyncio
@@ -148,23 +178,21 @@ async def test_create_provider_does_not_create_k8s_pat_secret(sdk_client, sessio
 
 @pytest.mark.asyncio
 async def test_create_provider_includes_github_credentials(sdk_client, session, workspace_secret, github_pat):
-    """GitHub PAT must be passed into the Provider spec, not a K8s Secret."""
+    """GitHub PAT must appear in the returned env-vars dict."""
     _require_client()
-    with patch.object(oc, "_get_client", return_value=sdk_client):
-        await oc.create_provider(
-            session=session,
-            workspace_secret=workspace_secret,
-            github_pat=github_pat,
-            mcp_servers=[],
-        )
-    sdk_client.provider_create.assert_called_once()
-    call_repr = str(sdk_client.provider_create.call_args)
-    assert "GITHUB_PAT" in call_repr or "github" in call_repr.lower()
+    env_vars = await oc.create_provider(
+        session=session,
+        workspace_secret=workspace_secret,
+        github_pat=github_pat,
+        mcp_servers=[],
+    )
+    assert "GITHUB_PAT" in env_vars
+    assert env_vars["GITHUB_PAT"] == github_pat.token
 
 
 @pytest.mark.asyncio
 async def test_create_provider_includes_jira_mcp_credentials(sdk_client, session, workspace_secret):
-    """Jira MCP credentials must be part of the Provider spec when Jira MCP is enabled."""
+    """Jira MCP credentials must appear in the returned env-vars dict."""
     _require_client()
     jira_mcp = MagicMock()
     jira_mcp.catalog_key = "jira"
@@ -173,15 +201,14 @@ async def test_create_provider_includes_jira_mcp_credentials(sdk_client, session
         "JIRA_ACCESS_TOKEN": "tok123",
         "JIRA_EMAIL": "user@redhat.com",
     }
-    with patch.object(oc, "_get_client", return_value=sdk_client):
-        await oc.create_provider(
-            session=session,
-            workspace_secret=workspace_secret,
-            github_pat=None,
-            mcp_servers=[jira_mcp],
-        )
-    call_repr = str(sdk_client.provider_create.call_args)
-    assert "JIRA" in call_repr.upper() or "jira" in call_repr.lower()
+    env_vars = await oc.create_provider(
+        session=session,
+        workspace_secret=workspace_secret,
+        github_pat=None,
+        mcp_servers=[jira_mcp],
+    )
+    assert "JIRA_SERVER_URL" in env_vars
+    assert "JIRA_ACCESS_TOKEN" in env_vars
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +223,7 @@ async def test_create_sandbox_uses_byoc_image(sdk_client):
     with patch.object(oc, "_get_client", return_value=sdk_client):
         await oc.create_sandbox(
             image=image,
-            provider_id="provider-001",
+            env_vars={},
             policy_yaml="version: 1\n",
         )
     sdk_client.create.assert_called_once()
@@ -211,7 +238,7 @@ async def test_wait_ready_called_after_create(sdk_client):
     with patch.object(oc, "_get_client", return_value=sdk_client):
         await oc.create_sandbox(
             image="quay.io/jpacker/opencode:latest",
-            provider_id="provider-001",
+            env_vars={},
             policy_yaml="version: 1\n",
         )
     sdk_client.wait_ready.assert_called_once()
@@ -226,7 +253,7 @@ async def test_create_sandbox_does_not_create_pvc(sdk_client):
         with patch.object(k8s_sess, "ensure_session_pvc") as mock_pvc:
             await oc.create_sandbox(
                 image="quay.io/jpacker/opencode:latest",
-                provider_id="provider-001",
+                env_vars={},
                 policy_yaml="version: 1\n",
             )
             mock_pvc.assert_not_called()

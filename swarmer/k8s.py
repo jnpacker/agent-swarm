@@ -437,11 +437,22 @@ def get_pod_phase(pod_name: str, namespace: str) -> str:
 
 
 def get_pod_logs(pod_name: str, namespace: str) -> str:
+    import ast
     from kubernetes import client
 
     try:
         v1 = client.CoreV1Api()
-        return v1.read_namespaced_pod_log(pod_name, namespace)
+        result = v1.read_namespaced_pod_log(pod_name, namespace)
+        if isinstance(result, bytes):
+            return result.decode("utf-8", errors="replace")
+        if isinstance(result, str) and (result.startswith("b'") or result.startswith('b"')):
+            try:
+                parsed = ast.literal_eval(result)
+                if isinstance(parsed, bytes):
+                    return parsed.decode("utf-8", errors="replace")
+            except Exception:
+                pass
+        return result
     except Exception:
         return ""
 

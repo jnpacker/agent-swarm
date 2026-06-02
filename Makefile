@@ -78,6 +78,14 @@ k8s-secret:  ## Create/update the swarmer-secret K8s Secret from auth/secret.key
 	  --from-literal=SWARMER_SECRET_KEY=$$(cat auth/secret.key) \
 	  -n $(NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
 
+k8s-openshell-tls-secret:  ## Create/update the openshell-tls K8s Secret from auth/openshell/ certs
+	@test -f $(OPENSHELL_TLS_DIR)/ca.crt || (echo "OpenShell mTLS certs not found. Run 'make openshell-setup' first." && exit 1)
+	kubectl create secret generic openshell-tls \
+	  --from-file=ca.crt=$(OPENSHELL_TLS_DIR)/ca.crt \
+	  --from-file=tls.crt=$(OPENSHELL_TLS_DIR)/tls.crt \
+	  --from-file=tls.key=$(OPENSHELL_TLS_DIR)/tls.key \
+	  -n $(NAMESPACE) --dry-run=client -o yaml | kubectl apply -f -
+
 TOKEN_DURATION ?= 8h
 
 user-token:  ## Issue a login token for a K3s/Kind user  (SA_USER=alice, TOKEN_DURATION=8h)
@@ -162,6 +170,7 @@ image-push:  ## Push image to registry  (requires REGISTRY=..., uses VERSION fil
 
 k8s-deploy:  ## Deploy swarmer to the current kubectl context  (IMAGE_REF, NAMESPACE)
 	@test -f auth/secret.key || (echo "Run 'make setup-secret' first." && exit 1)
+	@test -f $(OPENSHELL_TLS_DIR)/ca.crt || (echo "OpenShell mTLS certs not found. Run 'make openshell-setup' first." && exit 1)
 	@echo "Deploying $(IMAGE_REF) → namespace $(NAMESPACE)..."
 	# 1. Namespace + RBAC + PVC (order-independent, use || true for idempotency)
 	kubectl apply -f k8s/swarmer/namespace.yaml
@@ -170,6 +179,8 @@ k8s-deploy:  ## Deploy swarmer to the current kubectl context  (IMAGE_REF, NAMES
 	kubectl apply -f k8s/swarmer/service.yaml
 	# 2. Secret key (create or update from local key file)
 	$(MAKE) k8s-secret NAMESPACE=$(NAMESPACE)
+	# 2b. OpenShell mTLS certs secret
+	$(MAKE) k8s-openshell-tls-secret NAMESPACE=$(NAMESPACE)
 	# 3. Deployment — substitute image + OpenShift OAuth URL placeholders then apply
 	@OAUTH_URL="$(OPENSHIFT_OAUTH_URL)"; \
 	if [ -z "$$OAUTH_URL" ]; then \
@@ -367,6 +378,7 @@ openshell-setup:  ## Install OpenShell + Agent Sandbox CRDs on current kubectl c
 	  --namespace $(OPENSHELL_NAMESPACE) \
 	  --wait --timeout 5m
 	$(MAKE) openshell-extract-tls
+	$(MAKE) k8s-openshell-tls-secret NAMESPACE=$(NAMESPACE)
 	@echo ""
 	@echo "✓ OpenShell $(OPENSHELL_VERSION) installed."
 	@echo "  Port-forward: kubectl port-forward -n $(OPENSHELL_NAMESPACE) svc/openshell 17670:8080"
@@ -381,6 +393,12 @@ openshell-extract-tls:  ## Extract mTLS client certs from cluster to auth/opensh
 	kubectl -n $(OPENSHELL_NAMESPACE) get secret openshell-client-tls \
 	  -o jsonpath='{.data.tls\.key}' | base64 -d > $(OPENSHELL_TLS_DIR)/tls.key
 	@echo "✓ mTLS certs written to $(OPENSHELL_TLS_DIR)/"
+
+openshell-gen-token:  ## Generate a JWT bearer token for the in-cluster OIDC provider and append to .env
+	@TOKEN=$$(python3 scripts/openshell_gen_token.py) && \
+	sed -i '/^OPENSHELL_BEARER_TOKEN=/d' .env 2>/dev/null || true && \
+	echo "OPENSHELL_BEARER_TOKEN=$$TOKEN" >> .env && \
+	echo "✓ OPENSHELL_BEARER_TOKEN appended to .env (valid 30 days)"
 
 openshell-status:  ## Show OpenShell installation status on current kubectl context
 	@echo "=== Helm release ==="
