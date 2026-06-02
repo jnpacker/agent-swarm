@@ -22,7 +22,7 @@ agent-swarm/
 │   ├── USER_GUIDE.md           # Full user-facing guide
 │   └── ARCHITECTURE.md         # This file
 ├── mcp-server/                 # Standalone MCP server for session orchestration
-├── plans/                      # Work session index (INDEX.md + historical plan files)
+├── plans/                      # Historical work session plan files
 ├── tests/                      # Test suite
 │   ├── test_api.py              # REST API unit tests (in-memory SQLite, no server)
 │   ├── test_list_repos_for_pat.py  # GitHub API helpers (respx mocking)
