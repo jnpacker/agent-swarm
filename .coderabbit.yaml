@@ -17,7 +17,6 @@ reviews:
 
   path_filters:
     - "!swarmer/static/**"
-    - "!plans/**"
 
   path_instructions:
     # ── Project-specific conventions (from AGENTS.md) ──────────────────────
