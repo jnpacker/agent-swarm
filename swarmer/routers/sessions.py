@@ -770,19 +770,16 @@ async def _do_launch_openshell(
     ws_id = session.workspace_id
     if oc_secret and oc_secret.anthropic_api_key:
         pname = f"swarmer-ws-{ws_id}-claude-code"
-        await openshell_client.ensure_provider(pname, "claude-code", {})
-        await openshell_client.configure_provider_credential(pname, "api_key", oc_secret.anthropic_api_key)
+        await openshell_client.ensure_provider(pname, "claude-code", {}, credentials={"api_key": oc_secret.anthropic_api_key})
         providers_to_attach.append(pname)
     if oc_secret and oc_secret.google_api_key:
         pname = f"swarmer-ws-{ws_id}-google-ai-studio"
-        await openshell_client.ensure_provider(pname, "google-ai-studio", {})
-        await openshell_client.configure_provider_credential(pname, "api_key", oc_secret.google_api_key)
+        await openshell_client.ensure_provider(pname, "google-ai-studio", {}, credentials={"api_key": oc_secret.google_api_key})
         providers_to_attach.append(pname)
     if session.github_pat:
         pname = f"swarmer-ws-{ws_id}-github"
-        await openshell_client.ensure_provider(pname, "github", {})
         pat_token = getattr(session.github_pat, "token", None) or getattr(session.github_pat, "pat", "")
-        await openshell_client.configure_provider_credential(pname, "api_token", pat_token)
+        await openshell_client.ensure_provider(pname, "github", {}, credentials={"api_token": pat_token})
         providers_to_attach.append(pname)
 
     # 2. Build network/filesystem policy YAML

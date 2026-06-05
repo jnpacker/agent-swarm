@@ -77,8 +77,14 @@ async def create_provider(
     return env_vars
 
 
-async def ensure_provider(name: str, profile_type: str, config: dict[str, str], client=None) -> None:
-    """Create a named provider on the gateway, or update it if it already exists."""
+async def ensure_provider(
+    name: str,
+    profile_type: str,
+    config: dict[str, str],
+    credentials: dict[str, str] | None = None,
+    client=None,
+) -> None:
+    """Create a named provider on the gateway (with credentials), or update it if it already exists."""
     from openshell._proto import openshell_pb2
     import grpc
 
@@ -88,8 +94,10 @@ async def ensure_provider(name: str, profile_type: str, config: dict[str, str], 
     def _build_provider(req_provider):
         req_provider.metadata.name = name
         req_provider.type = profile_type
-        for k, v in config.items():
+        for k, v in (config or {}).items():
             req_provider.config[k] = v
+        for k, v in (credentials or {}).items():
+            req_provider.credentials[k] = v
 
     def _do_ensure():
         create_req = openshell_pb2.CreateProviderRequest()
