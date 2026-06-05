@@ -99,13 +99,13 @@ async def run_smoke_test(model: str) -> bool:
         language = "golang"
         agent_tool = "opencode"
 
-    policy_yaml = build_session_policy(_FakeSession(), [], [], "opencode", model)
+    policy = build_session_policy(_FakeSession(), [], [], "opencode", model)
     ref = None
     try:
         ref = await create_sandbox(
             image=tool.get_image(),
             env_vars={},
-            policy_yaml=policy_yaml,
+            policy=policy,
             provider_names=[provider_name],
         )
         step("CreateSandbox + WaitReady", True, ref.name)
@@ -122,11 +122,11 @@ async def run_smoke_test(model: str) -> bool:
     sid = ref.id
     sandbox_name = ref.name
 
-    def xec(cmd, timeout=20):
+    def xec(cmd, timeout=20, stdin=None):
         """Execute a command in the sandbox and return ExecResult."""
         if isinstance(cmd, str):
-            return client.exec(sid, ["sh", "-c", cmd], timeout_seconds=timeout)
-        return client.exec(sid, cmd, timeout_seconds=timeout)
+            return client.exec(sid, ["sh", "-c", cmd], timeout_seconds=timeout, stdin=stdin)
+        return client.exec(sid, cmd, timeout_seconds=timeout, stdin=stdin)
 
     all_passed = True
 
@@ -205,8 +205,50 @@ async def run_smoke_test(model: str) -> bool:
         step("opencode.json write", False, str(exc))
         all_passed = False
 
-    # ── 9. opencode run ──────────────────────────────────────────────────────
-    print("\n[9] opencode prompt execution")
+    # ── 9. Approve expected draft policy chunks ──────────────────────────────
+    print("\n[9] Draft policy approval (expected endpoints only)")
+    try:
+        from swarmer.routers.sessions import _build_expected_hosts
+        from swarmer.openshell_client import approve_draft_policy_chunks
+
+        # Probe — let opencode make its first connection attempt to generate denials
+        _probe_cmd = f"HOME=/sandbox opencode run --model {shlex.quote(model)} 'hello' 2>/dev/null; true"
+        xec(_probe_cmd, timeout=30)
+        import time as _time; _time.sleep(3)
+
+        # Approve only expected hosts (AI provider + tool)
+        expected = _build_expected_hosts(model, [], "opencode", "prompt")
+        print(f"     expected hosts: {sorted(expected)}")
+        unexpected = await approve_draft_policy_chunks(sandbox_name, expected_hosts=expected)
+        _time.sleep(2)
+
+        dp = client._stub.GetDraftPolicy(
+            openshell_pb2.GetDraftPolicyRequest(name=sandbox_name), timeout=10
+        )
+        approved_count = sum(1 for c in dp.chunks if c.status == "approved")
+        ok = step("Expected draft chunks approved", approved_count > 0, f"{approved_count} approved")
+        if unexpected:
+            step("Unexpected hosts left pending (for human review)", True, str(unexpected))
+        all_passed = all_passed and ok
+    except Exception as exc:
+        step("Draft policy approval", False, str(exc))
+        all_passed = False
+
+    # ── 9b. Public repo clone (no PAT) ───────────────────────────────────────
+    print("\n[9b] Public repo clone (no PAT)")
+    pub_repo = "https://github.com/stolostron/agent-swarm"
+    try:
+        r_clone = xec(f"git clone --depth=1 {pub_repo} /tmp/smoke-repo 2>&1 | tail -3", timeout=60)
+        cloned = r_clone.exit_code == 0 or "done." in r_clone.stdout.lower() or "already exists" in r_clone.stdout
+        ok = step("git clone public repo", cloned,
+                  r_clone.stdout.strip()[:100] if cloned else r_clone.stdout.strip()[:200])
+        all_passed = all_passed and ok
+    except Exception as exc:
+        step("git clone public repo", False, str(exc))
+        all_passed = False
+
+    # ── 10. opencode run ──────────────────────────────────────────────────────
+    print("\n[10] opencode prompt execution")
     prompt = "Write Hello World in large ASCII art text. Be brief."
 
     class _FakeSess:
@@ -217,19 +259,71 @@ async def run_smoke_test(model: str) -> bool:
     print(f"     cmd: {main_cmd}")
     try:
         r = xec(main_cmd, timeout=120)
-        # OpenCode may write to stdout or stderr depending on mode; combine both
-        stdout = (r.stdout or "").strip()
-        stderr = (r.stderr or "").strip()
-        # Strip known harmless bash warnings
-        stderr = stderr.replace("/bin/bash: /home/sandbox/.bash_profile: Permission denied", "").strip()
-        output = stdout or stderr  # prefer stdout; fall back to stderr
         ok_exit = step("opencode exits 0", r.exit_code == 0, f"exit={r.exit_code}")
-        ok_out = step("opencode produces output", bool(output), f"{len(output)} chars")
-        all_passed = all_passed and ok_exit and ok_out
-        if output:
-            print(f"\n--- Output (first 800 chars) ---\n{output[:800]}\n---")
-        if r.exit_code != 0 and stderr:
-            print(f"  stderr: {stderr[:300]}")
+        all_passed = all_passed and ok_exit
+
+        # OpenCode stores the response in its SQLite DB, not stdout.
+        # Query it via Python after the run completes.
+        db_reader = b"""
+import sqlite3, json
+conn = sqlite3.connect('/sandbox/.opencode/opencode.db')
+conn.execute('PRAGMA wal_checkpoint(FULL)')
+# Get assistant message text parts only
+rows = conn.execute('''
+    SELECT p.data FROM part p
+    JOIN message m ON p.message_id = m.id
+    WHERE json_extract(m.data, '$.role') = 'assistant'
+      AND json_extract(p.data, '$.type') = 'text'
+    ORDER BY p.time_created
+''').fetchall()
+texts = [json.loads(r[0]).get('text', '') for r in rows if r[0]]
+result = '\\n'.join(t for t in texts if t.strip())
+# Also check for errors
+err_rows = conn.execute(
+    "SELECT data FROM event WHERE type LIKE 'message.updated%' ORDER BY id DESC LIMIT 3"
+).fetchall()
+for (d,) in err_rows:
+    info = json.loads(d).get('info', {})
+    if info.get('error'):
+        print('DB_ERROR:', json.dumps(info['error'])[:200])
+        break
+print(result[:2000] if result else '')
+conn.close()
+"""
+        xec("cat > /tmp/get_output.py", stdin=db_reader)
+        r2 = client.exec(sid, ["python3", "/tmp/get_output.py"], timeout_seconds=10)
+        response = (r2.stdout or "").strip()
+
+        # Fall back to stderr if DB query found nothing (e.g. policy_denied error)
+        if not response:
+            err_reader = b"""
+import sqlite3, json
+conn = sqlite3.connect('/sandbox/.opencode/opencode.db')
+conn.execute('PRAGMA wal_checkpoint(FULL)')
+rows = conn.execute(
+    "SELECT data FROM event WHERE type LIKE 'message.updated%' ORDER BY id DESC LIMIT 3"
+).fetchall()
+for r in rows:
+    d = json.loads(r[0])
+    info = d.get('info', {})
+    err = info.get('error')
+    if err:
+        print('ERROR:', json.dumps(err)[:300])
+conn.close()
+"""
+            xec("cat > /tmp/get_errors.py", stdin=err_reader)
+            r3 = client.exec(sid, ["python3", "/tmp/get_errors.py"], timeout_seconds=10)
+            if r3.stdout.strip():
+                print(f"  DB errors: {r3.stdout.strip()[:400]}")
+
+        ok_out = step("opencode response in DB", bool(response), f"{len(response)} chars")
+        all_passed = all_passed and ok_out
+        if response:
+            print(f"\n--- Response ---\n{response[:800]}\n---")
+        if r.exit_code != 0:
+            stderr = (r.stderr or "").replace("/bin/bash: /home/sandbox/.bash_profile: Permission denied", "").strip()
+            if stderr:
+                print(f"  stderr: {stderr[:300]}")
     except Exception as exc:
         step("opencode run", False, str(exc))
         all_passed = False
