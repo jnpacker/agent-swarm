@@ -488,6 +488,8 @@ async def start_agent(sandbox_name: str, cmd: list[str], client=None) -> None:
 
 async def exec_command(sandbox_name: str, cmd: list[str], client) -> Any:
     """Execute a command inside the sandbox; returns ExecResult (.stdout, .stderr, .exit_code)."""
+    if client is None:
+        client = _get_client()
     sid = await _sandbox_id(sandbox_name, client)
 
     def _do_exec(s=sid):
