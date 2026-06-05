@@ -15,7 +15,7 @@ import yaml
 _BASE_FILESYSTEM_POLICY = {
     "include_workdir": True,
     "read_only": ["/usr", "/lib", "/proc", "/dev/urandom", "/app", "/etc", "/var/log"],
-    "read_write": ["/sandbox", "/tmp", "/dev/null", "/home"],
+    "read_write": ["/sandbox", "/tmp", "/dev/null", "/home/sandbox"],
 }
 
 _GO_DEVELOPMENT_BLOCK = {
