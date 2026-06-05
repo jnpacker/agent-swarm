@@ -63,34 +63,118 @@ async def create_provider(
     mcp_servers: list,
     client=None,
 ) -> dict[str, str]:
-    """Collect credentials from DB models into an env-var dict.
+    """Return non-credential env vars for the sandbox (MCP Jira config only).
 
-    The OpenShell SDK injects credentials via SandboxSpec.environment, not
-    via a separate Provider object. This function returns a plain dict that
-    create_sandbox passes into the spec.
+    AI credentials and GitHub tokens are injected by the OpenShell gateway
+    via the Provider API (ensure_provider / attach_sandbox_provider).
     """
     env_vars: dict[str, str] = {}
-
-    if workspace_secret:
-        if getattr(workspace_secret, "google_api_key", None):
-            env_vars["GOOGLE_API_KEY"] = workspace_secret.google_api_key
-        if getattr(workspace_secret, "anthropic_api_key", None):
-            env_vars["ANTHROPIC_API_KEY"] = workspace_secret.anthropic_api_key
-        if getattr(workspace_secret, "google_cloud_project", None):
-            env_vars["GOOGLE_CLOUD_PROJECT"] = workspace_secret.google_cloud_project
-
-    if github_pat:
-        env_vars["GITHUB_PAT"] = github_pat.token
-        if getattr(github_pat, "username", None):
-            env_vars["GITHUB_USERNAME"] = github_pat.username
-
     for mcp in (mcp_servers or []):
         if getattr(mcp, "catalog_key", None) == "jira":
             config = getattr(mcp, "config", {}) or {}
             for k, v in config.items():
                 env_vars[k] = str(v)
-
     return env_vars
+
+
+async def ensure_provider(name: str, profile_type: str, config: dict[str, str], client=None) -> None:
+    """Create a named provider on the gateway, or update it if it already exists."""
+    from openshell._proto import openshell_pb2
+    import grpc
+
+    if client is None:
+        client = _get_client()
+
+    def _build_provider(req_provider):
+        req_provider.metadata.name = name
+        req_provider.type = profile_type
+        for k, v in config.items():
+            req_provider.config[k] = v
+
+    def _do_ensure():
+        create_req = openshell_pb2.CreateProviderRequest()
+        _build_provider(create_req.provider)
+        try:
+            client._stub.CreateProvider(create_req, timeout=client._timeout)
+        except grpc.RpcError as exc:
+            if isinstance(exc, grpc.Call) and exc.code() == grpc.StatusCode.ALREADY_EXISTS:
+                update_req = openshell_pb2.UpdateProviderRequest()
+                _build_provider(update_req.provider)
+                client._stub.UpdateProvider(update_req, timeout=client._timeout)
+            else:
+                raise
+
+    await asyncio.to_thread(_do_ensure)
+
+
+async def configure_provider_credential(
+    provider_name: str,
+    credential_key: str,
+    credential_value: str,
+    client=None,
+) -> None:
+    """Store a static credential on a gateway-managed provider."""
+    from openshell._proto import openshell_pb2
+
+    if client is None:
+        client = _get_client()
+
+    def _do_configure():
+        req = openshell_pb2.ConfigureProviderRefreshRequest()
+        req.provider = provider_name
+        req.credential_key = credential_key
+        req.strategy = openshell_pb2.PROVIDER_CREDENTIAL_REFRESH_STRATEGY_STATIC
+        req.material["value"] = credential_value
+        req.secret_material_keys.append("value")
+        client._stub.ConfigureProviderRefresh(req, timeout=client._timeout)
+
+    await asyncio.to_thread(_do_configure)
+
+
+async def attach_sandbox_provider(sandbox_name: str, provider_name: str, client=None) -> None:
+    """Attach a pre-configured gateway provider to a sandbox."""
+    from openshell._proto import openshell_pb2
+
+    if client is None:
+        client = _get_client()
+
+    def _do_attach():
+        req = openshell_pb2.AttachSandboxProviderRequest()
+        req.sandbox_name = sandbox_name
+        req.provider_name = provider_name
+        client._stub.AttachSandboxProvider(req, timeout=client._timeout)
+
+    await asyncio.to_thread(_do_attach)
+
+
+async def import_provider_profiles(profiles: list[dict], client=None) -> None:
+    """Import custom provider type profiles into the gateway (idempotent)."""
+    from openshell._proto import openshell_pb2
+
+    if client is None:
+        client = _get_client()
+
+    def _do_import():
+        req = openshell_pb2.ImportProviderProfilesRequest()
+        for p in profiles:
+            profile = openshell_pb2.ProviderProfile(
+                id=p["id"],
+                display_name=p.get("display_name", p["id"]),
+                category=p.get("category", openshell_pb2.PROVIDER_PROFILE_CATEGORY_INFERENCE),
+                inference_capable=p.get("inference_capable", True),
+            )
+            for cred in p.get("credentials", []):
+                c = openshell_pb2.ProviderProfileCredential(
+                    name=cred["name"],
+                    required=cred.get("required", True),
+                )
+                for ev in cred.get("env_vars", []):
+                    c.env_vars.append(ev)
+                profile.credentials.append(c)
+            req.profiles.append(openshell_pb2.ProviderProfileImportItem(profile=profile, source="swarmer"))
+        client._stub.ImportProviderProfiles(req, timeout=client._timeout)
+
+    await asyncio.to_thread(_do_import)
 
 
 async def create_provider_from_env(
