@@ -529,13 +529,13 @@ except Exception as e:
     return await asyncio.to_thread(_do_read)
 
 
-async def exec_command(sandbox_name: str, cmd: list[str], client) -> Any:
+async def exec_command(sandbox_name: str, cmd: list[str], client, stdin: bytes | None = None) -> Any:
     """Execute a command inside the sandbox; returns ExecResult (.stdout, .stderr, .exit_code)."""
     if client is None:
         client = _get_client()
     sid = await _sandbox_id(sandbox_name, client)
 
     def _do_exec(s=sid):
-        return client.exec(s, cmd)
+        return client.exec(s, cmd, stdin=stdin)
 
     return await asyncio.to_thread(_do_exec)
