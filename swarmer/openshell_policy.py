@@ -212,14 +212,52 @@ def build_session_policy(
     elif lang == "python":
         network_policies_dict["pypi"] = _PYTHON_DEVELOPMENT_BLOCK
 
+    # Network policies are intentionally NOT included in spec.policy.
+    # The OpenShell supervisor uses a draft-approval workflow: when the sandbox
+    # makes a connection that is denied, the supervisor proposes draft chunks.
+    # swarmer approves expected chunks via approve_draft_policy_chunks() after
+    # creation. Pre-setting network_policies in spec.policy suppresses draft
+    # chunk generation, breaking the approval flow.
     policy_dict = {
         "version": 1,
         "filesystem": _BASE_FILESYSTEM,
         "landlock": {"compatibility": "best_effort"},
         "process": {"run_as_group": "sandbox", "run_as_user": "sandbox"},
-        "network_policies": network_policies_dict,
     }
-
     # Get SandboxPolicy class from a SandboxSpec instance
     policy_instance = openshell_pb2.SandboxSpec().policy.__class__()
     return ParseDict(policy_dict, policy_instance, ignore_unknown_fields=True)
+
+
+def build_session_network_policies(
+    session,
+    repos: list,
+    mcp_servers: list,
+    agent_tool: str,
+    model: str,
+) -> dict:
+    """Return the computed network_policies dict for this session.
+
+    This is NOT set on spec.policy (the draft-approval workflow handles network
+    access). This function is exposed for reference, logging, and testing.
+    """
+    network_policies_dict: dict = {}
+    network_policies_dict.update(_build_agent_api_block(agent_tool, model))
+
+    for repo in repos:
+        slug = _repo_slug(repo)
+        org, name = _repo_org_name(repo)
+        network_policies_dict[f"github_git_{slug}"] = _build_github_git_block(org, name)
+        network_policies_dict[f"github_api_{slug}"] = _build_github_api_block(org, name)
+
+    if any(getattr(mcp, "slug", None) == "jira" for mcp in (mcp_servers or [])):
+        network_policies_dict["jira_mcp"] = _JIRA_MCP_BLOCK
+
+    lang = getattr(session, "language", "golang")
+    if lang == "golang":
+        network_policies_dict["golang"] = _GO_DEVELOPMENT_BLOCK
+        network_policies_dict["govulncheck"] = _GOVULNCHECK_BLOCK
+    elif lang == "python":
+        network_policies_dict["pypi"] = _PYTHON_DEVELOPMENT_BLOCK
+
+    return network_policies_dict
