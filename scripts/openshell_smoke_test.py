@@ -45,7 +45,10 @@ def _mask(text: str) -> str:
 
 async def run_smoke_test(model: str) -> bool:
     from swarmer.crypto import init_crypto
-    from swarmer.openshell_client import _get_client, ensure_provider, create_sandbox
+    from swarmer.openshell_client import (
+        _get_client, ensure_provider, create_sandbox, _wait_sandbox_ready,
+        write_agent_config,
+    )
     from swarmer.agent_tools.opencode import OpenCodeStrategy
     from swarmer.openshell_policy import build_session_policy
     from openshell._proto import openshell_pb2
@@ -142,15 +145,16 @@ async def run_smoke_test(model: str) -> bool:
 
     # ── 5. Filesystem write access ───────────────────────────────────────────
     print("\n[5] Filesystem permissions")
-    for path in ["/sandbox", "/home/sandbox"]:
-        try:
-            r = xec(f"mkdir -p {path}/.smoke-test && rmdir {path}/.smoke-test && echo ok")
-            ok = step(f"{path} writable", r.exit_code == 0 and "ok" in r.stdout,
-                      (r.stderr or "").strip()[:80] if r.exit_code != 0 else "")
-            all_passed = all_passed and ok
-        except Exception as exc:
-            step(f"{path} writable", False, str(exc))
-            all_passed = False
+    # /home/sandbox may not be writable via landlock; we use HOME=/sandbox so
+    # the agent writes to /sandbox/.local instead. Only test /sandbox.
+    try:
+        r = xec("mkdir -p /sandbox/.smoke-test && rmdir /sandbox/.smoke-test && echo ok")
+        ok = step("/sandbox writable", r.exit_code == 0 and "ok" in r.stdout,
+                  (r.stderr or "").strip()[:80] if r.exit_code != 0 else "")
+        all_passed = all_passed and ok
+    except Exception as exc:
+        step("/sandbox writable", False, str(exc))
+        all_passed = False
 
     # ── 6. model.json ────────────────────────────────────────────────────────
     print("\n[6] Model configuration")
@@ -185,17 +189,20 @@ async def run_smoke_test(model: str) -> bool:
         step("auth.json", False, str(exc))
         all_passed = False
 
-    # ── 8. Container opencode.json preserved ─────────────────────────────────
-    print("\n[8] opencode.json (container default)")
+    # ── 8. Write valid opencode.json (replaces container's outdated schema) ──
+    print("\n[8] opencode.json (write valid config)")
     try:
+        config_data = tool.build_config_data()
+        config_json = config_data.get("opencode.json", "{}")
+        await write_agent_config(sandbox_name, "opencode", config_json)
         r = xec(["cat", "/sandbox/opencode.json"])
         cfg = json.loads(r.stdout) if r.stdout else {}
         has_providers = "enabled_providers" in cfg
-        ok = step("enabled_providers present", has_providers,
+        ok = step("enabled_providers present in written config", has_providers,
                   str(cfg.get("enabled_providers", "(missing)")))
         all_passed = all_passed and ok
     except Exception as exc:
-        step("opencode.json check", False, str(exc))
+        step("opencode.json write", False, str(exc))
         all_passed = False
 
     # ── 9. opencode run ──────────────────────────────────────────────────────
@@ -206,19 +213,23 @@ async def run_smoke_test(model: str) -> bool:
         mode = "prompt"
         instruction_prompt = ""
 
-    main_cmd = tool.build_main_cmd(_FakeSess(), model, resolved_prompt=prompt)
+    main_cmd = f"HOME=/sandbox {tool.build_main_cmd(_FakeSess(), model, resolved_prompt=prompt)}"
     print(f"     cmd: {main_cmd}")
     try:
         r = xec(main_cmd, timeout=120)
-        output = (r.stdout or "").strip()
-        err = (r.stderr or "").replace("/bin/bash: /home/sandbox/.bash_profile: Permission denied\n", "").strip()
+        # OpenCode may write to stdout or stderr depending on mode; combine both
+        stdout = (r.stdout or "").strip()
+        stderr = (r.stderr or "").strip()
+        # Strip known harmless bash warnings
+        stderr = stderr.replace("/bin/bash: /home/sandbox/.bash_profile: Permission denied", "").strip()
+        output = stdout or stderr  # prefer stdout; fall back to stderr
         ok_exit = step("opencode exits 0", r.exit_code == 0, f"exit={r.exit_code}")
         ok_out = step("opencode produces output", bool(output), f"{len(output)} chars")
         all_passed = all_passed and ok_exit and ok_out
         if output:
             print(f"\n--- Output (first 800 chars) ---\n{output[:800]}\n---")
-        if err:
-            print(f"  stderr: {err[:300]}")
+        if r.exit_code != 0 and stderr:
+            print(f"  stderr: {stderr[:300]}")
     except Exception as exc:
         step("opencode run", False, str(exc))
         all_passed = False
@@ -231,6 +242,21 @@ async def run_smoke_test(model: str) -> bool:
     except Exception as exc:
         step("Delete sandbox", False, str(exc))
     try:
+        # Detach from any still-running sandboxes before deleting
+        try:
+            attached = client._stub.ListSandboxes(openshell_pb2.ListSandboxesRequest(), timeout=10)
+            for asb in attached.sandboxes:
+                provs = client._stub.ListSandboxProviders(
+                    openshell_pb2.ListSandboxProvidersRequest(sandbox_name=asb.metadata.name), timeout=10
+                )
+                if any(p.metadata.name == provider_name for p in provs.providers):
+                    client._stub.DetachSandboxProvider(
+                        openshell_pb2.DetachSandboxProviderRequest(
+                            sandbox_name=asb.metadata.name, provider_name=provider_name
+                        ), timeout=10
+                    )
+        except Exception:
+            pass
         client._stub.DeleteProvider(
             openshell_pb2.DeleteProviderRequest(name=provider_name), timeout=10)
         step("Delete test provider", True)

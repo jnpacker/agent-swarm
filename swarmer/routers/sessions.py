@@ -916,17 +916,22 @@ async def _setup_openshell_sandbox(
                 pass
             return
 
-        # Patch MCP config into container's existing tool config (preserve enabled_providers)
-        if mcp_patch:
-            merge_cmd = (
-                f"python3 -c \""
-                f"import json; "
-                f"cfg=json.load(open('/sandbox/{tool_name}.json')); "
-                f"cfg['mcp']={_json.dumps(mcp_patch)}; "
-                f"json.dump(cfg, open('/sandbox/{tool_name}.json','w'), indent=2)"
-                f"\""
-            )
-            await openshell_client.exec_command(ref.name, ["sh", "-c", merge_cmd], client=None)
+        # Write a schema-valid tool config to /sandbox/{tool}.json.
+        # The container image ships an opencode.json with an outdated LSP schema
+        # (missing required 'extensions' field). Always overwrite it with a valid
+        # config that includes enabled_providers and any MCP config.
+        from swarmer.agent_tools.registry import get as _get_tool
+        _tool = _get_tool(tool_name)
+        _config_data = _tool.build_config_data(mcp_servers=[
+            type("_MCP", (), {"slug": k, **v})()
+            for k, v in (mcp_patch.get("mcp", {}) or {}).items()
+        ] if mcp_patch else [])
+        _config_json = _config_data.get(f"{tool_name}.json", "{}")
+        await openshell_client.write_agent_config(
+            sandbox_name=ref.name,
+            tool_name=tool_name,
+            config_json=_config_json,
+        )
 
         # Git credentials before cloning (uses $GH_TOKEN injected by github provider)
         if repos_data and git_username:
@@ -975,11 +980,13 @@ async def _setup_openshell_sandbox(
             await openshell_client.write_agents_md(sandbox_name=ref.name, content=agents_md)
 
         # Launch agent
+        # Set HOME=/sandbox so the agent writes to /sandbox/.local rather than
+        # /home/sandbox/.local — the container's home dir may not be writable via landlock.
         asyncio.create_task(
             _run_openshell_agent(
                 session_id=session_id,
                 sandbox_name=ref.name,
-                cmd=["sh", "-c", main_cmd],
+                cmd=["sh", "-c", f"HOME=/sandbox {main_cmd}"],
                 mode=mode,
             ),
             name=f"openshell-agent-{session_id}",

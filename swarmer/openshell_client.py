@@ -243,8 +243,49 @@ async def create_sandbox(
         return client.create(spec=spec)
 
     ref = await asyncio.to_thread(_do_create)
-    await asyncio.to_thread(client.wait_ready, ref.name)
+    await _wait_sandbox_ready(ref.name, client=client)
     return ref
+
+
+async def _wait_sandbox_ready(
+    sandbox_name: str,
+    client=None,
+    timeout: float = 300.0,
+    poll_interval: float = 2.0,
+) -> None:
+    """Wait until the sandbox Ready condition is True.
+
+    The gateway reports readiness via status.conditions[type=Ready, status=True]
+    rather than the phase field (which stays UNSPECIFIED=0 in current versions).
+    We also wait for the supervisor to become attached so provider env vars are
+    available to exec commands.
+    """
+    import time
+    from openshell._proto import openshell_pb2
+
+    if client is None:
+        client = _get_client()
+
+    deadline = time.time() + timeout
+
+    def _poll():
+        while time.time() < deadline:
+            resp = client._stub.GetSandbox(
+                openshell_pb2.GetSandboxRequest(name=sandbox_name), timeout=10
+            )
+            status = resp.sandbox.status
+            if status.phase == openshell_pb2.SANDBOX_PHASE_ERROR:
+                raise RuntimeError(f"Sandbox {sandbox_name} entered error phase")
+            for cond in status.conditions:
+                if cond.type == "Ready" and cond.status == "True":
+                    return resp.sandbox
+            time.sleep(poll_interval)
+        raise RuntimeError(
+            f"Sandbox {sandbox_name} not ready after {timeout}s "
+            f"(last conditions: {[(c.type, c.status) for c in resp.sandbox.status.conditions]})"
+        )
+
+    await asyncio.to_thread(_poll)
 
 
 async def delete_sandbox(sandbox_name: str, client=None) -> None:
