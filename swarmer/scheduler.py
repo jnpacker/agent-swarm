@@ -112,8 +112,39 @@ async def _collect_orphaned_sandboxes(db) -> None:
     if not orphaned:
         return
 
-    log.warning("sandbox-gc: found %d orphaned sandbox(es): %s", len(orphaned), orphaned)
-    for name in orphaned:
+    # Only delete sandboxes that have been orphaned long enough — newly created
+    # sandboxes may not yet have their sandbox_name committed to the DB (race window
+    # during _setup_openshell_sandbox). Grace period: 5 minutes from creation.
+    import time as _time
+    from openshell._proto import openshell_pb2 as _pb
+    now_ms = int(_time.time() * 1000)
+    _grace_ms = 5 * 60 * 1000  # 5 minutes
+
+    def _get_client_local():
+        from swarmer import openshell_client as _oc
+        return _oc._get_client()
+
+    def _sandbox_age_ok(name: str) -> bool:
+        try:
+            client = _get_client_local()
+            resp = client._stub.GetSandbox(
+                _pb.GetSandboxRequest(name=name), timeout=10
+            )
+            created_ms = resp.sandbox.metadata.created_at_ms if resp.sandbox.metadata else 0
+            age_ms = now_ms - created_ms
+            return age_ms >= _grace_ms
+        except Exception:
+            return True  # if we can't check, assume old enough
+
+    stale = [name for name in orphaned if await asyncio.to_thread(_sandbox_age_ok, name)]
+    young = [name for name in orphaned if name not in stale]
+    if young:
+        log.debug("sandbox-gc: skipping %d young sandbox(es) (< 5min): %s", len(young), young)
+    if not stale:
+        return
+
+    log.warning("sandbox-gc: found %d orphaned sandbox(es): %s", len(stale), stale)
+    for name in stale:
         try:
             await openshell_client.delete_sandbox(name)
             log.info("sandbox-gc: deleted orphaned sandbox %s", name)
