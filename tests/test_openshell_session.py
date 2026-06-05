@@ -516,6 +516,34 @@ class TestDoLaunchOpenshell:
         # policy is now a SandboxPolicy proto, not a YAML string
         assert passed_policy is not None
 
+    @pytest.mark.asyncio
+    async def test_launch_clears_stale_status_detail(self, client):
+        """Launching a session clears any stale status_detail from a previous run."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        # Pre-set stale status_detail from a previous failed run
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET status_detail='OpenShell agent startup failed', phase='failed' WHERE id=:id"),
+                {"id": s["id"]},
+            )
+            await db.commit()
+
+        patches = self._patch_openshell()
+        with patches["create_provider"], patches["ensure_provider"], \
+             patches["configure_provider_credential"], patches["attach_sandbox_provider"], \
+             patches["create_sandbox"], patches["write_agent_config"], \
+             patches["clone_repos"], patches["write_agents_md"], patches["exec_command"], \
+             patches["start_agent"], patches["delete_sandbox"], patches["build_policy"], \
+             patches["run_agent"], patches["setup_sandbox"]:
+            await client.post(f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/launch")
+
+        session_resp = await client.get(f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}")
+        data = session_resp.json()
+        assert data["status_detail"] == "", f"Expected empty status_detail, got: {data['status_detail']!r}"
+        assert data["phase"] == "pending"
+
 
 # ===========================================================================
 # 3. Session stop: sandbox deletion
@@ -853,6 +881,47 @@ class TestRunOpenshellAgent:
 
         assert sess.phase == "failed"
         assert sess.run_completed_at is not None
+
+
+# ===========================================================================
+# 4b. exec_command timeout_seconds forwarding
+# ===========================================================================
+
+
+class TestExecCommandTimeout:
+    @pytest.mark.asyncio
+    async def test_exec_command_passes_timeout_to_sdk(self):
+        """exec_command forwards timeout_seconds to the SDK exec call."""
+        from swarmer.openshell_client import exec_command
+        from unittest.mock import patch, MagicMock, AsyncMock
+
+        mock_result = MagicMock(exit_code=0, stdout="ok", stderr="")
+        mock_client = MagicMock()
+        mock_client.get.return_value = MagicMock(id="test-id")
+        mock_client.exec.return_value = mock_result
+
+        with patch("swarmer.openshell_client._get_client", return_value=mock_client):
+            result = await exec_command("sb-name", ["echo", "hi"], client=None, timeout_seconds=120)
+
+        mock_client.exec.assert_called_once_with("test-id", ["echo", "hi"], stdin=None, timeout_seconds=120)
+        assert result.stdout == "ok"
+
+    @pytest.mark.asyncio
+    async def test_exec_command_default_timeout_is_none(self):
+        """exec_command passes timeout_seconds=None when not specified (SDK uses gRPC default)."""
+        from swarmer.openshell_client import exec_command
+        from unittest.mock import patch, MagicMock
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = MagicMock(id="test-id")
+        mock_client.exec.return_value = MagicMock(exit_code=0, stdout="", stderr="")
+
+        with patch("swarmer.openshell_client._get_client", return_value=mock_client):
+            await exec_command("sb-name", ["ls"], client=None)
+
+        mock_client.exec.assert_called_once_with("test-id", ["ls"], stdin=None, timeout_seconds=None)
+
+
 
 
 # ===========================================================================
