@@ -105,7 +105,7 @@ async def run_smoke_test(model: str) -> bool:
         ref = await create_sandbox(
             image=tool.get_image(),
             env_vars={},
-            policy=policy,
+            policy=None,  # no custom policy — let draft approval workflow handle network rules
             provider_names=[provider_name],
         )
         step("CreateSandbox + WaitReady", True, ref.name)
@@ -205,30 +205,31 @@ async def run_smoke_test(model: str) -> bool:
         step("opencode.json write", False, str(exc))
         all_passed = False
 
-    # ── 9. Approve expected draft policy chunks ──────────────────────────────
+    # ── 9. Generate + approve draft policy chunks ─────────────────────────────
     print("\n[9] Draft policy approval (expected endpoints only)")
     try:
         from swarmer.routers.sessions import _build_expected_hosts
         from swarmer.openshell_client import approve_draft_policy_chunks
+        import time as _time
 
-        # Probe — let opencode make its first connection attempt to generate denials
-        _probe_cmd = f"HOME=/sandbox opencode run --model {shlex.quote(model)} 'hello' 2>/dev/null; true"
+        # Probe: run opencode briefly to generate policy denials in the supervisor.
+        # The supervisor submits denial analysis ~10s after the denied connections.
+        _probe_cmd = f"HOME=/sandbox opencode run --model {shlex.quote(model)} 'hi' 2>/dev/null; true"
         xec(_probe_cmd, timeout=30)
-        import time as _time; _time.sleep(3)
+        _time.sleep(12)  # supervisor needs ~10s to submit denial analysis
 
         # Approve only expected hosts (AI provider + tool)
         expected = _build_expected_hosts(model, [], "opencode", "prompt")
         print(f"     expected hosts: {sorted(expected)}")
         unexpected = await approve_draft_policy_chunks(sandbox_name, expected_hosts=expected)
-        _time.sleep(2)
+        _time.sleep(3)
 
         dp = client._stub.GetDraftPolicy(
             openshell_pb2.GetDraftPolicyRequest(name=sandbox_name), timeout=10
         )
         approved_count = sum(1 for c in dp.chunks if c.status == "approved")
-        ok = step("Expected draft chunks approved", approved_count > 0, f"{approved_count} approved")
-        if unexpected:
-            step("Unexpected hosts left pending (for human review)", True, str(unexpected))
+        ok = step("Expected draft chunks approved", approved_count > 0,
+                  f"{approved_count} approved" + (f" (unexpected: {unexpected})" if unexpected else ""))
         all_passed = all_passed and ok
     except Exception as exc:
         step("Draft policy approval", False, str(exc))

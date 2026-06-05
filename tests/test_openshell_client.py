@@ -12,7 +12,7 @@ import os
 import sys
 
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -190,38 +190,33 @@ async def test_create_provider_includes_jira_mcp_credentials(session, workspace_
 @pytest.mark.asyncio
 async def test_create_sandbox_passes_byoc_image(sdk_client):
     image = "quay.io/jpacker/opencode:latest"
-    with patch.object(oc, "_get_client", return_value=sdk_client):
-        await oc.create_sandbox(
-            image=image,
-            env_vars={},
-            policy=None,
-        )
+    with patch.object(oc, "_get_client", return_value=sdk_client), \
+         patch.object(oc, "_wait_sandbox_ready", new=AsyncMock()):
+        await oc.create_sandbox(image=image, env_vars={}, policy=None)
     sdk_client.create.assert_called_once()
-    # The spec object is passed as a kwarg; check its template.image was set
     spec = sdk_client.create.call_args.kwargs["spec"]
     assert spec.template.image == image
 
 
 @pytest.mark.asyncio
 async def test_wait_ready_called_after_create(sdk_client):
-    with patch.object(oc, "_get_client", return_value=sdk_client):
+    """_wait_sandbox_ready (conditions-based) is called instead of sdk client.wait_ready."""
+    with patch.object(oc, "_get_client", return_value=sdk_client), \
+         patch.object(oc, "_wait_sandbox_ready", new=AsyncMock()) as mock_ready:
         await oc.create_sandbox(
-            image="quay.io/jpacker/opencode:latest",
-            env_vars={},
-            policy=None,
+            image="quay.io/jpacker/opencode:latest", env_vars={}, policy=None
         )
-    sdk_client.wait_ready.assert_called_once()
+    mock_ready.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_create_sandbox_does_not_create_pvc(sdk_client):
     from swarmer import k8s_session as k8s_sess
-    with patch.object(oc, "_get_client", return_value=sdk_client):
+    with patch.object(oc, "_get_client", return_value=sdk_client), \
+         patch.object(oc, "_wait_sandbox_ready", new=AsyncMock()):
         with patch.object(k8s_sess, "ensure_session_pvc") as mock_pvc:
             await oc.create_sandbox(
-                image="quay.io/jpacker/opencode:latest",
-                env_vars={},
-                policy=None,
+                image="quay.io/jpacker/opencode:latest", env_vars={}, policy=None
             )
             mock_pvc.assert_not_called()
 
