@@ -757,13 +757,33 @@ async def _do_launch_openshell(
 
     tool = get_tool(session.agent_tool)
 
-    # 1. Collect credentials into env-var dict
+    # 1. Collect MCP env vars (non-credential; AI creds go through provider API)
     env_vars = await openshell_client.create_provider(
         session=session,
         workspace_secret=oc_secret,
         github_pat=session.github_pat,
         mcp_servers=mcp_servers or [],
     )
+
+    # 1b. Create/update gateway providers for each available AI credential
+    providers_to_attach: list[str] = []
+    ws_id = session.workspace_id
+    if oc_secret and oc_secret.anthropic_api_key:
+        pname = f"swarmer-ws-{ws_id}-claude-code"
+        await openshell_client.ensure_provider(pname, "claude-code", {})
+        await openshell_client.configure_provider_credential(pname, "api_key", oc_secret.anthropic_api_key)
+        providers_to_attach.append(pname)
+    if oc_secret and oc_secret.google_api_key:
+        pname = f"swarmer-ws-{ws_id}-google-ai-studio"
+        await openshell_client.ensure_provider(pname, "google-ai-studio", {})
+        await openshell_client.configure_provider_credential(pname, "api_key", oc_secret.google_api_key)
+        providers_to_attach.append(pname)
+    if session.github_pat:
+        pname = f"swarmer-ws-{ws_id}-github"
+        await openshell_client.ensure_provider(pname, "github", {})
+        pat_token = getattr(session.github_pat, "token", None) or getattr(session.github_pat, "pat", "")
+        await openshell_client.configure_provider_credential(pname, "api_token", pat_token)
+        providers_to_attach.append(pname)
 
     # 2. Build network/filesystem policy YAML
     policy_yaml = build_session_policy(
@@ -783,6 +803,10 @@ async def _do_launch_openshell(
     )
     session.sandbox_name = ref.name
 
+    # 3b. Attach providers so the supervisor injects credentials at sandbox startup
+    for pname in providers_to_attach:
+        await openshell_client.attach_sandbox_provider(ref.name, pname)
+
     # 4. Write agent config (includes MCP configuration)
     config_data = tool.build_config_data(secret=oc_secret, mcp_servers=mcp_servers)
     config_json = config_data.get(f"{tool.name}.json", "{}")
@@ -792,22 +816,24 @@ async def _do_launch_openshell(
         config_json=config_json,
     )
 
-    # 5. Clone repos and configure git inside the sandbox
+    # 5. Configure git credentials before cloning (uses $GH_TOKEN injected by github provider)
+    if session.repos and session.github_pat:
+        pat = session.github_pat
+        username = pat.github_username or ""
+        git_setup_cmd = (
+            "git config --global credential.helper store && "
+            f"printf 'https://{username}:%s@github.com\\n' \"$GH_TOKEN\" "
+            "> /root/.git-credentials && "
+            f'git config --global user.name "{username}" && '
+            f'git config --global user.email "{username}@users.noreply.github.com"'
+        )
+        await openshell_client.exec_command(ref.name, ["sh", "-c", git_setup_cmd], client=None)
+
+    # 5b. Clone repos and configure git inside the sandbox
     if session.repos:
         await openshell_client.clone_repos(sandbox_name=ref.name, repos=list(session.repos))
         safe_dir_cmd = "git config --global --add safe.directory '*'"
         await openshell_client.exec_command(ref.name, ["sh", "-c", safe_dir_cmd], client=None)
-        if session.github_pat:
-            pat = session.github_pat
-            username = pat.github_username or ""
-            git_setup_cmd = (
-                "git config --global credential.helper store && "
-                f"printf 'https://{username}:%s@github.com\\n' \"$GITHUB_PAT\" "
-                "> /root/.git-credentials && "
-                f'git config --global user.name "{username}" && '
-                f'git config --global user.email "{username}@users.noreply.github.com"'
-            )
-            await openshell_client.exec_command(ref.name, ["sh", "-c", git_setup_cmd], client=None)
         if session.working_branch:
             for repo in session.repos:
                 branch_cmd = (

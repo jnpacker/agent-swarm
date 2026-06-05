@@ -198,7 +198,19 @@ class TestDoLaunchOpenshell:
         patches = {
             "create_provider": patch(
                 "swarmer.openshell_client.create_provider",
-                new=AsyncMock(return_value={"ANTHROPIC_API_KEY": "test-key"}),
+                new=AsyncMock(return_value={}),
+            ),
+            "ensure_provider": patch(
+                "swarmer.openshell_client.ensure_provider",
+                new=AsyncMock(),
+            ),
+            "configure_provider_credential": patch(
+                "swarmer.openshell_client.configure_provider_credential",
+                new=AsyncMock(),
+            ),
+            "attach_sandbox_provider": patch(
+                "swarmer.openshell_client.attach_sandbox_provider",
+                new=AsyncMock(),
             ),
             "create_sandbox": patch(
                 "swarmer.openshell_client.create_sandbox",
@@ -241,13 +253,26 @@ class TestDoLaunchOpenshell:
         }
         return patches
 
+    def _all_patches(self, patches):
+        """Enter all patches in the standard set."""
+        return (
+            patches["create_provider"], patches["ensure_provider"],
+            patches["configure_provider_credential"], patches["attach_sandbox_provider"],
+            patches["create_sandbox"], patches["write_agent_config"],
+            patches["clone_repos"], patches["write_agents_md"],
+            patches["exec_command"], patches["start_agent"],
+            patches["delete_sandbox"], patches["build_policy"], patches["run_agent"],
+        )
+
     @pytest.mark.asyncio
     async def test_creates_sandbox_with_tool_image(self, client):
         ws = await _create_workspace(client)
         s = await _create_session(client, ws["id"])
 
         patches = self._patch_openshell()
-        with patches["create_provider"], patches["create_sandbox"] as mock_create, \
+        with patches["create_provider"], patches["ensure_provider"], \
+             patches["configure_provider_credential"], patches["attach_sandbox_provider"], \
+             patches["create_sandbox"] as mock_create, \
              patches["write_agent_config"], patches["clone_repos"], \
              patches["write_agents_md"], patches["exec_command"], \
              patches["start_agent"], patches["delete_sandbox"], \
@@ -268,7 +293,9 @@ class TestDoLaunchOpenshell:
         s = await _create_session(client, ws["id"])
 
         patches = self._patch_openshell(sandbox_name="sandbox-xyz-789")
-        with patches["create_provider"], patches["create_sandbox"], \
+        with patches["create_provider"], patches["ensure_provider"], \
+             patches["configure_provider_credential"], patches["attach_sandbox_provider"], \
+             patches["create_sandbox"], \
              patches["write_agent_config"], patches["clone_repos"], \
              patches["write_agents_md"], patches["exec_command"], \
              patches["start_agent"], patches["delete_sandbox"], \
@@ -287,7 +314,9 @@ class TestDoLaunchOpenshell:
         s = await _create_session(client, ws["id"])
 
         patches = self._patch_openshell()
-        with patches["create_provider"], patches["create_sandbox"], \
+        with patches["create_provider"], patches["ensure_provider"], \
+             patches["configure_provider_credential"], patches["attach_sandbox_provider"], \
+             patches["create_sandbox"], \
              patches["write_agent_config"] as mock_cfg, patches["clone_repos"], \
              patches["write_agents_md"], patches["exec_command"], \
              patches["start_agent"], patches["delete_sandbox"], \
@@ -304,7 +333,9 @@ class TestDoLaunchOpenshell:
         s = await _create_session(client, ws["id"])  # no repos
 
         patches = self._patch_openshell()
-        with patches["create_provider"], patches["create_sandbox"], \
+        with patches["create_provider"], patches["ensure_provider"], \
+             patches["configure_provider_credential"], patches["attach_sandbox_provider"], \
+             patches["create_sandbox"], \
              patches["write_agent_config"], patches["clone_repos"] as mock_clone, \
              patches["write_agents_md"], patches["exec_command"], \
              patches["start_agent"], patches["delete_sandbox"], \
@@ -321,7 +352,9 @@ class TestDoLaunchOpenshell:
         s = await _create_session(client, ws["id"], mode="prompt")
 
         patches = self._patch_openshell()
-        with patches["create_provider"], patches["create_sandbox"], \
+        with patches["create_provider"], patches["ensure_provider"], \
+             patches["configure_provider_credential"], patches["attach_sandbox_provider"], \
+             patches["create_sandbox"], \
              patches["write_agent_config"], patches["clone_repos"], \
              patches["write_agents_md"] as mock_md, patches["exec_command"], \
              patches["start_agent"], patches["delete_sandbox"], \
@@ -338,7 +371,9 @@ class TestDoLaunchOpenshell:
         s = await _create_session(client, ws["id"])
 
         patches = self._patch_openshell()
-        with patches["create_provider"], patches["create_sandbox"], \
+        with patches["create_provider"], patches["ensure_provider"], \
+             patches["configure_provider_credential"], patches["attach_sandbox_provider"], \
+             patches["create_sandbox"], \
              patches["write_agent_config"], patches["clone_repos"], \
              patches["write_agents_md"], patches["exec_command"], \
              patches["start_agent"], patches["delete_sandbox"], \
@@ -357,7 +392,9 @@ class TestDoLaunchOpenshell:
         s = await _create_session(client, ws["id"])
 
         patches = self._patch_openshell()
-        with patches["create_provider"], patches["create_sandbox"], \
+        with patches["create_provider"], patches["ensure_provider"], \
+             patches["configure_provider_credential"], patches["attach_sandbox_provider"], \
+             patches["create_sandbox"], \
              patches["write_agent_config"], patches["clone_repos"], \
              patches["write_agents_md"], patches["exec_command"], \
              patches["start_agent"], patches["delete_sandbox"], \
@@ -375,7 +412,9 @@ class TestDoLaunchOpenshell:
         s = await _create_session(client, ws["id"])
 
         patches = self._patch_openshell()
-        with patches["create_provider"], patches["create_sandbox"], \
+        with patches["create_provider"], patches["ensure_provider"], \
+             patches["configure_provider_credential"], patches["attach_sandbox_provider"], \
+             patches["create_sandbox"], \
              patches["write_agent_config"], patches["clone_repos"], \
              patches["write_agents_md"], patches["exec_command"], \
              patches["start_agent"], patches["delete_sandbox"], \
@@ -393,7 +432,9 @@ class TestDoLaunchOpenshell:
         s = await _create_session(client, ws["id"])
 
         patches = self._patch_openshell()
-        with patches["create_provider"], patches["create_sandbox"], \
+        with patches["create_provider"], patches["ensure_provider"], \
+             patches["configure_provider_credential"], patches["attach_sandbox_provider"], \
+             patches["create_sandbox"], \
              patches["write_agent_config"], patches["clone_repos"], \
              patches["write_agents_md"], patches["exec_command"], \
              patches["start_agent"], patches["delete_sandbox"], \
@@ -406,29 +447,35 @@ class TestDoLaunchOpenshell:
         mock_agent.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_passes_env_vars_from_create_provider(self, client):
+    async def test_uses_provider_api_not_env_vars_for_credentials(self, client):
+        """AI credentials must flow through the gateway Provider API, not SandboxSpec.environment."""
         ws = await _create_workspace(client)
         s = await _create_session(client, ws["id"])
 
-        expected_env = {"ANTHROPIC_API_KEY": "sk-test", "GOOGLE_API_KEY": "gcp-key"}
         patches = self._patch_openshell()
         with patches["create_provider"] as mock_provider, \
+             patches["ensure_provider"] as mock_ensure, \
+             patches["configure_provider_credential"] as mock_cred, \
+             patches["attach_sandbox_provider"] as mock_attach, \
              patches["create_sandbox"] as mock_sandbox, \
              patches["write_agent_config"], patches["clone_repos"], \
              patches["write_agents_md"], patches["exec_command"], \
              patches["start_agent"], patches["delete_sandbox"], \
              patches["build_policy"], patches["run_agent"]:
-            mock_provider.return_value = expected_env
+            mock_provider.return_value = {}
             await client.post(
                 f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/launch"
             )
 
-        # create_sandbox should receive the env_vars from create_provider
+        # create_sandbox env_vars must NOT contain AI credentials
         call_kwargs = mock_sandbox.call_args[1] if mock_sandbox.call_args else {}
-        call_args = mock_sandbox.call_args[0] if mock_sandbox.call_args else ()
-        # env_vars may be positional or keyword
-        passed_env = call_kwargs.get("env_vars") or (call_args[1] if len(call_args) > 1 else None)
-        assert passed_env == expected_env
+        passed_env = call_kwargs.get("env_vars", {})
+        assert "ANTHROPIC_API_KEY" not in passed_env
+        assert "GOOGLE_API_KEY" not in passed_env
+        # No oc_secret in this test session, so no provider calls expected
+        assert mock_ensure.call_count == 0
+        assert mock_cred.call_count == 0
+        assert mock_attach.call_count == 0
 
     @pytest.mark.asyncio
     async def test_passes_policy_yaml_from_builder(self, client):
@@ -436,7 +483,8 @@ class TestDoLaunchOpenshell:
         s = await _create_session(client, ws["id"])
 
         patches = self._patch_openshell()
-        with patches["create_provider"], \
+        with patches["create_provider"], patches["ensure_provider"], \
+             patches["configure_provider_credential"], patches["attach_sandbox_provider"], \
              patches["create_sandbox"] as mock_sandbox, \
              patches["write_agent_config"], patches["clone_repos"], \
              patches["write_agents_md"], patches["exec_command"], \

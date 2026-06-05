@@ -111,7 +111,8 @@ def github_pat():
 
 
 @pytest.mark.asyncio
-async def test_create_provider_returns_env_vars(sdk_client, session, workspace_secret):
+async def test_create_provider_returns_empty_for_no_mcp(sdk_client, session, workspace_secret):
+    """AI credentials no longer go via env vars — create_provider returns only MCP vars."""
     env_vars = await oc.create_provider(
         session=session,
         workspace_secret=workspace_secret,
@@ -119,8 +120,9 @@ async def test_create_provider_returns_env_vars(sdk_client, session, workspace_s
         mcp_servers=[],
     )
     assert isinstance(env_vars, dict)
-    assert "GOOGLE_API_KEY" in env_vars
-    assert "ANTHROPIC_API_KEY" in env_vars
+    assert "GOOGLE_API_KEY" not in env_vars
+    assert "ANTHROPIC_API_KEY" not in env_vars
+    assert env_vars == {}
 
 
 @pytest.mark.asyncio
@@ -150,15 +152,16 @@ async def test_create_provider_does_not_create_k8s_pat_secret(session, workspace
 
 
 @pytest.mark.asyncio
-async def test_create_provider_includes_github_credentials(session, workspace_secret, github_pat):
+async def test_create_provider_no_github_pat_in_env(session, workspace_secret, github_pat):
+    """GitHub PAT is now injected via the github gateway provider, not env vars."""
     env_vars = await oc.create_provider(
         session=session,
         workspace_secret=workspace_secret,
         github_pat=github_pat,
         mcp_servers=[],
     )
-    assert "GITHUB_PAT" in env_vars
-    assert env_vars["GITHUB_PAT"] == github_pat.token
+    assert "GITHUB_PAT" not in env_vars
+    assert "GH_TOKEN" not in env_vars
 
 
 @pytest.mark.asyncio
