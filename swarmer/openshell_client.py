@@ -161,6 +161,94 @@ async def attach_sandbox_provider(sandbox_name: str, provider_name: str, client=
     await asyncio.to_thread(_do_attach)
 
 
+async def approve_draft_policy_chunks(
+    sandbox_name: str,
+    expected_hosts: set[str] | None = None,
+    client=None,
+) -> list[str]:
+    """Approve pending draft policy chunks for known/expected endpoints only.
+
+    The supervisor observes denied network connections and proposes policy rules
+    (draft chunks). This function approves only chunks whose endpoints match
+    ``expected_hosts`` — arbitrary/unexpected endpoints are left pending and
+    logged as warnings for human review.
+
+    Returns a list of unexpected host names that were NOT approved.
+    """
+    from openshell._proto import openshell_pb2
+
+    if client is None:
+        client = _get_client()
+
+    def _host_matches(host: str, expected: set[str]) -> bool:
+        """True if ``host`` matches any pattern in ``expected`` (supports leading *)."""
+        for pattern in expected:
+            if pattern.startswith("*."):
+                if host.endswith(pattern[1:]) or host == pattern[2:]:
+                    return True
+            elif host == pattern:
+                return True
+        return False
+
+    def _do_approve():
+        try:
+            dp = client._stub.GetDraftPolicy(
+                openshell_pb2.GetDraftPolicyRequest(name=sandbox_name), timeout=10
+            )
+            pending = [c for c in dp.chunks if c.status == "pending"]
+            if not pending:
+                return 0, []
+
+            if expected_hosts is None:
+                # No filter: approve all (fallback/permissive mode)
+                to_approve = pending
+                unexpected = []
+            else:
+                to_approve = []
+                unexpected = []
+                for chunk in pending:
+                    chunk_hosts = [ep.host for ep in chunk.proposed_rule.endpoints]
+                    if all(_host_matches(h, expected_hosts) for h in chunk_hosts):
+                        to_approve.append(chunk)
+                    else:
+                        unexpected.extend(
+                            h for h in chunk_hosts if not _host_matches(h, expected_hosts)
+                        )
+
+            if unexpected:
+                log.warning(
+                    "sandbox %s: %d unexpected endpoint(s) not approved: %s",
+                    sandbox_name, len(unexpected), unexpected
+                )
+
+            if not to_approve:
+                return 0, unexpected
+
+            # Approve individual chunks that match expectations
+            approved_count = 0
+            for chunk in to_approve:
+                try:
+                    client._stub.ApproveDraftChunk(
+                        openshell_pb2.ApproveDraftChunkRequest(
+                            name=sandbox_name, chunk_id=chunk.id
+                        ), timeout=10
+                    )
+                    approved_count += 1
+                except Exception as exc:
+                    log.warning("Failed to approve chunk %s: %s", chunk.rule_name, exc)
+
+            return approved_count, unexpected
+        except Exception as exc:
+            log.warning("approve_draft_policy_chunks failed for %s: %s", sandbox_name, exc)
+            return 0, []
+
+    approved, unexpected = await asyncio.to_thread(_do_approve)
+    if approved:
+        log.info("sandbox %s: approved %d draft policy chunk(s)", sandbox_name, approved)
+        await asyncio.sleep(2)  # let supervisor apply the new policy
+    return unexpected
+
+
 async def import_provider_profiles(profiles: list[dict], client=None) -> None:
     """Import custom provider type profiles into the gateway (idempotent)."""
     from openshell._proto import openshell_pb2
@@ -214,7 +302,7 @@ async def create_provider_from_env(
 async def create_sandbox(
     image: str,
     env_vars: dict[str, str] | None,
-    policy_yaml: str,
+    policy,
     provider_names: list[str] | None = None,
     client=None,
 ):
@@ -238,6 +326,8 @@ async def create_sandbox(
         spec.environment[k] = v
     for pname in (provider_names or []):
         spec.providers.append(pname)
+    if policy is not None:
+        spec.policy.CopyFrom(policy)
 
     def _do_create():
         return client.create(spec=spec)
@@ -324,9 +414,11 @@ async def clone_repos(sandbox_name: str, repos: list, client=None) -> None:
     sid = await _sandbox_id(sandbox_name, client)
     for repo in repos:
         target = f"/sandbox/{repo.local_path}"
+        # SessionRepo uses repo_url; _Repo dataclasses also use repo_url
+        url = getattr(repo, "repo_url", None) or getattr(repo, "url", "")
 
-        def _do_clone(s=sid, t=target, r=repo):
-            client.exec(s, ["git", "clone", r.url, t])
+        def _do_clone(s=sid, t=target, u=url):
+            client.exec(s, ["git", "clone", u, t])
 
         await asyncio.to_thread(_do_clone)
 

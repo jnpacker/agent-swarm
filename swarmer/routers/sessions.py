@@ -662,6 +662,45 @@ async def _get_capacity_summary(workspace_id: int, db: AsyncSession) -> dict:
     }
 
 
+def _build_expected_hosts(model: str, repos_data: list[dict], tool_name: str, mode: str) -> set[str]:
+    """Return the set of hostnames this session is expected to reach.
+
+    Only draft policy chunks matching these hosts will be auto-approved.
+    Anything outside this set is left pending for human review.
+    """
+    hosts: set[str] = set()
+
+    # AI provider endpoints based on model prefix
+    provider = model.split("/")[0] if "/" in model else ""
+    if provider in ("google", "google-vertex-anthropic"):
+        hosts.add("generativelanguage.googleapis.com")
+        hosts.add("*.aiplatform.googleapis.com")
+        hosts.add("oauth2.googleapis.com")
+    if provider in ("google-vertex-anthropic", "vertexai"):
+        hosts.add("*.aiplatform.googleapis.com")
+    if provider == "anthropic":
+        hosts.add("api.anthropic.com")
+    if provider in ("gemini",):
+        hosts.add("generativelanguage.googleapis.com")
+    if provider == "openai":
+        hosts.add("api.openai.com")
+
+    # OpenCode fetches model metadata from models.dev
+    if tool_name == "opencode":
+        hosts.add("models.dev")
+        hosts.add("opencode.ai")
+
+    # GitHub access for each attached repo
+    if repos_data:
+        hosts.add("github.com")
+        hosts.add("api.github.com")
+        # Raw content for public repos
+        hosts.add("raw.githubusercontent.com")
+        hosts.add("objects.githubusercontent.com")
+
+    return hosts
+
+
 async def _do_launch(session: Session, ws: Workspace, db: AsyncSession, user_id: str = "") -> None:
     """Core launch logic shared by the HTTP endpoint and the background scheduler."""
     if user_id == "unknown":
@@ -785,7 +824,7 @@ async def _do_launch_openshell(
         provider_names.append(pname)
 
     # 2. Build policy YAML (pure computation, no I/O)
-    policy_yaml = build_session_policy(
+    policy = build_session_policy(
         session=session,
         repos=list(session.repos or []),
         mcp_servers=list(mcp_servers or []),
@@ -837,7 +876,7 @@ async def _do_launch_openshell(
             session_id=session.id,
             provider_names=provider_names,
             env_vars=env_vars,
-            policy_yaml=policy_yaml,
+            policy=policy,
             image=tool.get_image(),
             tool_name=tool.name,
             model=model,
@@ -859,7 +898,7 @@ async def _setup_openshell_sandbox(
     session_id: int,
     provider_names: list[str],
     env_vars: dict,
-    policy_yaml: str,
+    policy,
     image: str,
     tool_name: str,
     model: str,
@@ -893,7 +932,7 @@ async def _setup_openshell_sandbox(
         ref = await openshell_client.create_sandbox(
             image=image,
             env_vars=env_vars,
-            policy_yaml=policy_yaml,
+            policy=policy,
             provider_names=provider_names,
         )
         await _update_db(sandbox_name=ref.name)
@@ -978,6 +1017,11 @@ async def _setup_openshell_sandbox(
         # AGENTS.md for tui/server modes
         if agents_md:
             await openshell_client.write_agents_md(sandbox_name=ref.name, content=agents_md)
+
+        # Approve only expected draft policy chunks (those matching this session's
+        # known endpoints). Unexpected endpoints are logged but not auto-approved.
+        expected = _build_expected_hosts(model, repos_data, tool_name, mode)
+        await openshell_client.approve_draft_policy_chunks(ref.name, expected_hosts=expected)
 
         # Launch agent
         # Set HOME=/sandbox so the agent writes to /sandbox/.local rather than

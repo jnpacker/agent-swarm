@@ -194,7 +194,7 @@ async def test_create_sandbox_passes_byoc_image(sdk_client):
         await oc.create_sandbox(
             image=image,
             env_vars={},
-            policy_yaml="version: 1\n",
+            policy=None,
         )
     sdk_client.create.assert_called_once()
     # The spec object is passed as a kwarg; check its template.image was set
@@ -208,7 +208,7 @@ async def test_wait_ready_called_after_create(sdk_client):
         await oc.create_sandbox(
             image="quay.io/jpacker/opencode:latest",
             env_vars={},
-            policy_yaml="version: 1\n",
+            policy=None,
         )
     sdk_client.wait_ready.assert_called_once()
 
@@ -221,7 +221,7 @@ async def test_create_sandbox_does_not_create_pvc(sdk_client):
             await oc.create_sandbox(
                 image="quay.io/jpacker/opencode:latest",
                 env_vars={},
-                policy_yaml="version: 1\n",
+                policy=None,
             )
             mock_pvc.assert_not_called()
 

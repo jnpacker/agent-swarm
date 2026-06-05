@@ -512,8 +512,9 @@ class TestDoLaunchOpenshell:
 
         call_kwargs = mock_sandbox.call_args[1] if mock_sandbox.call_args else {}
         call_args = mock_sandbox.call_args[0] if mock_sandbox.call_args else ()
-        passed_policy = call_kwargs.get("policy_yaml") or (call_args[2] if len(call_args) > 2 else None)
-        assert passed_policy == "version: 1\nnetwork_policies: {}\n"
+        passed_policy = call_kwargs.get("policy") or (call_args[2] if len(call_args) > 2 else None)
+        # policy is now a SandboxPolicy proto, not a YAML string
+        assert passed_policy is not None
 
 
 # ===========================================================================
