@@ -859,9 +859,9 @@ async def _do_launch_openshell(
     if session.mode in ("tui", "server"):
         repo_context = k8s_sess._build_repo_context(list(session.repos or []), base_path="/sandbox")
         agents_md = (resolved_prompt or "") + repo_context
-    # Build main_cmd without embedded prompt — prompt is written to /sandbox/.prompt.txt
-    # to avoid gateway rejection of newline characters in exec command arguments.
-    main_cmd = tool.build_main_cmd(session, model, resolved_prompt="")
+    # main_cmd is used for tui/server modes. For prompt mode, _setup_openshell_sandbox
+    # builds the command from scratch to write the prompt via stdin (no newlines in args).
+    main_cmd = tool.build_main_cmd(session, model, resolved_prompt=resolved_prompt)
     resolved_prompt_safe = resolved_prompt or ""
     model_setup_cmd = tool.build_model_setup_cmd(model).replace("/workspace/", "/sandbox/")
     share_cmd = tool.build_share_setup_cmd().replace("/workspace/", "/sandbox/")
@@ -1028,17 +1028,21 @@ async def _setup_openshell_sandbox(
         expected = _build_expected_hosts(model, repos_data, tool_name, mode)
         await openshell_client.approve_draft_policy_chunks(ref.name, expected_hosts=expected)
 
-        # For prompt mode, write the resolved prompt to a file to avoid gateway
-        # rejection of newline characters in exec command arguments.
-        # The main_cmd uses $(</sandbox/.prompt.txt) to read the prompt.
+        # For prompt mode, write the prompt to /sandbox/.prompt.txt via stdin
+        # so we avoid newline-in-arg gateway rejection. Build the agent command
+        # from scratch (not from pre-built main_cmd which may embed newlines).
         if mode == "prompt" and resolved_prompt:
-            prompt_cmd = f"cat > /sandbox/.prompt.txt"
             await openshell_client.exec_command(
-                ref.name, ["sh", "-c", prompt_cmd], client=None,
-                stdin=resolved_prompt.encode(),
+                ref.name, ["sh", "-c", "cat > /sandbox/.prompt.txt"],
+                client=None, stdin=resolved_prompt.encode(),
             )
-            # Append prompt file reference to main_cmd (no embedded newlines)
-            agent_cmd = f"HOME=/sandbox {main_cmd} \"$(</sandbox/.prompt.txt)\""
+            # Base command without any embedded prompt — shell reads from file
+            _tool_bin = {"opencode": "opencode run", "crush": "crush run"}.get(tool_name, "opencode run")
+            _model_arg = shlex.quote(model) if model else ""
+            agent_cmd = f"HOME=/sandbox {_tool_bin} --model {_model_arg} \"$(</sandbox/.prompt.txt)\""
+        elif mode == "prompt" and not resolved_prompt:
+            # No prompt at all — just launch without message
+            agent_cmd = f"HOME=/sandbox {main_cmd}"
         else:
             agent_cmd = f"HOME=/sandbox {main_cmd}"
 

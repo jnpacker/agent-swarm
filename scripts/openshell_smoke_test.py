@@ -248,6 +248,15 @@ async def run_smoke_test(model: str) -> bool:
         step("git clone public repo", False, str(exc))
         all_passed = False
 
+    # ── 9c. Verify sandbox still alive (may have been GC'd during approval wait) ──
+    try:
+        client._stub.GetSandbox(openshell_pb2.GetSandboxRequest(name=sandbox_name), timeout=10)
+    except Exception as exc:
+        step("Sandbox still alive", False, f"GC or external deletion: {exc}")
+        all_passed = False
+        client._stub.DeleteProvider(openshell_pb2.DeleteProviderRequest(name=provider_name), timeout=10)
+        return all_passed
+
     # ── 10. opencode run ──────────────────────────────────────────────────────
     print("\n[10] opencode prompt execution")
     prompt = "Write Hello World in large ASCII art text. Be brief."
