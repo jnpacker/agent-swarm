@@ -81,15 +81,15 @@ async def ensure_provider(
     name: str,
     profile_type: str,
     config: dict[str, str],
-    credential_keys: list[str] | None = None,
+    credentials: dict[str, str] | None = None,
     client=None,
 ) -> None:
-    """Declare a named provider on the gateway.
+    """Create or update a named provider on the gateway with its credentials.
 
-    credential_keys names the credential slots (e.g. ["api_key"]) without
-    values — the actual secret material is supplied separately via
-    configure_provider_credential() so the gateway can issue reference tokens
-    and proxy-rewrite outbound requests without exposing the real key.
+    For static API keys the gateway stores credentials securely and injects
+    them as env vars into the sandbox via GetSandboxProviderEnvironment.
+    Credentials are stored server-side (returned as REDACTED); use UpdateProvider
+    on subsequent launches to rotate keys.
     """
     from openshell._proto import openshell_pb2
     import grpc
@@ -102,8 +102,8 @@ async def ensure_provider(
         req_provider.type = profile_type
         for k, v in (config or {}).items():
             req_provider.config[k] = v
-        for k in (credential_keys or []):
-            req_provider.credentials[k] = ""
+        for k, v in (credentials or {}).items():
+            req_provider.credentials[k] = v
 
     def _do_ensure():
         create_req = openshell_pb2.CreateProviderRequest()

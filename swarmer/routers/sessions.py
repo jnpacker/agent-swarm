@@ -766,26 +766,24 @@ async def _do_launch_openshell(
     )
 
     # 1b. Create/update gateway providers for each available credential.
-    #     Providers must be set up BEFORE sandbox creation so that SandboxSpec.providers
-    #     can list them — the supervisor calls GetSandboxProviderEnvironment at startup
-    #     and receives injected reference tokens (not the real keys) for each provider.
+    #     Must happen BEFORE sandbox creation: provider names go into SandboxSpec.providers
+    #     so the supervisor can call GetSandboxProviderEnvironment at startup and receive
+    #     the injected env vars (GOOGLE_API_KEY, ANTHROPIC_API_KEY, GH_TOKEN, etc.).
+    #     Credentials are stored securely by the gateway (UpdateProvider for rotation).
     provider_names: list[str] = []
     ws_id = session.workspace_id
     if oc_secret and oc_secret.anthropic_api_key:
         pname = f"swarmer-ws-{ws_id}-claude-code"
-        await openshell_client.ensure_provider(pname, "claude-code", {}, credential_keys=["api_key"])
-        await openshell_client.configure_provider_credential(pname, "api_key", oc_secret.anthropic_api_key)
+        await openshell_client.ensure_provider(pname, "claude-code", {}, credentials={"api_key": oc_secret.anthropic_api_key})
         provider_names.append(pname)
     if oc_secret and oc_secret.google_api_key:
         pname = f"swarmer-ws-{ws_id}-google-ai-studio"
-        await openshell_client.ensure_provider(pname, "google-ai-studio", {}, credential_keys=["api_key"])
-        await openshell_client.configure_provider_credential(pname, "api_key", oc_secret.google_api_key)
+        await openshell_client.ensure_provider(pname, "google-ai-studio", {}, credentials={"api_key": oc_secret.google_api_key})
         provider_names.append(pname)
     if session.github_pat:
         pname = f"swarmer-ws-{ws_id}-github"
         pat_token = getattr(session.github_pat, "token", None) or getattr(session.github_pat, "pat", "")
-        await openshell_client.ensure_provider(pname, "github", {}, credential_keys=["api_token"])
-        await openshell_client.configure_provider_credential(pname, "api_token", pat_token)
+        await openshell_client.ensure_provider(pname, "github", {}, credentials={"api_token": pat_token})
         provider_names.append(pname)
 
     # 2. Build network/filesystem policy YAML
