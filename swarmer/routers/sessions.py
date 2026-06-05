@@ -859,7 +859,10 @@ async def _do_launch_openshell(
     if session.mode in ("tui", "server"):
         repo_context = k8s_sess._build_repo_context(list(session.repos or []), base_path="/sandbox")
         agents_md = (resolved_prompt or "") + repo_context
-    main_cmd = tool.build_main_cmd(session, model, resolved_prompt=resolved_prompt)
+    # Build main_cmd without embedded prompt — prompt is written to /sandbox/.prompt.txt
+    # to avoid gateway rejection of newline characters in exec command arguments.
+    main_cmd = tool.build_main_cmd(session, model, resolved_prompt="")
+    resolved_prompt_safe = resolved_prompt or ""
     model_setup_cmd = tool.build_model_setup_cmd(model).replace("/workspace/", "/sandbox/")
     share_cmd = tool.build_share_setup_cmd().replace("/workspace/", "/sandbox/")
 
@@ -889,6 +892,7 @@ async def _do_launch_openshell(
             agents_md=agents_md,
             mode=session.mode,
             main_cmd=main_cmd,
+            resolved_prompt=resolved_prompt_safe,
         ),
         name=f"openshell-setup-{session.id}",
     )
@@ -911,6 +915,7 @@ async def _setup_openshell_sandbox(
     agents_md: str,
     mode: str,
     main_cmd: str,
+    resolved_prompt: str = "",
 ) -> None:
     """Background task: create sandbox and run all setup steps, then launch agent."""
     from swarmer import openshell_client
@@ -1023,14 +1028,26 @@ async def _setup_openshell_sandbox(
         expected = _build_expected_hosts(model, repos_data, tool_name, mode)
         await openshell_client.approve_draft_policy_chunks(ref.name, expected_hosts=expected)
 
+        # For prompt mode, write the resolved prompt to a file to avoid gateway
+        # rejection of newline characters in exec command arguments.
+        # The main_cmd uses $(</sandbox/.prompt.txt) to read the prompt.
+        if mode == "prompt" and resolved_prompt:
+            prompt_cmd = f"cat > /sandbox/.prompt.txt"
+            await openshell_client.exec_command(
+                ref.name, ["sh", "-c", prompt_cmd], client=None,
+                stdin=resolved_prompt.encode(),
+            )
+            # Append prompt file reference to main_cmd (no embedded newlines)
+            agent_cmd = f"HOME=/sandbox {main_cmd} \"$(</sandbox/.prompt.txt)\""
+        else:
+            agent_cmd = f"HOME=/sandbox {main_cmd}"
+
         # Launch agent
-        # Set HOME=/sandbox so the agent writes to /sandbox/.local rather than
-        # /home/sandbox/.local — the container's home dir may not be writable via landlock.
         asyncio.create_task(
             _run_openshell_agent(
                 session_id=session_id,
                 sandbox_name=ref.name,
-                cmd=["sh", "-c", f"HOME=/sandbox {main_cmd}"],
+                cmd=["sh", "-c", agent_cmd],
                 mode=mode,
             ),
             name=f"openshell-agent-{session_id}",
