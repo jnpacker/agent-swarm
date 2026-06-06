@@ -161,14 +161,22 @@ All sensitive fields (PATs, API keys, ADC credentials) are Fernet-encrypted at r
 | `get_client()` | `(gateway_url, tls_ca_path?, tls_cert_path?, tls_key_path?) → SandboxClient` | Public factory for e2e tests |
 | `create_provider()` | `async (session, workspace_secret, github_pat, mcp_servers, client?) → dict[str,str]` | Collects DB credentials into env-var dict (no K8s Secrets, no I/O) |
 | `create_provider_from_env()` | `async (google_api_key, anthropic_api_key, github_pat, client?) → dict[str,str]` | Builds env-var dict from explicit values (for tests) |
-| `create_sandbox()` | `async (image, env_vars, policy_yaml, client?) → SandboxRef` | Creates sandbox, waits ready, returns ref |
+| `ensure_provider()` | `async (name, profile_type, config, credentials?, client?) → None` | Creates or updates a named gateway provider (idempotent) |
+| `configure_provider_credential()` | `async (provider_name, credential_key, credential_value, client?) → None` | Stores a static credential on a gateway-managed provider |
+| `configure_vertex_provider()` | `async (provider_name, adc_json, project, location, client?) → None` | Configures google-vertex-ai provider with ADC-based token refresh |
+| `enable_providers_v2()` | `async (client?) → None` | Enables `providers_v2_enabled` gateway feature flag (required for google-vertex-ai) |
+| `set_cluster_inference()` | `async (provider_name, model_id, no_verify?, client?) → None` | Configures inference.local cluster proxy to use a provider+model |
+| `create_sandbox()` | `async (image, env_vars, policy, provider_names?, client?) → SandboxRef` | Creates sandbox, waits ready, returns ref |
 | `delete_sandbox()` | `async (sandbox_name, client?) → None` | Deletes sandbox by name |
-| `clone_repos()` | `async (sandbox_name, repos, client?) → None` | Clones git repos into `/sandbox/` via exec |
-| `write_agent_config()` | `async (sandbox_name, tool_name, config_json, client?) → None` | Writes tool config JSON to `/sandbox/.config/{tool}/` |
+| `write_agent_config()` | `async (sandbox_name, tool_name, config_json, client?) → None` | Writes tool config JSON to `/sandbox/{tool}.json` |
 | `write_agents_md()` | `async (sandbox_name, content, client?) → None` | Writes AGENTS.md to `/sandbox/` |
 | `write_file()` | `async (sandbox_name, path, content, client?) → None` | Writes arbitrary file to sandbox |
-| `start_agent()` | `async (sandbox_name, cmd, client?) → None` | Starts agent process via exec |
-| `exec_command()` | `async (sandbox_name, cmd, client) → ExecResult` | Runs command, returns result with stdout/stderr/exit_code |
+| `start_agent()` | `async (sandbox_name, cmd, client?) → None` | Starts agent as detached nohup background process (fire-and-forget) |
+| `exec_command()` | `async (sandbox_name, cmd, client, stdin?, timeout_seconds?) → ExecResult` | Runs command, returns result with stdout/stderr/exit_code |
+| `exec_interactive()` | `(sandbox_name, sandbox_id, command, cols, rows, client?) → (stream, queue)` | Opens interactive PTY gRPC stream for TUI WebSocket bridge |
+| `expose_service()` | `async (sandbox_name, service_name, target_port, client?) → str` | Exposes sandbox port via gateway and returns a routable URL |
+| `delete_service()` | `async (sandbox_name, service_name, client?) → None` | Deletes an exposed sandbox service endpoint |
+| `approve_draft_policy_chunks()` | `async (sandbox_name, expected_hosts?, client?) → list[str]` | Approves pending network policy chunks for expected hosts |
 
 ### OpenShell Config Settings
 
@@ -247,20 +255,37 @@ The sessions list shows a workspace-scoped capacity summary ("N active | N slots
 
 ## Chat Proxy
 
-`chat_proxy.py` handles server-mode session access:
-- **Crush sessions**: Renders a custom chat UI template (`crush_chat.html`); the JS makes API calls through the same `/chat/{path}` proxy
-- **OpenCode sessions on OpenShift**: Redirects to the OpenShift Route hostname (direct browser access)
-- **OpenCode sessions elsewhere**: Sub-path HTTP proxy with HTML path rewriting (`<base>` tag injection + asset path rewriting)
-- SSE streams are proxied with no read timeout; WebSocket proxy via `websockets` library (bidirectional relay)
+`chat_proxy.py` handles server-mode session access. The proxy backend is selected by `session.sandbox_name`:
+
+- **OpenShell sessions** (`session.sandbox_name` set): routes HTTP/SSE/WebSocket to `session.service_url` — set by `expose_service()` after the server agent starts. The URL is an OpenShell gateway domain URL (e.g. `https://<name>.openshell.localhost:<port>`). The proxy rewrites the port in `expose_service` to match `OPENSHELL_GATEWAY_URL` (the locally accessible port-forward port). The gateway requires **mutual TLS** — the proxy presents the client cert/key from `OPENSHELL_TLS_CERT`/`OPENSHELL_TLS_KEY` and skips server cert verification (`verify=False`) since the gateway uses a self-signed cert. Without the client cert the gateway returns `TLSV13_ALERT_CERTIFICATE_REQUIRED`.
+- **K8s sessions** (`session.pod_name` set, no `sandbox_name`): routes to the session's ClusterIP Service via `http://session-{id}-svc.{namespace}.svc.cluster.local:4096`
+- **OpenShift Route sessions**: redirects browser directly to the OpenShift Route hostname (bypasses proxy)
+- **Crush sessions**: renders a custom `crush_chat.html` template; JS calls go through the same `/chat/{path}` proxy
+
+Server-mode lifecycle: session stays in `pending` until `expose_service` returns a URL, which is stored and the session transitions to `running` atomically — preventing the Chat tab from opening before the URL is set.
+
+SSE streams proxied with no read timeout; WebSocket proxy via `websockets` library (bidirectional relay) with TLS bypass for `wss://` upstreams.
 
 ## TUI WebSocket Proxy
 
-`tui_ws.py` provides browser-to-pod terminal access:
+`tui_ws.py` provides browser-to-agent terminal access. The backend is selected by `session.sandbox_name`:
+
+**OpenShell path** (`session.sandbox_name` set):
+- Resolves `sandbox_id` via `_sandbox_id()`
+- Opens an `ExecSandboxInteractive` gRPC stream via `exec_interactive()`
+- Background thread drains the gRPC response stream into an asyncio Queue
+- Async read/write tasks bridge the browser xterm.js WebSocket and the gRPC stream
+- Resize events forwarded as `ExecSandboxWindowResize` messages
+- Agent is NOT started here — the TUI WebSocket handler starts it interactively; `_run_openshell_agent` skips `start_agent` for TUI mode
+- Network policy probe runs during `_setup_openshell_sandbox` so AI API endpoints are approved before the user connects
+
+**K8s path** (`session.pod_name` set, no `sandbox_name`):
 - One-time UUID auth tokens generated on session detail page, stored in HTTP session, consumed on connect
 - Uses `kubernetes.stream` exec API (not kubectl subprocess)
 - Background thread reads pod stdout/stderr into an asyncio Queue
 - Supports terminal resize via channel 4 JSON messages
-- Runs the agent tool's TUI binary (`tool.get_tui_binary()`) with model and resume flags
+
+Both paths run the agent tool's TUI binary (`tool.get_tui_binary()`) with model and resume flags.
 
 ## Patch Generation
 

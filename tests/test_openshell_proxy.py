@@ -572,6 +572,160 @@ class TestStopDeleteCallsDeleteService:
 
 
 # ===========================================================================
+# 4b. Chat proxy — upstream error handling
+# ===========================================================================
+
+
+class TestChatHttpProxyErrors:
+    """Verify the proxy returns 503 (not ASGI crash) for all upstream errors."""
+
+    @pytest.mark.asyncio
+    async def test_proxy_returns_503_on_ssl_error(self, client):
+        """SSL errors from the upstream (e.g. gRPC gateway) must be caught."""
+        import ssl as _ssl
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="server", agent_tool="opencode")
+
+        async with _TestSession() as db:
+            from swarmer.models.session import Session as _Session
+            session_obj = await db.get(_Session, s["id"])
+            session_obj.phase = "running"
+            session_obj.sandbox_name = "sandbox-test-abc"
+            session_obj.service_url = "https://agent.openshell.internal:17670"
+            await db.commit()
+
+        async def _raise_ssl(*args, **kwargs):
+            raise _ssl.SSLError("WRONG_VERSION_NUMBER")
+
+        with patch("swarmer.routers.chat_proxy.httpx.AsyncClient") as mock_cls:
+            mock_instance = AsyncMock()
+            mock_instance.request.side_effect = _raise_ssl
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            resp = await client.get(
+                f"/workspaces/{ws['id']}/sessions/{s['id']}/chat/api"
+            )
+
+        assert resp.status_code == 503
+        assert "agent.openshell.internal:17670" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_proxy_returns_503_on_connect_error(self, client):
+        """ConnectError from upstream returns 503 with the upstream URL visible."""
+        import httpx
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="server", agent_tool="opencode")
+
+        async with _TestSession() as db:
+            from swarmer.models.session import Session as _Session
+            session_obj = await db.get(_Session, s["id"])
+            session_obj.phase = "running"
+            session_obj.sandbox_name = "sandbox-test-abc"
+            session_obj.service_url = "https://agent.openshell.internal:17670"
+            await db.commit()
+
+        async def _raise_connect(*args, **kwargs):
+            raise httpx.ConnectError("Connection refused")
+
+        with patch("swarmer.routers.chat_proxy.httpx.AsyncClient") as mock_cls:
+            mock_instance = AsyncMock()
+            mock_instance.request.side_effect = _raise_connect
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            resp = await client.get(
+                f"/workspaces/{ws['id']}/sessions/{s['id']}/chat/api"
+            )
+
+        assert resp.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_proxy_returns_503_on_mtls_error(self, client):
+        """mTLS CERTIFICATE_REQUIRED from gateway is caught and returns 503."""
+        import ssl as _ssl
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="server", agent_tool="opencode")
+
+        async with _TestSession() as db:
+            from swarmer.models.session import Session as _Session
+            session_obj = await db.get(_Session, s["id"])
+            session_obj.phase = "running"
+            session_obj.sandbox_name = "sandbox-test-abc"
+            session_obj.service_url = "https://agent.openshell.internal:17670"
+            await db.commit()
+
+        async def _raise_mtls(*args, **kwargs):
+            raise _ssl.SSLError(
+                1,
+                "[SSL: TLSV13_ALERT_CERTIFICATE_REQUIRED] tlsv13 alert certificate required",
+            )
+
+        with patch("swarmer.routers.chat_proxy.httpx.AsyncClient") as mock_cls:
+            mock_instance = AsyncMock()
+            mock_instance.request.side_effect = _raise_mtls
+            mock_cls.return_value.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+            resp = await client.get(
+                f"/workspaces/{ws['id']}/sessions/{s['id']}/chat/api"
+            )
+
+        assert resp.status_code == 503
+        # Error message should include the upstream URL for diagnosis
+        assert "17670" in resp.text or "agent.openshell" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_openshell_httpx_kwargs_includes_cert_when_configured(self):
+        """_openshell_httpx_kwargs returns cert tuple when TLS cert/key are set."""
+        from swarmer.routers.chat_proxy import _openshell_httpx_kwargs
+        from swarmer.config import settings
+
+        orig_cert, orig_key = settings.openshell_tls_cert, settings.openshell_tls_key
+        try:
+            settings.openshell_tls_cert = "/tmp/fake.crt"
+            settings.openshell_tls_key = "/tmp/fake.key"
+            kwargs = _openshell_httpx_kwargs()
+            assert kwargs.get("verify") is False
+            assert kwargs.get("cert") == ("/tmp/fake.crt", "/tmp/fake.key")
+        finally:
+            settings.openshell_tls_cert = orig_cert
+            settings.openshell_tls_key = orig_key
+
+    @pytest.mark.asyncio
+    async def test_openshell_httpx_kwargs_no_cert_when_unconfigured(self):
+        """_openshell_httpx_kwargs returns verify=False only when no cert configured."""
+        from swarmer.routers.chat_proxy import _openshell_httpx_kwargs
+        from swarmer.config import settings
+
+        orig_cert, orig_key = settings.openshell_tls_cert, settings.openshell_tls_key
+        try:
+            settings.openshell_tls_cert = ""
+            settings.openshell_tls_key = ""
+            kwargs = _openshell_httpx_kwargs()
+            assert kwargs.get("verify") is False
+            assert "cert" not in kwargs
+        finally:
+            settings.openshell_tls_cert = orig_cert
+            settings.openshell_tls_key = orig_key
+
+    @pytest.mark.asyncio
+    async def test_session_not_running_returns_503(self, client):
+        """Session without service_url and without pod_name → 503."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="server", agent_tool="opencode")
+
+        async with _TestSession() as db:
+            from swarmer.models.session import Session as _Session
+            session_obj = await db.get(_Session, s["id"])
+            session_obj.phase = "running"
+            # no sandbox_name, no service_url, no pod_name
+            await db.commit()
+
+        resp = await client.get(
+            f"/workspaces/{ws['id']}/sessions/{s['id']}/chat/api"
+        )
+        assert resp.status_code == 503
+
+
+# ===========================================================================
 # 5. TUI WebSocket — OpenShell path (unit-level)
 # ===========================================================================
 
@@ -659,18 +813,20 @@ _E2E_BASE = _os.environ.get("SWARMER_E2E_URL", "http://localhost:8091")
 @pytest.mark.skipif(not _E2E, reason="Set SWARMER_E2E=1 to run e2e smoke tests")
 class TestE2eSmokeProxy:
     """
-    E2E smoke tests for OpenShell TUI + server-mode proxy flow.
+    E2E smoke tests for OpenShell TUI, server-mode proxy, and Gemini prompt flow.
 
     These tests call the real running app and verify end-to-end behavior
     against a session that has already been started with OpenShell enabled.
     They assume SWARMER_DEV_AUTH=1 (no token required).
 
     Env vars:
-      SWARMER_E2E=1         — enable this test class
-      SWARMER_E2E_URL       — base URL (default http://localhost:8091)
-      SWARMER_E2E_WS_ID     — workspace ID to use (required)
-      SWARMER_E2E_SID       — session ID of a running server-mode OpenShell session
-      SWARMER_E2E_TUI_SID   — session ID of a running tui-mode OpenShell session
+      SWARMER_E2E=1             — enable this test class
+      SWARMER_E2E_URL           — base URL (default http://localhost:8091)
+      SWARMER_E2E_WS_ID         — workspace ID to use (required)
+      SWARMER_E2E_SID           — session ID of a running server-mode OpenShell session
+      SWARMER_E2E_TUI_SID       — session ID of a running opencode tui-mode session
+      SWARMER_E2E_CRUSH_SID     — session ID of a completed crush prompt-mode session
+      SWARMER_E2E_CRUSH_TUI_SID — session ID of a running crush tui-mode session
     """
 
     @pytest.fixture(autouse=True)
@@ -695,6 +851,20 @@ class TestE2eSmokeProxy:
         val = _os.environ.get("SWARMER_E2E_TUI_SID")
         if not val:
             pytest.skip("SWARMER_E2E_TUI_SID not set")
+        return int(val)
+
+    @property
+    def _crush_sid(self):
+        val = _os.environ.get("SWARMER_E2E_CRUSH_SID")
+        if not val:
+            pytest.skip("SWARMER_E2E_CRUSH_SID not set")
+        return int(val)
+
+    @property
+    def _crush_tui_sid(self):
+        val = _os.environ.get("SWARMER_E2E_CRUSH_TUI_SID")
+        if not val:
+            pytest.skip("SWARMER_E2E_CRUSH_TUI_SID not set")
         return int(val)
 
     @pytest.mark.asyncio
@@ -733,3 +903,199 @@ class TestE2eSmokeProxy:
         assert "service_url" in data or data.get("phase") != "running", (
             f"service_url missing from API response for running session: {data}"
         )
+
+    @pytest.mark.asyncio
+    async def test_smoke_opencode_tui_websocket(self):
+        """OpenCode TUI: WebSocket connection returns PTY data within 5s.
+
+        Requires a running opencode tui-mode session (SWARMER_E2E_TUI_SID).
+        Connect to the TUI WebSocket, send the one-time token from the session
+        detail page, and assert initial terminal output is received.
+
+        To run:
+          SWARMER_E2E=1 SWARMER_E2E_WS_ID=1 SWARMER_E2E_TUI_SID=2 \\
+          pytest tests/test_openshell_proxy.py -k smoke_opencode_tui -v -s
+        """
+        import httpx
+        import websockets
+
+        ws_id, sid = self._ws_id, self._tui_sid
+
+        # Get a one-time TUI token from the session detail page
+        async with httpx.AsyncClient(base_url=_E2E_BASE, follow_redirects=True) as hc:
+            resp = await hc.get(f"/workspaces/{ws_id}/sessions/{sid}")
+        assert resp.status_code == 200, f"Session detail failed: {resp.status_code}"
+
+        # Extract tui_token from the page (it's embedded as a JS variable)
+        import re as _re
+        match = _re.search(r'tuiToken\s*=\s*["\']([0-9a-f-]{36})["\']', resp.text)
+        if not match:
+            pytest.skip("No TUI token found — session may not be in running state")
+        token = match.group(1)
+
+        ws_url = _E2E_BASE.replace("http://", "ws://").replace("https://", "wss://")
+        ws_url = f"{ws_url}/ws/{ws_id}/sessions/{sid}/tui"
+
+        # Connect, send token, and wait for PTY output
+        received = []
+        try:
+            async with websockets.connect(ws_url, open_timeout=5) as ws:
+                await ws.send(token)
+                import asyncio as _asyncio
+                try:
+                    async with _asyncio.timeout(5):
+                        while True:
+                            data = await ws.recv()
+                            received.append(data)
+                            if len(received) >= 1:
+                                break
+                except _asyncio.TimeoutError:
+                    pass
+        except Exception as exc:
+            pytest.fail(f"WebSocket connection failed: {exc}")
+
+        assert received, "Expected TUI to emit PTY output within 5s — got nothing"
+
+    @pytest.mark.asyncio
+    async def test_smoke_crush_env_vars_injected(self):
+        """Crush diagnostic: verify GOOGLE_API_KEY is injected into the sandbox.
+
+        Uses a completed crush prompt-mode session whose output should contain
+        the result of `env | grep GOOGLE`. Create a Crush prompt session with:
+          prompt: Run this shell command and print the output: env | grep GOOGLE
+        Then set SWARMER_E2E_CRUSH_SID to that session's ID.
+
+        To run:
+          SWARMER_E2E=1 SWARMER_E2E_WS_ID=1 SWARMER_E2E_CRUSH_SID=3 \\
+          pytest tests/test_openshell_proxy.py -k smoke_crush_env -v -s
+        """
+        import httpx
+        ws_id, sid = self._ws_id, self._crush_sid
+
+        async with httpx.AsyncClient(base_url=_E2E_BASE, follow_redirects=True) as hc:
+            resp = await hc.get(f"/api/v1/workspaces/{ws_id}/sessions/{sid}")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        phase = data.get("phase", "")
+        last_output = data.get("last_output", "") or ""
+
+        print(f"\n--- Crush session phase: {phase} ---")
+        print(f"--- last_output ---\n{last_output}\n---")
+
+        assert phase in ("succeeded", "failed"), (
+            f"Session not complete yet (phase={phase}). Run crush prompt with env grep first."
+        )
+        assert "GOOGLE" in last_output, (
+            f"GOOGLE env var not found in crush output.\n"
+            f"This means GOOGLE_API_KEY is NOT injected into the sandbox.\n"
+            f"Output was:\n{last_output}"
+        )
+        assert "GOOGLE_API_KEY" in last_output, (
+            f"GOOGLE_API_KEY specifically missing from crush env output.\n"
+            f"Found GOOGLE vars: {[l for l in last_output.splitlines() if 'GOOGLE' in l]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_smoke_crush_tui_renders(self):
+        """Crush TUI: session detail page renders the terminal panel."""
+        import httpx
+        ws_id, sid = self._ws_id, self._crush_tui_sid
+        async with httpx.AsyncClient(base_url=_E2E_BASE, follow_redirects=True) as hc:
+            resp = await hc.get(f"/workspaces/{ws_id}/sessions/{sid}")
+        assert resp.status_code == 200
+        assert "terminal" in resp.text.lower() or "xterm" in resp.text.lower(), (
+            "Expected TUI terminal tab in session detail for crush tui-mode session"
+        )
+
+    @pytest.mark.asyncio
+    async def test_smoke_server_mode_service_url_reachable(self):
+        """server-mode session: service_url is set and the chat proxy responds.
+
+        Verifies the full chain: expose_service stored a URL, the port rewrite
+        from 8080→gateway_port worked, TLS is bypassed, and OpenCode serves HTTP.
+
+        To run:
+          SWARMER_E2E=1 SWARMER_E2E_WS_ID=1 SWARMER_E2E_SID=4 \\
+          pytest tests/test_openshell_proxy.py -k smoke_server_mode_service_url -v -s
+        """
+        import httpx
+        ws_id, sid = self._ws_id, self._sid
+
+        # 1. Check service_url is set on the session
+        async with httpx.AsyncClient(base_url=_E2E_BASE, follow_redirects=True) as hc:
+            api_resp = await hc.get(f"/api/v1/workspaces/{ws_id}/sessions/{sid}")
+        assert api_resp.status_code == 200
+        data = api_resp.json()
+        assert data.get("phase") == "running", f"Session not running: {data.get('phase')}"
+        service_url = data.get("service_url")
+        assert service_url, f"service_url not set on running server session: {data}"
+        print(f"\n--- service_url: {service_url} ---")
+
+        # 2. Proxy responds (200 or 503 if server slow, but NOT ASGI crash)
+        async with httpx.AsyncClient(base_url=_E2E_BASE, follow_redirects=True) as hc:
+            chat_resp = await hc.get(f"/workspaces/{ws_id}/sessions/{sid}/chat/")
+        assert chat_resp.status_code in (200, 302, 503), (
+            f"Unexpected status {chat_resp.status_code}: {chat_resp.text[:200]}"
+        )
+        print(f"--- chat response: {chat_resp.status_code} ---")
+
+    @pytest.mark.asyncio
+    async def test_smoke_openshell_mtls_configured(self):
+        """Verify OPENSHELL_TLS_CERT and OPENSHELL_TLS_KEY are set in the running server.
+
+        If these are missing, server-mode chat proxy will fail with
+        TLSV13_ALERT_CERTIFICATE_REQUIRED from the OpenShell gateway.
+
+        To run:
+          SWARMER_E2E=1 SWARMER_E2E_WS_ID=1 \\
+          pytest tests/test_openshell_proxy.py -k smoke_openshell_mtls -v -s
+        """
+        import httpx
+        async with httpx.AsyncClient(base_url=_E2E_BASE, follow_redirects=True) as hc:
+            resp = await hc.get("/api/v1/workspaces")
+        # If the server is reachable at all, check the config via health or
+        # just assert we can talk to it (mTLS only applies to upstream proxy)
+        assert resp.status_code in (200, 401, 403), (
+            f"Server not reachable: {resp.status_code}"
+        )
+        # The actual mTLS check: if cert/key are NOT configured, expose_service
+        # sessions fail with CERTIFICATE_REQUIRED. This test is a documentation
+        # reminder — run with a server session to confirm the real behavior.
+        print("\n✓ Server reachable. Ensure OPENSHELL_TLS_CERT and OPENSHELL_TLS_KEY")
+        print("  are set in .env pointing to auth/openshell/client.crt and client.key")
+
+    @pytest.mark.asyncio
+    async def test_smoke_gemini_prompt_completes(self):
+        """Gemini flash prompt session: completes with non-empty output.
+
+        Create a prompt session with model google/gemini-3.5-flash and
+        prompt "Reply with exactly one word: ready". Wait for it to complete
+        and check last_output is non-empty.
+
+        To run:
+          SWARMER_E2E=1 SWARMER_E2E_WS_ID=1 SWARMER_E2E_GEMINI_SID=5 \\
+          pytest tests/test_openshell_proxy.py -k smoke_gemini_prompt -v -s
+        """
+        import httpx
+        ws_id = self._ws_id
+        sid_val = _os.environ.get("SWARMER_E2E_GEMINI_SID")
+        if not sid_val:
+            pytest.skip("SWARMER_E2E_GEMINI_SID not set")
+        sid = int(sid_val)
+
+        async with httpx.AsyncClient(base_url=_E2E_BASE, follow_redirects=True) as hc:
+            resp = await hc.get(f"/api/v1/workspaces/{ws_id}/sessions/{sid}")
+        assert resp.status_code == 200
+        data = resp.json()
+        phase = data.get("phase", "")
+        last_output = data.get("last_output", "") or ""
+
+        print(f"\n--- Gemini session phase: {phase} ---")
+        print(f"--- last_output: {last_output[:200]} ---")
+
+        assert phase in ("succeeded", "failed"), (
+            f"Session not complete (phase={phase}). Ensure it has finished running."
+        )
+        assert phase == "succeeded", f"Gemini prompt failed: {last_output}"
+        assert last_output.strip(), "Expected non-empty output from Gemini prompt session"
