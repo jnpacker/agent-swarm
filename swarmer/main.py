@@ -102,7 +102,7 @@ async def _restart_prompt_pollers() -> None:
                 _model = s.model or _tool.get_default_model(False, False)
                 _main_cmd = _tool.build_main_cmd(s, _model)
                 asyncio.create_task(
-                    _run_openshell_agent(s.id, s.sandbox_name, ["sh", "-c", _main_cmd], s.mode),
+                    _run_openshell_agent(s.id, s.sandbox_name, ["sh", "-c", _main_cmd], s.mode, s.agent_tool),
                     name=f"openshell-agent-{s.id}",
                 )
             elif s.pod_name:

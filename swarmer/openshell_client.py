@@ -437,9 +437,14 @@ async def write_agent_config(
     if client is None:
         client = _get_client()
     sid = await _sandbox_id(sandbox_name, client)
-    # Write directly to /sandbox/<tool>.json — OpenCode/Crush read config from CWD.
-    dest = shlex.quote(f"/sandbox/{tool_name}.json")
-    script = f"cat > {dest}"
+    
+    if tool_name == "crush":
+        dest = shlex.quote("/sandbox/.config/crush/crush.json")
+        script = f"mkdir -p /sandbox/.config/crush && cat > {dest}"
+    else:
+        # Write directly to /sandbox/<tool>.json — OpenCode reads config from CWD.
+        dest = shlex.quote(f"/sandbox/{tool_name}.json")
+        script = f"cat > {dest}"
 
     def _do_write(s=sid):
         client.exec(s, ["sh", "-c", script], stdin=config_json.encode())

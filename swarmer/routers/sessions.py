@@ -1010,15 +1010,21 @@ async def _setup_openshell_sandbox(
                     )
                     await openshell_client.exec_command(ref.name, ["sh", "-c", branch_cmd], client=None)
 
+        # Share/state dir setup runs FIRST so the $HOME/.local/share/<tool> symlink
+        # is in place before model_setup_cmd writes the model config through it.
+        # Both commands need HOME=/sandbox to match the agent's runtime environment.
+        if share_cmd.strip():
+            clean_share = share_cmd.rstrip().rstrip(";").rstrip()
+            await openshell_client.exec_command(
+                ref.name, ["sh", "-c", f"export HOME=/sandbox; {clean_share}"], client=None
+            )
+
         # Model selection config
         if model_setup_cmd.strip():
             clean_cmd = model_setup_cmd.rstrip().rstrip("&").rstrip()
-            await openshell_client.exec_command(ref.name, ["sh", "-c", clean_cmd], client=None)
-
-        # Share/state dir setup (auth.json written using $GOOGLE_API_KEY from provider)
-        if share_cmd.strip():
-            clean_share = share_cmd.rstrip().rstrip(";").rstrip()
-            await openshell_client.exec_command(ref.name, ["sh", "-c", clean_share], client=None)
+            await openshell_client.exec_command(
+                ref.name, ["sh", "-c", f"export HOME=/sandbox; {clean_cmd}"], client=None
+            )
 
         # AGENTS.md for tui/server modes
         if agents_md:
@@ -1031,10 +1037,11 @@ async def _setup_openshell_sandbox(
         if mode == "prompt":
             import asyncio as _asyncio
             await _update_db(status_detail="Configuring network policy…")
-            # Use a real prompt so opencode makes an API call and generates policy denials.
-            # An empty prompt '' causes opencode to exit immediately without calling the API.
+            # Use a real prompt so the agent makes an API call and generates policy denials.
+            # An empty prompt causes opencode to exit immediately without calling the API.
             _probe_prompt = shlex.quote("Reply with one word: ready")
-            _probe_cmd = f"HOME=/sandbox opencode run --model {shlex.quote(model)} {_probe_prompt} 2>/dev/null; true"
+            _probe_bin = {"opencode": "opencode run", "crush": "crush run"}.get(tool_name, "opencode run")
+            _probe_cmd = f"HOME=/sandbox {_probe_bin} --model {shlex.quote(model)} {_probe_prompt} 2>/dev/null; true"
             try:
                 await openshell_client.exec_command(
                     ref.name, ["sh", "-c", _probe_cmd], client=None,
@@ -1072,6 +1079,7 @@ async def _setup_openshell_sandbox(
                 sandbox_name=ref.name,
                 cmd=["sh", "-c", agent_cmd],
                 mode=mode,
+                agent_tool=tool_name,
             ),
             name=f"openshell-agent-{session_id}",
         )
@@ -1088,6 +1096,7 @@ async def _run_openshell_agent(
     sandbox_name: str,
     cmd: list[str],
     mode: str,
+    agent_tool: str,
 ) -> None:
     """Background task: starts the agent in the sandbox and tracks completion."""
     from swarmer import openshell_client
@@ -1116,7 +1125,10 @@ async def _run_openshell_agent(
 
             # OpenCode stores the response in its SQLite DB, not stdout.
             # Extract the last assistant message after the run completes.
-            output = await openshell_client.read_opencode_response(sandbox_name) or stdout or stderr
+            if agent_tool == "opencode":
+                output = await openshell_client.read_opencode_response(sandbox_name) or stdout or stderr
+            else:
+                output = stdout or stderr
 
             new_sandbox_name: str | None = sandbox_name
             if phase == "succeeded":
