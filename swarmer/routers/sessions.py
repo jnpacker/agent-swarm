@@ -757,6 +757,13 @@ async def _do_launch_openshell(
 
     tool = get_tool(session.agent_tool)
 
+    # Release the DB connection before long-running gRPC operations. The route
+    # handler's session holds an autobegin transaction from earlier SELECTs in
+    # _do_launch(); committing here ends that transaction and returns the
+    # connection to the pool so the scheduler can write without being blocked.
+    # session attributes remain valid because expire_on_commit=False.
+    await db.commit()
+
     # 1. Collect credentials into env-var dict
     env_vars = await openshell_client.create_provider(
         session=session,
