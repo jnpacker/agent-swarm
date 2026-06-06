@@ -717,7 +717,7 @@ class TestRunOpenshellAgent:
              patch("swarmer.openshell_client.exec_command", new=AsyncMock(return_value=exec_result)), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
             from swarmer.routers.sessions import _run_openshell_agent
-            await _run_openshell_agent(s["id"], "sandbox-prompt", ["sh", "-c", "opencode run"], "prompt")
+            await _run_openshell_agent(s["id"], "sandbox-prompt", ["sh", "-c", "opencode run"], "prompt", "opencode")
 
         async with _TestSession() as db:
             from sqlalchemy import select
@@ -744,7 +744,7 @@ class TestRunOpenshellAgent:
              patch("swarmer.openshell_client.exec_command", new=AsyncMock(return_value=exec_result)), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
             from swarmer.routers.sessions import _run_openshell_agent
-            await _run_openshell_agent(s["id"], "sandbox-fail", ["sh", "-c", "opencode run"], "prompt")
+            await _run_openshell_agent(s["id"], "sandbox-fail", ["sh", "-c", "opencode run"], "prompt", "opencode")
 
         async with _TestSession() as db:
             from sqlalchemy import select
@@ -770,7 +770,7 @@ class TestRunOpenshellAgent:
              patch("swarmer.openshell_client.exec_command", new=AsyncMock(return_value=exec_result)), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()) as mock_del:
             from swarmer.routers.sessions import _run_openshell_agent
-            await _run_openshell_agent(s["id"], "sandbox-autoclean", ["sh", "-c", "opencode run"], "prompt")
+            await _run_openshell_agent(s["id"], "sandbox-autoclean", ["sh", "-c", "opencode run"], "prompt", "opencode")
 
         mock_del.assert_called_once_with("sandbox-autoclean")
 
@@ -806,7 +806,7 @@ class TestRunOpenshellAgent:
              patch("swarmer.openshell_client.exec_command", new=_fake_exec), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
             from swarmer.routers.sessions import _run_openshell_agent
-            await _run_openshell_agent(s["id"], "sandbox-running", ["sh", "-c", "opencode run"], "prompt")
+            await _run_openshell_agent(s["id"], "sandbox-running", ["sh", "-c", "opencode run"], "prompt", "opencode")
 
         assert "running" in phases_seen
 
@@ -827,7 +827,7 @@ class TestRunOpenshellAgent:
              patch("swarmer.openshell_client.exec_command", new=AsyncMock()) as mock_exec:
             from swarmer.routers.sessions import _run_openshell_agent
             await _run_openshell_agent(
-                s["id"], "sandbox-server", ["sh", "-c", "opencode serve"], "server"
+                s["id"], "sandbox-server", ["sh", "-c", "opencode serve"], "server", "opencode"
             )
 
         mock_start.assert_called_once_with("sandbox-server", ["sh", "-c", "opencode serve"])
@@ -849,7 +849,7 @@ class TestRunOpenshellAgent:
              patch("swarmer.openshell_client.start_agent", new=AsyncMock()) as mock_start:
             from swarmer.routers.sessions import _run_openshell_agent
             await _run_openshell_agent(
-                s["id"], "sandbox-tui", ["sh", "-c", "sleep infinity"], "tui"
+                s["id"], "sandbox-tui", ["sh", "-c", "sleep infinity"], "tui", "opencode"
             )
 
         mock_start.assert_called_once()
@@ -872,7 +872,7 @@ class TestRunOpenshellAgent:
                 new=AsyncMock(side_effect=ConnectionError("gateway down")),
              ):
             from swarmer.routers.sessions import _run_openshell_agent
-            await _run_openshell_agent(s["id"], "sandbox-exc", ["sh", "-c", "opencode run"], "prompt")
+            await _run_openshell_agent(s["id"], "sandbox-exc", ["sh", "-c", "opencode run"], "prompt", "opencode")
 
         async with _TestSession() as db:
             from sqlalchemy import select
@@ -1137,3 +1137,344 @@ class TestSandboxGC:
                     await _collect_orphaned_sandboxes(db)
 
         mock_delete.assert_not_called()
+
+
+# ===========================================================================
+# 8. Crush-specific setup steps in _setup_openshell_sandbox and _run_openshell_agent
+# ===========================================================================
+
+
+def _make_crush_setup_patches(sandbox_name: str = "sandbox-crush-abc"):
+    """Return a dict of patches for _setup_openshell_sandbox with Crush sessions."""
+    ref = _fake_sandbox_ref(sandbox_name)
+    return {
+        "create_sandbox": patch(
+            "swarmer.openshell_client.create_sandbox",
+            new=AsyncMock(return_value=ref),
+        ),
+        "write_agent_config": patch(
+            "swarmer.openshell_client.write_agent_config",
+            new=AsyncMock(),
+        ),
+        "write_agents_md": patch(
+            "swarmer.openshell_client.write_agents_md",
+            new=AsyncMock(),
+        ),
+        "clone_repos": patch(
+            "swarmer.openshell_client.clone_repos",
+            new=AsyncMock(),
+        ),
+        "approve_chunks": patch(
+            "swarmer.openshell_client.approve_draft_policy_chunks",
+            new=AsyncMock(return_value=[]),
+        ),
+        "run_agent": patch(
+            "swarmer.routers.sessions._run_openshell_agent",
+            new=AsyncMock(),
+        ),
+        "sleep": patch("asyncio.sleep", new=AsyncMock()),
+    }
+
+
+async def _call_crush_setup(
+    session_id: int,
+    model: str = "anthropic/claude-sonnet-4-6",
+    mode: str = "prompt",
+    resolved_prompt: str = "Write hello world",
+):
+    """Call _setup_openshell_sandbox directly for Crush and return captured exec_command calls."""
+    from swarmer.agent_tools.crush import CrushStrategy
+    from swarmer.routers.sessions import _setup_openshell_sandbox
+
+    tool = CrushStrategy()
+    model_setup_cmd = tool.build_model_setup_cmd(model).replace("/workspace/", "/sandbox/")
+    share_cmd = tool.build_share_setup_cmd().replace("/workspace/", "/sandbox/")
+
+    class _FakeSession:
+        instruction_prompt = ""
+        this_mode = mode
+
+    _fake_s = _FakeSession()
+    _fake_s.mode = mode
+    main_cmd = tool.build_main_cmd(_fake_s, model, resolved_prompt=resolved_prompt)
+
+    exec_calls: list[list[str]] = []
+
+    async def _capture_exec(sandbox_name, cmd, client=None, stdin=None, timeout_seconds=None):
+        exec_calls.append(list(cmd))
+        return MagicMock(exit_code=0, stdout="", stderr="")
+
+    patches = _make_crush_setup_patches()
+    with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
+         patches["create_sandbox"], \
+         patches["write_agent_config"], \
+         patches["write_agents_md"], \
+         patches["clone_repos"], \
+         patches["approve_chunks"], \
+         patches["run_agent"], \
+         patches["sleep"], \
+         patch("swarmer.openshell_client.exec_command", new=_capture_exec):
+        await _setup_openshell_sandbox(
+            session_id=session_id,
+            provider_names=[],
+            env_vars={},
+            policy=None,
+            image="quay.io/crush:latest",
+            tool_name="crush",
+            model=model,
+            model_setup_cmd=model_setup_cmd,
+            share_cmd=share_cmd,
+            mcp_patch={},
+            repos_data=[],
+            git_username="",
+            working_branch="",
+            agents_md="",
+            mode=mode,
+            main_cmd=main_cmd,
+            resolved_prompt=resolved_prompt,
+        )
+
+    return exec_calls
+
+
+class TestCrushOpenshellSetup:
+    """Tests for Crush-specific steps in _setup_openshell_sandbox and _run_openshell_agent."""
+
+    @pytest.mark.asyncio
+    async def test_probe_uses_crush_run_binary(self, client):
+        """Pre-flight probe must use 'crush run' for Crush sessions, not 'opencode run'."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="prompt", agent_tool="crush")
+
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET phase='pending' WHERE id=:id"), {"id": s["id"]}
+            )
+            await db.commit()
+
+        exec_calls = await _call_crush_setup(s["id"])
+
+        all_cmds = " ".join(" ".join(c) for c in exec_calls)
+        assert "crush run" in all_cmds, f"Expected 'crush run' in probe, got calls: {exec_calls}"
+        assert "opencode run" not in all_cmds, "Crush session must not call 'opencode run'"
+
+    @pytest.mark.asyncio
+    async def test_share_cmd_runs_before_model_setup_cmd(self, client):
+        """share_cmd creates the symlink before model_setup_cmd writes the model config through it."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="prompt", agent_tool="crush")
+
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET phase='pending' WHERE id=:id"), {"id": s["id"]}
+            )
+            await db.commit()
+
+        exec_calls = await _call_crush_setup(s["id"])
+
+        # share_cmd contains the symlink creation; model_setup_cmd contains printf
+        share_idx = next(
+            (i for i, c in enumerate(exec_calls) if "ln -sf" in " ".join(c)),
+            None,
+        )
+        model_idx = next(
+            (i for i, c in enumerate(exec_calls) if "printf" in " ".join(c) and ".local/share/crush" in " ".join(c)),
+            None,
+        )
+        assert share_idx is not None, "share_cmd (ln -sf) not found in exec calls"
+        assert model_idx is not None, "model_setup_cmd (printf) not found in exec calls"
+        assert share_idx < model_idx, (
+            f"share_cmd must run before model_setup_cmd "
+            f"(share at index {share_idx}, model at index {model_idx})"
+        )
+
+    @pytest.mark.asyncio
+    async def test_model_and_share_cmds_export_sandbox_home(self, client):
+        """model_setup_cmd and share_cmd must run with 'export HOME=/sandbox' so $HOME resolves correctly."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="prompt", agent_tool="crush")
+
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET phase='pending' WHERE id=:id"), {"id": s["id"]}
+            )
+            await db.commit()
+
+        exec_calls = await _call_crush_setup(s["id"])
+
+        # Both the symlink creation and model config write must use HOME=/sandbox
+        setup_calls = [
+            c for c in exec_calls
+            if ("ln -sf" in " ".join(c) or "printf" in " ".join(c))
+            and "export HOME=/sandbox" in " ".join(c)
+        ]
+        assert len(setup_calls) >= 2, (
+            "Expected at least 2 exec calls with 'export HOME=/sandbox' (share + model), "
+            f"got: {[' '.join(c) for c in exec_calls]}"
+        )
+
+    def test_crush_config_includes_providers_with_env_var_refs(self):
+        """build_config_data must include a providers array so Crush doesn't say 'No providers configured'."""
+        import json as _json
+        from swarmer.agent_tools.crush import CrushStrategy
+
+        config_data = CrushStrategy().build_config_data()
+        config = _json.loads(config_data["crush.json"])
+
+        assert "providers" in config, "crush.json must have a 'providers' key"
+        providers = config["providers"]
+        assert isinstance(providers, dict), (
+            "providers must be a map[string]ProviderConfig (dict), not an array"
+        )
+        assert len(providers) > 0, "providers map must not be empty"
+
+        # Anthropic provider must be keyed by "anthropic" with an env-var reference
+        assert "anthropic" in providers, "Anthropic provider must be present under key 'anthropic'"
+        assert "$ANTHROPIC_API_KEY" in providers["anthropic"].get("api_key", ""), (
+            "Anthropic provider api_key must reference $ANTHROPIC_API_KEY"
+        )
+
+        # Gemini provider must be keyed by "gemini"
+        assert "gemini" in providers, "Gemini provider must be present under key 'gemini'"
+
+    @pytest.mark.asyncio
+    async def test_write_agent_config_crush_uses_sandbox_path(self):
+        """write_agent_config for crush writes to /sandbox/.config/crush/, not /home/sandbox/."""
+        from swarmer.openshell_client import write_agent_config
+
+        captured: list[list] = []
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = MagicMock(id="test-sid")
+        mock_client.exec.side_effect = lambda sid, cmd, stdin=None, **kw: captured.append(cmd) or MagicMock()
+
+        with patch("swarmer.openshell_client._get_client", return_value=mock_client):
+            await write_agent_config("sandbox-test", "crush", '{"options": {}}')
+
+        full_cmd = " ".join(captured[0]) if captured else ""
+        assert "/sandbox/.config/crush" in full_cmd, (
+            f"Expected /sandbox/.config/crush in cmd, got: {full_cmd}"
+        )
+        assert "/home/sandbox" not in full_cmd, (
+            f"Must not write to /home/sandbox (agent runs with HOME=/sandbox): {full_cmd}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_write_agent_config_opencode_path_unchanged(self):
+        """write_agent_config for opencode still writes to /sandbox/opencode.json (no regression)."""
+        from swarmer.openshell_client import write_agent_config
+
+        captured: list[list] = []
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = MagicMock(id="test-sid")
+        mock_client.exec.side_effect = lambda sid, cmd, stdin=None, **kw: captured.append(cmd) or MagicMock()
+
+        with patch("swarmer.openshell_client._get_client", return_value=mock_client):
+            await write_agent_config("sandbox-test", "opencode", '{"providers": []}')
+
+        full_cmd = " ".join(captured[0]) if captured else ""
+        assert "/sandbox/opencode.json" in full_cmd, (
+            f"Expected /sandbox/opencode.json, got: {full_cmd}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_agent_cmd_uses_crush_run(self, client):
+        """_run_openshell_agent must be invoked with 'crush run' in the command for Crush sessions."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="prompt", agent_tool="crush")
+
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET phase='pending' WHERE id=:id"), {"id": s["id"]}
+            )
+            await db.commit()
+
+        from swarmer.agent_tools.crush import CrushStrategy
+        from swarmer.routers.sessions import _setup_openshell_sandbox
+
+        tool = CrushStrategy()
+        model = "anthropic/claude-sonnet-4-6"
+        captured_cmd: list[str] = []
+
+        # Use a plain function (not async) so the cmd is captured synchronously
+        # when asyncio.create_task calls it — before the task body ever runs.
+        def _capture_run_agent(session_id, sandbox_name, cmd, mode, agent_tool):
+            captured_cmd.extend(cmd)
+            async def _noop():
+                pass
+            return _noop()
+
+        patches = _make_crush_setup_patches()
+        patches["run_agent"] = patch(
+            "swarmer.routers.sessions._run_openshell_agent",
+            new=_capture_run_agent,
+        )
+
+        with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
+             patches["create_sandbox"], \
+             patches["write_agent_config"], \
+             patches["write_agents_md"], \
+             patches["clone_repos"], \
+             patches["approve_chunks"], \
+             patches["run_agent"], \
+             patches["sleep"], \
+             patch("swarmer.openshell_client.exec_command", new=AsyncMock(
+                 return_value=MagicMock(exit_code=0, stdout="", stderr="")
+             )):
+            await _setup_openshell_sandbox(
+                session_id=s["id"],
+                provider_names=[],
+                env_vars={},
+                policy=None,
+                image="quay.io/crush:latest",
+                tool_name="crush",
+                model=model,
+                model_setup_cmd=tool.build_model_setup_cmd(model).replace("/workspace/", "/sandbox/"),
+                share_cmd=tool.build_share_setup_cmd().replace("/workspace/", "/sandbox/"),
+                mcp_patch={},
+                repos_data=[],
+                git_username="",
+                working_branch="",
+                agents_md="",
+                mode="prompt",
+                main_cmd=f"crush run --model {model}",
+                resolved_prompt="Write hello world",
+            )
+
+        full_cmd = " ".join(captured_cmd)
+        assert "crush run" in full_cmd, f"Expected 'crush run' in agent cmd, got: {full_cmd}"
+        assert "opencode" not in full_cmd, f"'opencode' must not appear in crush agent cmd: {full_cmd}"
+
+    @pytest.mark.asyncio
+    async def test_crush_output_uses_stdout_not_opencode_db(self, client):
+        """_run_openshell_agent for crush uses stdout as output, not the opencode SQLite DB."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="prompt", agent_tool="crush")
+
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name='sb-crush-out', phase='pending' WHERE id=:id"),
+                {"id": s["id"]},
+            )
+            await db.commit()
+
+        exec_result = MagicMock(exit_code=0, stdout="crush finished successfully", stderr="")
+        with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
+             patch("swarmer.openshell_client.exec_command", new=AsyncMock(return_value=exec_result)), \
+             patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()), \
+             patch("swarmer.openshell_client.read_opencode_response", new=AsyncMock(return_value="WRONG")) as mock_db_read:
+            from swarmer.routers.sessions import _run_openshell_agent
+            await _run_openshell_agent(
+                s["id"], "sb-crush-out", ["sh", "-c", "crush run"], "prompt", "crush"
+            )
+
+        mock_db_read.assert_not_called()
+
+        async with _TestSession() as db:
+            from sqlalchemy import select
+            from swarmer.models.session import Session
+            sess = (await db.execute(select(Session).where(Session.id == s["id"]))).scalar_one()
+
+        assert sess.phase == "succeeded"
+        assert "crush finished successfully" in (sess.last_output or "")
