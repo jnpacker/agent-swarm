@@ -31,7 +31,12 @@ def init_db(database_url: str) -> None:
         @event.listens_for(_engine.sync_engine, "connect")
         def _set_wal(dbapi_conn, _):
             cursor = dbapi_conn.cursor()
+            # WAL lets readers and the scheduler writer proceed concurrently.
             cursor.execute("PRAGMA journal_mode=WAL")
+            # Retry for up to 5 s before raising "database is locked".
+            cursor.execute("PRAGMA busy_timeout=5000")
+            # Clear any stale WAL state left by a previous unclean shutdown.
+            cursor.execute("PRAGMA wal_checkpoint(PASSIVE)")
             cursor.close()
 
     _AsyncSessionLocal = async_sessionmaker(_engine, expire_on_commit=False)

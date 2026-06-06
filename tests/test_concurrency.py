@@ -745,22 +745,22 @@ class TestSQLiteWALMode:
     """Verify that init_db() enables WAL journal mode on SQLite engines."""
 
     @pytest.mark.asyncio
-    async def test_wal_mode_enabled_by_init_db(self, tmp_path):
+    async def test_wal_mode_and_busy_timeout_enabled_by_init_db(self, tmp_path):
         import swarmer.database as db_module
 
         db_path = tmp_path / "test_wal.db"
         db_url = f"sqlite+aiosqlite:///{db_path}"
 
-        # Save existing globals so we can restore them after the test.
         orig_engine = db_module._engine
         orig_session = db_module._AsyncSessionLocal
 
         try:
             db_module.init_db(db_url)
             async with db_module._engine.connect() as conn:
-                result = await conn.execute(text("PRAGMA journal_mode"))
-                mode = result.scalar()
+                mode = (await conn.execute(text("PRAGMA journal_mode"))).scalar()
+                timeout = (await conn.execute(text("PRAGMA busy_timeout"))).scalar()
             assert mode == "wal", f"Expected WAL journal mode, got: {mode!r}"
+            assert int(timeout) >= 5000, f"Expected busy_timeout >= 5000ms, got: {timeout}"
         finally:
             await db_module._engine.dispose()
             db_module._engine = orig_engine
