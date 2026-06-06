@@ -731,7 +731,22 @@ async def expose_service(
             domain=True,
         )
         resp = client._stub.ExposeService(req, timeout=client._timeout)
-        return resp.url
+        url = resp.url
+        log.info("expose_service %s/%s → %s", sandbox_name, service_name, url)
+        # The gateway returns the internal cluster port (e.g. 8080) but in local
+        # dev with kubectl port-forward the gateway is accessible on a different
+        # port (e.g. 17670). Rewrite to the configured gateway port so Swarmer
+        # can reach it from the host.
+        from swarmer.config import settings
+        gw = settings.openshell_gateway_url or ""
+        gw_port = gw.rsplit(":", 1)[-1] if ":" in gw else ""
+        if gw_port and gw_port.isdigit():
+            from urllib.parse import urlparse, urlunparse
+            p = urlparse(url)
+            if p.port and str(p.port) != gw_port:
+                url = urlunparse(p._replace(netloc=f"{p.hostname}:{gw_port}"))
+                log.info("expose_service: rewrote port %s → %s", p.port, gw_port)
+        return url
 
     return await asyncio.to_thread(_do)
 
