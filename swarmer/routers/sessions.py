@@ -929,7 +929,6 @@ async def _setup_openshell_sandbox(
     from swarmer import openshell_client
     from swarmer.database import get_db as _get_db
     from swarmer.models.session import Session as _Session
-    import json as _json
 
     async def _update_db(**fields) -> None:
         async for _db in _get_db():
