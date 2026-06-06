@@ -77,7 +77,9 @@ def _session_ok(ws_obj, session, ws_id: int) -> str | None:
     """Return an error string if the session can't be proxied, else None."""
     if ws_obj is None or session is None or session.workspace_id != ws_id:
         return "Not found"
-    if session.mode != "server" or not session.is_active or not session.pod_name:
+    if session.mode != "server" or not session.is_active:
+        return "Session is not running in server mode"
+    if not session.pod_name and not session.service_url:
         return "Session is not running in server mode"
     return None
 
@@ -142,13 +144,16 @@ async def _chat_http_proxy(
     if err:
         return Response(err, status_code=503 if "running" in err else 404, media_type="text/plain")
 
-    from swarmer.k8s import effective_namespace
-    namespace = effective_namespace(ws_obj.k8s_namespace)
-    try:
-        upstream_base = _get_upstream_base(session.id, namespace)
-    except Exception as exc:
-        log.warning("Could not connect to session %d: %s", sid, exc)
-        return Response(f"Could not connect to session: {exc}", status_code=503, media_type="text/plain")
+    if session.service_url:
+        upstream_base = session.service_url.rstrip("/")
+    else:
+        from swarmer.k8s import effective_namespace
+        namespace = effective_namespace(ws_obj.k8s_namespace)
+        try:
+            upstream_base = _get_upstream_base(session.id, namespace)
+        except Exception as exc:
+            log.warning("Could not connect to session %d: %s", sid, exc)
+            return Response(f"Could not connect to session: {exc}", status_code=503, media_type="text/plain")
 
     query = str(request.url.query)
     upstream_url = f"{upstream_base}/{path}"
@@ -156,7 +161,7 @@ async def _chat_http_proxy(
         upstream_url += f"?{query}"
 
     fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
-    fwd_headers["x-opencode-directory"] = "/workspace"
+    fwd_headers["x-opencode-directory"] = "/sandbox/" if session.sandbox_name else "/workspace"
 
     # Check if the request wants SSE (event-stream)
     accept = request.headers.get("accept", "")
@@ -270,19 +275,22 @@ async def chat_ws_proxy(
         or session.workspace_id != ws_id
         or session.mode != "server"
         or not session.is_active
-        or not session.pod_name
+        or (not session.pod_name and not session.service_url)
     ):
         await websocket.close(code=4004, reason="Session unavailable")
         return
 
-    from swarmer.k8s import effective_namespace
-    namespace = effective_namespace(ws_obj.k8s_namespace)
-    try:
-        upstream_base = _get_upstream_base(session.id, namespace)
-    except Exception as exc:
-        log.warning("Could not connect to session %d for WS: %s", sid, exc)
-        await websocket.close(code=4004, reason="Could not connect to session")
-        return
+    if session.service_url:
+        upstream_base = session.service_url.rstrip("/")
+    else:
+        from swarmer.k8s import effective_namespace
+        namespace = effective_namespace(ws_obj.k8s_namespace)
+        try:
+            upstream_base = _get_upstream_base(session.id, namespace)
+        except Exception as exc:
+            log.warning("Could not connect to session %d for WS: %s", sid, exc)
+            await websocket.close(code=4004, reason="Could not connect to session")
+            return
 
     query = websocket.url.query
     upstream_url = upstream_base.replace("http://", "ws://") + f"/{path}"
