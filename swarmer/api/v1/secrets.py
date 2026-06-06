@@ -105,6 +105,8 @@ async def save_credentials(
         secret.anthropic_api_key = body.anthropic_api_key.strip()
     if body.openai_api_key.strip():
         secret.openai_api_key = body.openai_api_key.strip()
+    if body.application_default_credentials.strip():
+        secret.application_default_credentials = body.application_default_credentials.strip()
 
     await db.commit()
     await db.refresh(secret)
