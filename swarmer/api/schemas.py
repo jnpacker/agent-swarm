@@ -153,6 +153,7 @@ class CredentialsSave(BaseModel):
     google_api_key: str = ""
     anthropic_api_key: str = ""
     openai_api_key: str = ""
+    application_default_credentials: str = ""
     shared: bool = False
 
 

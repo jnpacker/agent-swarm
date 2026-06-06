@@ -497,7 +497,6 @@ async def read_opencode_response(sandbox_name: str, client=None) -> str:
     OpenCode stores conversation history in /sandbox/.opencode/opencode.db rather
     than writing to stdout. This extracts the most recent assistant text parts.
     """
-    import base64
 
     if client is None:
         client = _get_client()
