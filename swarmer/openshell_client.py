@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import pathlib
+import queue
 import shlex
 from typing import Any
 
@@ -586,13 +587,16 @@ async def write_file(sandbox_name: str, path: str, content: str, client=None) ->
 
 
 async def start_agent(sandbox_name: str, cmd: list[str], client=None) -> None:
-    """Start the agent process inside the sandbox via exec."""
+    """Start the agent as a detached background process so exec() returns immediately."""
     if client is None:
         client = _get_client()
     sid = await _sandbox_id(sandbox_name, client)
 
+    shell_cmd = " ".join(shlex.quote(c) for c in cmd)
+    bg_cmd = ["sh", "-c", f"nohup {shell_cmd} >/sandbox/.agent.log 2>&1 &"]
+
     def _do_start(s=sid):
-        client.exec(s, cmd)
+        client.exec(s, bg_cmd)
 
     await asyncio.to_thread(_do_start)
 
@@ -659,3 +663,95 @@ async def exec_command(
         return client.exec(s, cmd, stdin=stdin, timeout_seconds=timeout_seconds)
 
     return await asyncio.to_thread(_do_exec)
+
+
+def exec_interactive(
+    sandbox_name: str,
+    sandbox_id: str,
+    command: list[str],
+    cols: int,
+    rows: int,
+    client=None,
+):
+    """Open an interactive PTY exec stream for a sandbox (for TUI WebSocket bridge).
+
+    Returns (response_iterator, input_queue) where:
+    - response_iterator: gRPC stream of ExecSandboxEvent messages
+    - input_queue: thread-safe queue.Queue — put ExecSandboxInput messages, or None to close
+
+    The caller runs a background thread that drains response_iterator and a write loop
+    that puts input messages. This function is synchronous; call from a background thread.
+    """
+    from openshell._proto import openshell_pb2
+
+    if client is None:
+        client = _get_client()
+
+    input_q: queue.Queue = queue.Queue()
+
+    def _request_generator():
+        start_msg = openshell_pb2.ExecSandboxInput(
+            start=openshell_pb2.ExecSandboxRequest(
+                sandbox_id=sandbox_id,
+                command=command,
+                workdir="/sandbox",
+                tty=True,
+                cols=cols,
+                rows=rows,
+            )
+        )
+        yield start_msg
+        while True:
+            item = input_q.get()
+            if item is None:
+                return
+            yield item
+
+    response_stream = client._stub.ExecSandboxInteractive(_request_generator())
+    return response_stream, input_q
+
+
+async def expose_service(
+    sandbox_name: str,
+    service_name: str,
+    target_port: int,
+    client=None,
+) -> str:
+    """Expose a sandbox's port via the OpenShell gateway and return the routable URL."""
+    from openshell._proto import openshell_pb2
+
+    if client is None:
+        client = _get_client()
+
+    def _do():
+        req = openshell_pb2.ExposeServiceRequest(
+            sandbox=sandbox_name,
+            service=service_name,
+            target_port=target_port,
+            domain=True,
+        )
+        resp = client._stub.ExposeService(req, timeout=client._timeout)
+        return resp.url
+
+    return await asyncio.to_thread(_do)
+
+
+async def delete_service(
+    sandbox_name: str,
+    service_name: str,
+    client=None,
+) -> None:
+    """Delete an exposed sandbox service endpoint."""
+    from openshell._proto import openshell_pb2
+
+    if client is None:
+        client = _get_client()
+
+    def _do():
+        req = openshell_pb2.DeleteServiceRequest(
+            sandbox=sandbox_name,
+            service=service_name,
+        )
+        client._stub.DeleteService(req, timeout=client._timeout)
+
+    await asyncio.to_thread(_do)

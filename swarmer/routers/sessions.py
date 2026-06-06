@@ -823,7 +823,10 @@ async def _do_launch_openshell(
         provider_names.append(pname)
     if oc_secret and oc_secret.google_api_key:
         pname = f"swarmer-ws-{ws_id}-google-ai-studio"
-        await openshell_client.ensure_provider(pname, "google-ai-studio", {}, credentials={"GOOGLE_API_KEY": oc_secret.google_api_key})
+        await openshell_client.ensure_provider(pname, "google-ai-studio", {}, credentials={
+                "GOOGLE_API_KEY": oc_secret.google_api_key,
+                "GOOGLE_GENERATIVE_AI_API_KEY": oc_secret.google_api_key,
+            })
         provider_names.append(pname)
     if oc_secret and oc_secret.has_adc and oc_secret.has_vertex:
         pname = f"swarmer-ws-{ws_id}-google-vertex-ai"
@@ -1078,23 +1081,22 @@ async def _setup_openshell_sandbox(
         # the denied AI API connections and generates draft policy chunks.
         # Then approve expected chunks so the actual agent run can reach the API.
         # Without this probe, approval runs before any chunks exist.
-        if mode == "prompt":
-            import asyncio as _asyncio
-            await _update_db(status_detail="Configuring network policy…")
-            # Use a real prompt so the agent makes an API call and generates policy denials.
-            # An empty prompt causes opencode to exit immediately without calling the API.
-            _probe_prompt = shlex.quote("Reply with one word: ready")
-            _probe_bin = {"opencode": "opencode run", "crush": "crush run"}.get(tool_name, "opencode run")
-            _inf_prefix = (" ".join(f"{k}={shlex.quote(v)}" for k, v in (inference_env or {}).items()) + " ") if inference_env else ""
-            _probe_cmd = f"{_inf_prefix}HOME=/sandbox {_probe_bin} --model {shlex.quote(model)} {_probe_prompt} 2>/dev/null; true"
-            try:
-                await openshell_client.exec_command(
-                    ref.name, ["sh", "-c", _probe_cmd], client=None,
-                    timeout_seconds=30,
-                )
-            except Exception:
-                pass  # probe failure is non-fatal; approval may still find existing chunks
-            await _asyncio.sleep(12)  # supervisor needs ~10s to submit denial analysis
+        import asyncio as _asyncio
+        await _update_db(status_detail="Configuring network policy…")
+        # Use a real prompt so the agent makes an API call and generates policy denials.
+        # An empty prompt causes opencode to exit immediately without calling the API.
+        _probe_prompt = shlex.quote("Reply with one word: ready")
+        _probe_bin = {"opencode": "opencode run", "crush": "crush run"}.get(tool_name, "opencode run")
+        _inf_prefix = (" ".join(f"{k}={shlex.quote(v)}" for k, v in (inference_env or {}).items()) + " ") if inference_env else ""
+        _probe_cmd = f"{_inf_prefix}HOME=/sandbox {_probe_bin} --model {shlex.quote(model)} {_probe_prompt} 2>/dev/null; true"
+        try:
+            await openshell_client.exec_command(
+                ref.name, ["sh", "-c", _probe_cmd], client=None,
+                timeout_seconds=30,
+            )
+        except Exception:
+            pass  # probe failure is non-fatal; approval may still find existing chunks
+        await _asyncio.sleep(12)  # supervisor needs ~10s to submit denial analysis
 
         expected = _build_expected_hosts(model, repos_data, tool_name, mode)
         await openshell_client.approve_draft_policy_chunks(ref.name, expected_hosts=expected)
@@ -1196,8 +1198,30 @@ async def _run_openshell_agent(
                 sandbox_name=new_sandbox_name,
             )
         else:
-            # Server/TUI: fire agent without blocking; sandbox stays alive
-            await openshell_client.start_agent(sandbox_name, cmd)
+            if mode == "server":
+                # Launch server agent as a background nohup process so exec() returns
+                # immediately; the sandbox stays alive serving HTTP.
+                await openshell_client.start_agent(sandbox_name, cmd)
+
+            # TUI mode: the sandbox is ready; the TUI WebSocket handler starts the
+            # agent interactively via exec_interactive when the user connects.
+
+            # For server mode, expose the agent HTTP port so the chat proxy can reach it
+            if mode == "server":
+                from swarmer.agent_tools.registry import get as _get_tool
+                _tool = _get_tool(agent_tool)
+                port = _tool.get_server_port() or 4096
+                try:
+                    await asyncio.sleep(2)  # let the server process start listening
+                    service_url = await openshell_client.expose_service(
+                        sandbox_name, "agent", port
+                    )
+                    await _update_db(service_url=service_url)
+                except Exception:
+                    log.warning(
+                        "ExposeService failed for session %d sandbox %s",
+                        session_id, sandbox_name, exc_info=True,
+                    )
 
     except asyncio.CancelledError:
         raise
@@ -1321,11 +1345,17 @@ async def session_stop(
 
     if session.sandbox_name:
         from swarmer import openshell_client
+        if session.service_url:
+            try:
+                await openshell_client.delete_service(session.sandbox_name, "agent")
+            except Exception as exc:
+                log.warning("DeleteService failed for session %d: %s", sid, exc)
         try:
             await openshell_client.delete_sandbox(session.sandbox_name)
         except Exception as exc:
             flash(request, f"Sandbox deletion failed: {exc}", "warning")
         session.sandbox_name = None
+        session.service_url = None
 
     session.run_completed_at = datetime.utcnow()
     session.phase = "stopped"
@@ -1537,6 +1567,11 @@ async def session_delete(
     if session.sandbox_name:
         # OpenShell session — delete sandbox; skip K8s PVC/Secret cleanup
         from swarmer import openshell_client
+        if session.service_url:
+            try:
+                await openshell_client.delete_service(session.sandbox_name, "agent")
+            except Exception as exc:
+                log.warning("DeleteService failed for session %d: %s", sid, exc)
         try:
             await openshell_client.delete_sandbox(session.sandbox_name)
         except Exception as exc:
