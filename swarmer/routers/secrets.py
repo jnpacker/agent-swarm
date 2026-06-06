@@ -102,15 +102,14 @@ async def opencode_secret_save(
     shared: str = Form(""),
     adc_file: UploadFile | None = File(None),
 ):
-    # ADC file upload is not supported via the REST API -- validate locally
-    # and include in a future API enhancement. For now, skip ADC upload
-    # when going through the API client.
+    adc_content = ""
     if adc_file and adc_file.filename:
-        import json
+        import json as _json
         content = await adc_file.read()
         try:
-            json.loads(content)
-        except json.JSONDecodeError:
+            _json.loads(content)
+            adc_content = content.decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
             async with get_api_client(request) as api:
                 try:
                     ws = await api.get_workspace(ws_id)
@@ -129,8 +128,6 @@ async def opencode_secret_save(
                 },
                 status_code=422,
             )
-        # ADC file upload is not yet supported via API; fall through to
-        # save other fields. A future API enhancement will add ADC upload.
 
     async with get_api_client(request) as api:
         try:
@@ -146,6 +143,7 @@ async def opencode_secret_save(
                 google_api_key=google_api_key,
                 anthropic_api_key=anthropic_api_key,
                 openai_api_key=openai_api_key,
+                application_default_credentials=adc_content,
                 shared=bool(shared),
             )
         except APIError as exc:
