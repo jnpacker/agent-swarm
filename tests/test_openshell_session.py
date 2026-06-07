@@ -501,8 +501,14 @@ class TestDoLaunchOpenshell:
         assert mock_attach.call_count == 0
 
     @pytest.mark.asyncio
-    async def test_github_provider_registered_for_public_repo_without_pat(self, client):
-        """ensure_provider must be called for github.com repos even when no PAT is set."""
+    async def test_no_github_provider_for_public_repo_without_pat(self, client):
+        """No GitHub provider should be registered when there is no PAT.
+
+        Network access to github.com is handled by the draft-policy probe cycle
+        inside _setup_openshell_sandbox (probe → approve before clone). Registering
+        a provider with a fake credential causes the gateway to inject GH_TOKEN,
+        which git sends as a Bearer token — GitHub responds 403 on that invalid token.
+        """
         ws = await _create_workspace(client)
         s = await _create_session(client, ws["id"])
         await client.post(
@@ -522,20 +528,56 @@ class TestDoLaunchOpenshell:
                 f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/launch"
             )
 
-        # A github provider must be registered even without a PAT so the proxy
-        # allows HTTPS CONNECT tunnels to github.com during git clone.
+        github_calls = [
+            c for c in mock_ensure.call_args_list
+            if len(c.args) >= 2 and c.args[1] == "github"
+        ]
+        assert len(github_calls) == 0, (
+            f"Expected no github provider for public repo (no PAT); "
+            f"fake credentials cause GH_TOKEN injection → GitHub 403. "
+            f"Got: {mock_ensure.call_args_list}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_github_provider_registered_when_pat_present(self, client):
+        """When a PAT is configured, ensure_provider is called with the real token."""
+        ws = await _create_workspace(client)
+        # Create a PAT
+        pat_resp = await client.post(
+            f"/api/v1/workspaces/{ws['id']}/secrets/pats",
+            json={"name": "test-pat", "github_username": "octocat", "pat_value": "ghp_testtoken123"},
+        )
+        pat = pat_resp.json()
+        # Create session with that PAT
+        s_resp = await client.post(
+            f"/api/v1/workspaces/{ws['id']}/sessions",
+            json={"name": "s-with-pat", "mode": "prompt", "agent_tool": "opencode",
+                  "github_pat_id": pat["id"]},
+        )
+        s = s_resp.json()
+
+        patches = self._patch_openshell()
+        with patches["create_provider"], \
+             patches["ensure_provider"] as mock_ensure, \
+             patches["configure_provider_credential"], patches["attach_sandbox_provider"], \
+             patches["create_sandbox"], patches["write_agent_config"], \
+             patches["write_agents_md"], patches["exec_command"], \
+             patches["start_agent"], patches["delete_sandbox"], \
+             patches["build_policy"], patches["run_agent"], patches["setup_sandbox"]:
+            await client.post(
+                f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/launch"
+            )
+
         github_calls = [
             c for c in mock_ensure.call_args_list
             if len(c.args) >= 2 and c.args[1] == "github"
         ]
         assert len(github_calls) == 1, (
-            f"Expected 1 github provider call, got {len(github_calls)}: {mock_ensure.call_args_list}"
+            f"Expected 1 github provider call when PAT is set, got {len(github_calls)}"
         )
-        # No PAT — credentials must use the public-repo placeholder (gateway rejects empty creds).
-        call_kwargs = github_calls[0].kwargs
-        creds = call_kwargs.get("credentials", {})
-        assert creds.get("api_token") == "public-repo-access", (
-            f"Expected placeholder credential for public repo, got: {creds}"
+        creds = github_calls[0].kwargs.get("credentials", {})
+        assert "api_token" in creds and creds["api_token"], (
+            f"Expected non-empty api_token credential in github provider call, got: {creds}"
         )
 
     @pytest.mark.asyncio
