@@ -53,7 +53,7 @@ class CrushStrategy(AgentToolStrategy):
     def get_config_map_name(self) -> str:
         return "crush-config"
 
-    def build_config_data(self, secret=None, mcp_servers=None) -> dict[str, str]:
+    def build_config_data(self, secret=None, mcp_servers=None, use_inference_local: bool = False) -> dict[str, str]:
         # Crush requires explicit provider entries in the config — it does not
         # auto-detect from env vars alone.  The value is a map[string]ProviderConfig
         # (keyed by provider ID), NOT an array.  Use $VAR references so values are

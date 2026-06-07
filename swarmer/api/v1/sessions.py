@@ -218,6 +218,11 @@ async def delete_session(
     if session.sandbox_name:
         # OpenShell session — delete sandbox; skip K8s PVC/Secret cleanup
         from swarmer import openshell_client
+        if session.service_url:
+            try:
+                await openshell_client.delete_service(session.sandbox_name, "agent")
+            except Exception:
+                pass
         try:
             await openshell_client.delete_sandbox(session.sandbox_name)
         except Exception:
@@ -280,11 +285,17 @@ async def stop_session(
 
     if session.sandbox_name:
         from swarmer import openshell_client
+        if session.service_url:
+            try:
+                await openshell_client.delete_service(session.sandbox_name, "agent")
+            except Exception:
+                pass
         try:
             await openshell_client.delete_sandbox(session.sandbox_name)
         except Exception:
             pass
         session.sandbox_name = None
+        session.service_url = None
 
     if not session.cron_schedule:
         try:
