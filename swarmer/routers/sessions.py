@@ -1074,17 +1074,77 @@ async def _setup_openshell_sandbox(
             config_json=_config_json,
         )
 
-        # Clone repos via exec_command (one call per repo, exit code checked).
-        # PAT is embedded directly in the clone URL; the OpenShell gateway requires
-        # a registered GitHub provider (with valid PAT) to allow CONNECT tunnels to
-        # github.com — launch is blocked upstream when repos are present without a PAT.
+        # Share/state dir setup runs FIRST so the $HOME/.local/share/<tool> symlink
+        # is in place before model_setup_cmd writes the model config through it.
+        # Both commands need HOME=/sandbox to match the agent's runtime environment.
+        if share_cmd.strip():
+            clean_share = share_cmd.rstrip().rstrip(";").rstrip()
+            await openshell_client.exec_command(
+                ref.name, ["sh", "-c", f"export HOME=/sandbox; {clean_share}"], client=None
+            )
+
+        # Model selection config
+        if model_setup_cmd.strip():
+            clean_cmd = model_setup_cmd.rstrip().rstrip("&").rstrip()
+            await openshell_client.exec_command(
+                ref.name, ["sh", "-c", f"export HOME=/sandbox; {clean_cmd}"], client=None
+            )
+
+        # AGENTS.md for tui/server modes
+        if agents_md:
+            await openshell_client.write_agents_md(sandbox_name=ref.name, content=agents_md)
+
+        # Network policy probe+approval cycle.
+        # OPA enforces per-process network policy: the git binary and the AI agent binary
+        # each need their own draft policy chunk approved before they can reach the network.
+        # We trigger denial events (which the supervisor converts to approvable draft chunks)
+        # by running a probe for each binary, then approve all expected hosts in one pass.
+        # The git clone must happen AFTER this approval so OPA allows git→github.com.
+        import asyncio as _asyncio
+        await _update_db(status_detail="Configuring network policy…")
+
+        # Git probe: causes OPA to generate a draft chunk for the git binary → github.com.
+        # Runs without credentials so the clone probe can't succeed on its own.
+        _github_repos_data = [rd for rd in repos_data if "github.com" in rd["url"]]
+        if _github_repos_data:
+            _git_probe_url = _github_repos_data[0]["url"]
+            try:
+                await openshell_client.exec_command(
+                    ref.name,
+                    ["sh", "-c", f"git ls-remote {shlex.quote(_git_probe_url)} HEAD 2>/dev/null; true"],
+                    client=None,
+                    timeout_seconds=15,
+                )
+            except Exception:
+                pass
+
+        # AI agent probe: causes OPA to generate draft chunks for the agent binary → AI APIs.
+        _probe_prompt = shlex.quote("Reply with one word: ready")
+        _probe_bin = {"opencode": "opencode run", "crush": "crush run"}.get(tool_name, "opencode run")
+        _inf_prefix = (" ".join(f"{k}={shlex.quote(v)}" for k, v in (inference_env or {}).items()) + " ") if inference_env else ""
+        _probe_cmd = f"{_inf_prefix}HOME=/sandbox {_probe_bin} --model {shlex.quote(model)} {_probe_prompt} 2>/dev/null; true"
+        try:
+            await openshell_client.exec_command(
+                ref.name, ["sh", "-c", _probe_cmd], client=None,
+                timeout_seconds=30,
+            )
+        except Exception:
+            pass
+        await _asyncio.sleep(12)  # supervisor needs ~10s to submit denial analysis
+
+        expected = _build_expected_hosts(model, repos_data, tool_name, mode)
+        try:
+            await openshell_client.approve_draft_policy_chunks(ref.name, expected_hosts=expected)
+        except Exception:
+            pass  # sandbox may have been stopped or never reached the denial stage; non-fatal
+
+        # Clone repos AFTER OPA approval so the git binary has network access to github.com.
+        # PAT embedded as x-access-token — works for all GitHub PAT types, avoids username-mismatch 403s.
         if repos_data:
             for rd in repos_data:
                 local_path = rd["local_path"]
                 repo_url = rd["url"]
                 if pat_token and "github.com" in repo_url:
-                    # Use x-access-token as the username — GitHub accepts this for all
-                    # PAT types (classic and fine-grained) and avoids username-mismatch 403s.
                     auth_url = repo_url.replace("https://", f"https://x-access-token:{pat_token}@")
                 else:
                     auth_url = repo_url
@@ -1110,51 +1170,6 @@ async def _setup_openshell_sandbox(
                         f"|| git checkout {shlex.quote(working_branch)}"
                     )
                     await openshell_client.exec_command(ref.name, ["sh", "-c", branch_cmd], client=None)
-
-        # Share/state dir setup runs FIRST so the $HOME/.local/share/<tool> symlink
-        # is in place before model_setup_cmd writes the model config through it.
-        # Both commands need HOME=/sandbox to match the agent's runtime environment.
-        if share_cmd.strip():
-            clean_share = share_cmd.rstrip().rstrip(";").rstrip()
-            await openshell_client.exec_command(
-                ref.name, ["sh", "-c", f"export HOME=/sandbox; {clean_share}"], client=None
-            )
-
-        # Model selection config
-        if model_setup_cmd.strip():
-            clean_cmd = model_setup_cmd.rstrip().rstrip("&").rstrip()
-            await openshell_client.exec_command(
-                ref.name, ["sh", "-c", f"export HOME=/sandbox; {clean_cmd}"], client=None
-            )
-
-        # AGENTS.md for tui/server modes
-        if agents_md:
-            await openshell_client.write_agents_md(sandbox_name=ref.name, content=agents_md)
-
-        # Pre-flight probe: run a quick opencode command so the supervisor observes
-        # the denied AI API connections and generates draft policy chunks.
-        # Then approve expected chunks so the actual agent run can reach the API.
-        # Without this probe, approval runs before any chunks exist.
-        import asyncio as _asyncio
-        await _update_db(status_detail="Configuring network policy…")
-        _probe_prompt = shlex.quote("Reply with one word: ready")
-        _probe_bin = {"opencode": "opencode run", "crush": "crush run"}.get(tool_name, "opencode run")
-        _inf_prefix = (" ".join(f"{k}={shlex.quote(v)}" for k, v in (inference_env or {}).items()) + " ") if inference_env else ""
-        _probe_cmd = f"{_inf_prefix}HOME=/sandbox {_probe_bin} --model {shlex.quote(model)} {_probe_prompt} 2>/dev/null; true"
-        try:
-            await openshell_client.exec_command(
-                ref.name, ["sh", "-c", _probe_cmd], client=None,
-                timeout_seconds=30,
-            )
-        except Exception:
-            pass  # probe failure is non-fatal; approval may still find existing chunks
-        await _asyncio.sleep(12)  # supervisor needs ~10s to submit denial analysis
-
-        expected = _build_expected_hosts(model, repos_data, tool_name, mode)
-        try:
-            await openshell_client.approve_draft_policy_chunks(ref.name, expected_hosts=expected)
-        except Exception:
-            pass  # sandbox may have been stopped or never reached the denial stage; non-fatal
 
         # For prompt mode, write the prompt to /sandbox/.prompt.txt via stdin
         # so we avoid newline-in-arg gateway rejection. Build the agent command
