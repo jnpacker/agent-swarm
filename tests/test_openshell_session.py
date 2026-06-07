@@ -365,7 +365,7 @@ class TestDoLaunchOpenshell:
 
         # No repos attached — exec_command should not be called for git clone
         exec_mock = patches["exec_command"].new
-        git_clone_calls = [c for c in exec_mock.call_args_list if "git clone" in str(c)]
+        git_clone_calls = [c for c in exec_mock.call_args_list if " clone " in str(c) and "git" in str(c)]
         assert git_clone_calls == []
 
     @pytest.mark.asyncio
@@ -501,13 +501,13 @@ class TestDoLaunchOpenshell:
         assert mock_attach.call_count == 0
 
     @pytest.mark.asyncio
-    async def test_no_github_provider_for_public_repo_without_pat(self, client):
-        """No GitHub provider should be registered when there is no PAT.
+    async def test_github_provider_registered_for_public_repo(self, client):
+        """GitHub provider must be registered even for public repos (no PAT).
 
-        Network access to github.com is handled by the draft-policy probe cycle
-        inside _setup_openshell_sandbox (probe → approve before clone). Registering
-        a provider with a fake credential causes the gateway to inject GH_TOKEN,
-        which git sends as a Bearer token — GitHub responds 403 on that invalid token.
+        The gateway uses the registered provider to allow CONNECT tunnels to
+        github.com through its proxy. Without it the proxy returns 403 before
+        git can even reach GitHub. The clone command separately clears GH_TOKEN
+        so the placeholder credential is never forwarded to GitHub.
         """
         ws = await _create_workspace(client)
         s = await _create_session(client, ws["id"])
@@ -532,10 +532,9 @@ class TestDoLaunchOpenshell:
             c for c in mock_ensure.call_args_list
             if len(c.args) >= 2 and c.args[1] == "github"
         ]
-        assert len(github_calls) == 0, (
-            f"Expected no github provider for public repo (no PAT); "
-            f"fake credentials cause GH_TOKEN injection → GitHub 403. "
-            f"Got: {mock_ensure.call_args_list}"
+        assert len(github_calls) == 1, (
+            f"Expected 1 github provider call for public repo (CONNECT tunnel), "
+            f"got {len(github_calls)}: {mock_ensure.call_args_list}"
         )
 
     @pytest.mark.asyncio
@@ -1671,7 +1670,7 @@ class TestGitProbeBeforeClone:
         )
         clone_idx = next(
             (i for i, (kind, cmd) in enumerate(call_log)
-             if kind == "exec" and "git clone" in " ".join(cmd)),
+             if kind == "exec" and "clone" in " ".join(cmd) and "git" in " ".join(cmd)),
             None,
         )
 
@@ -1686,6 +1685,13 @@ class TestGitProbeBeforeClone:
         assert github_probe_idx < first_approve_idx < clone_idx, (
             f"Required order: probe({github_probe_idx}) < approve({first_approve_idx}) < clone({clone_idx}). "
             f"Call log: {[(k, c if k=='approve' else ' '.join(c)) for k,c in call_log]}"
+        )
+
+        # The clone command for a public repo (no PAT) must clear GH_TOKEN so
+        # the gateway placeholder credential is never forwarded to GitHub.
+        clone_cmd_str = " ".join(call_log[clone_idx][1])
+        assert "GH_TOKEN" in clone_cmd_str and "credential.helper" in clone_cmd_str, (
+            f"Clone command must clear GH_TOKEN for public repos, got: {clone_cmd_str}"
         )
 
     @pytest.mark.asyncio

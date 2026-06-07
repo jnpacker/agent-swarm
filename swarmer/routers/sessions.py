@@ -894,14 +894,20 @@ async def _do_launch_openshell(
             provider_names.append(pname)
         except Exception:
             log.warning("Vertex AI provider setup failed (non-fatal)", exc_info=True)
-    if session.github_pat:
-        # Only register a GitHub provider when there is a real PAT. For public repos,
-        # network access is granted via the draft-policy probe cycle in _setup_openshell_sandbox
-        # (probe → supervisor generates draft → approve before clone). A fake placeholder
-        # credential would be injected as GH_TOKEN and cause GitHub to return 403.
+    _has_github_repos = any("github.com" in (r.repo_url or "") for r in (session.repos or []))
+    if session.github_pat or _has_github_repos:
+        # The gateway uses the registered provider to allow CONNECT tunnels to github.com.
+        # Without this provider the proxy blocks all outbound HTTPS to github.com.
+        # For public repos (no PAT) a placeholder credential is required to satisfy
+        # the gateway's non-empty-credentials validation; the clone command explicitly
+        # clears GH_TOKEN so the placeholder is never forwarded to GitHub itself.
         pname = f"swarmer-ws-{ws_id}-github"
-        pat_token = getattr(session.github_pat, "token", None) or getattr(session.github_pat, "pat", "")
-        await openshell_client.ensure_provider(pname, "github", {}, credentials={"api_token": pat_token})
+        if session.github_pat:
+            pat_token = getattr(session.github_pat, "token", None) or getattr(session.github_pat, "pat", "")
+            _creds: dict[str, str] = {"api_token": pat_token}
+        else:
+            _creds = {"api_token": "public-repo-access"}
+        await openshell_client.ensure_provider(pname, "github", {}, credentials=_creds)
         provider_names.append(pname)
 
     # 2. Build policy YAML (pure computation, no I/O)
@@ -1099,17 +1105,21 @@ async def _setup_openshell_sandbox(
             await openshell_client.approve_draft_policy_chunks(ref.name, expected_hosts=_git_hosts)
 
         # Clone repos via exec_command (one call per repo, exit code checked).
-        # PAT is embedded directly in the clone URL so auth is self-contained
-        # and does not depend on $GH_TOKEN gateway injection.
         if repos_data:
             for rd in repos_data:
                 local_path = rd["local_path"]
                 repo_url = rd["url"]
                 if pat_token and git_username and "github.com" in repo_url:
+                    # Embed PAT in URL so auth is self-contained.
                     auth_url = repo_url.replace("https://", f"https://{git_username}:{pat_token}@")
+                    clone_cmd = f"cd /sandbox && git clone {shlex.quote(auth_url)} {shlex.quote(local_path)}"
                 else:
-                    auth_url = repo_url
-                clone_cmd = f"cd /sandbox && git clone {shlex.quote(auth_url)} {shlex.quote(local_path)}"
+                    # Public repo: clear GH_TOKEN so the gateway placeholder credential
+                    # is never forwarded to GitHub (invalid token → 403 from GitHub).
+                    clone_cmd = (
+                        f"cd /sandbox && env -u GH_TOKEN"
+                        f" git -c credential.helper= clone {shlex.quote(repo_url)} {shlex.quote(local_path)}"
+                    )
                 result = await openshell_client.exec_command(
                     ref.name, ["sh", "-c", clone_cmd], client=None
                 )
