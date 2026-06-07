@@ -1148,16 +1148,21 @@ async def _setup_openshell_sandbox(
                     auth_url = repo_url.replace("https://", f"https://{git_username}:{pat_token}@")
                 else:
                     auth_url = repo_url
-                clone_cmd = f"cd /sandbox && git clone {shlex.quote(auth_url)} {shlex.quote(local_path)}"
+                # Disable credential helpers so only the URL-embedded PAT is used —
+                # the gh credential helper (injected via GITHUB_TOKEN/GH_TOKEN) may
+                # interfere or send a different token than the one in the URL.
+                clone_cmd = f"cd /sandbox && git -c credential.helper= clone {shlex.quote(auth_url)} {shlex.quote(local_path)}"
                 result = await openshell_client.exec_command(
                     ref.name, ["sh", "-c", clone_cmd], client=None
                 )
                 if getattr(result, "exit_code", 0) != 0:
+                    _stdout = getattr(result, "stdout", "") or ""
+                    _stderr = getattr(result, "stderr", "") or ""
                     log.warning(
-                        "sandbox setup: git clone failed for %s (exit %s): %s",
+                        "sandbox setup: git clone failed for %s (exit %s):\n%s",
                         local_path,
                         getattr(result, "exit_code", "?"),
-                        getattr(result, "stderr", ""),
+                        (_stdout + _stderr).strip(),
                     )
             await openshell_client.exec_command(
                 ref.name, ["sh", "-c", "git config --global --add safe.directory '*'"], client=None
