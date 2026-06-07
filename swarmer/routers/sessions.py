@@ -1144,8 +1144,8 @@ async def _setup_openshell_sandbox(
             for rd in repos_data:
                 local_path = rd["local_path"]
                 repo_url = rd["url"]
-                if pat_token and "github.com" in repo_url:
-                    auth_url = repo_url.replace("https://", f"https://x-access-token:{pat_token}@")
+                if pat_token and git_username and "github.com" in repo_url:
+                    auth_url = repo_url.replace("https://", f"https://{git_username}:{pat_token}@")
                 else:
                     auth_url = repo_url
                 clone_cmd = f"cd /sandbox && git clone {shlex.quote(auth_url)} {shlex.quote(local_path)}"
