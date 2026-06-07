@@ -894,17 +894,14 @@ async def _do_launch_openshell(
             provider_names.append(pname)
         except Exception:
             log.warning("Vertex AI provider setup failed (non-fatal)", exc_info=True)
-    _has_github_repos = any("github.com" in (r.repo_url or "") for r in (session.repos or []))
-    if session.github_pat or _has_github_repos:
+    if session.github_pat:
+        # Only register a GitHub provider when there is a real PAT. For public repos,
+        # network access is granted via the draft-policy probe cycle in _setup_openshell_sandbox
+        # (probe → supervisor generates draft → approve before clone). A fake placeholder
+        # credential would be injected as GH_TOKEN and cause GitHub to return 403.
         pname = f"swarmer-ws-{ws_id}-github"
-        if session.github_pat:
-            pat_token = getattr(session.github_pat, "token", None) or getattr(session.github_pat, "pat", "")
-            _creds: dict[str, str] = {"api_token": pat_token}
-        else:
-            # Gateway requires non-empty credentials; use a placeholder so the provider
-            # is registered and the sandbox gets network access to github.com for public clones.
-            _creds = {"api_token": "public-repo-access"}
-        await openshell_client.ensure_provider(pname, "github", {}, credentials=_creds)
+        pat_token = getattr(session.github_pat, "token", None) or getattr(session.github_pat, "pat", "")
+        await openshell_client.ensure_provider(pname, "github", {}, credentials={"api_token": pat_token})
         provider_names.append(pname)
 
     # 2. Build policy YAML (pure computation, no I/O)
