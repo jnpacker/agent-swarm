@@ -26,7 +26,7 @@ class OpenCodeStrategy(AgentToolStrategy):
     def get_config_map_name(self) -> str:
         return "opencode-config"
 
-    def build_config_data(self, secret=None, mcp_servers=None) -> dict[str, str]:
+    def build_config_data(self, secret=None, mcp_servers=None, use_inference_local: bool = False) -> dict[str, str]:
         config: dict = {
             "$schema": "https://opencode.ai/config.json",
             "enabled_providers": ["google", "google-vertex-anthropic", "anthropic", "openai"],
@@ -39,6 +39,18 @@ class OpenCodeStrategy(AgentToolStrategy):
                 "port": 4096,
             },
         }
+
+        if use_inference_local:
+            # Remove google-vertex-anthropic: its loader invokes google-auth-library
+            # which fails without ADC in the sandbox. Instead, configure the anthropic
+            # provider explicitly with a placeholder key so OpenCode shows Claude models.
+            # inference.local strips the key and substitutes the real Vertex AI token.
+            config["enabled_providers"] = [
+                p for p in config["enabled_providers"] if p != "google-vertex-anthropic"
+            ]
+            config["provider"] = {
+                "anthropic": {"options": {"apiKey": "sk-ant-api03-inference-local-proxy"}}
+            }
 
         if mcp_servers:
             mcp_config = {}

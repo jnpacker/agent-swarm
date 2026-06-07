@@ -1,6 +1,7 @@
 """
 WebSocket endpoint that proxies a browser xterm.js terminal to a session pod
 using the Kubernetes Python client exec stream (no kubectl subprocess needed).
+For OpenShell sandbox sessions, uses the ExecSandboxInteractive gRPC stream.
 """
 import asyncio
 import json
@@ -62,17 +63,18 @@ async def session_tui(
         await websocket.close(code=4002, reason="Session not found")
         return
 
-    if not session.pod_name or session.phase != "running":
-        log.warning("TUI WS: session %d not running (phase=%s, pod=%s)", sid, session.phase if session else "none", session.pod_name if session else "none")
+    is_openshell = bool(session.sandbox_name)
+
+    if session.phase != "running" or (not is_openshell and not session.pod_name):
+        log.warning(
+            "TUI WS: session %d not running (phase=%s, pod=%s, sandbox=%s)",
+            sid, session.phase, session.pod_name, session.sandbox_name,
+        )
         await websocket.close(code=4003, reason="Session not running")
         return
 
-    namespace = ws.k8s_namespace
-    pod_name = session.pod_name
-
     from swarmer.agent_tools.registry import get as get_tool
     tool = get_tool(session.agent_tool)
-    container_name = tool.get_container_name()
 
     tui_cmd_parts = [tool.get_tui_binary()]
     if session.model and hasattr(tool, 'get_tui_model_args'):
@@ -85,7 +87,178 @@ async def session_tui(
         f"{{ {cmd_base} --continue || exec {cmd_base}; }}"
     )
 
-    # ---------- Open kubernetes exec stream ----------
+    loop = asyncio.get_running_loop()
+    read_q: asyncio.Queue[bytes | None] = asyncio.Queue()
+    stop_event = threading.Event()
+
+    if is_openshell:
+        await _run_openshell_tui(
+            websocket=websocket,
+            session=session,
+            tui_shell=tui_shell,
+            cols=cols,
+            rows=rows,
+            loop=loop,
+            read_q=read_q,
+            stop_event=stop_event,
+        )
+    else:
+        await _run_k8s_tui(
+            websocket=websocket,
+            session=session,
+            ws=ws,
+            tool=tool,
+            tui_shell=tui_shell,
+            cols=cols,
+            rows=rows,
+            loop=loop,
+            read_q=read_q,
+            stop_event=stop_event,
+        )
+
+
+async def _run_openshell_tui(
+    websocket: WebSocket,
+    session: Session,
+    tui_shell: str,
+    cols: int,
+    rows: int,
+    loop,
+    read_q: asyncio.Queue,
+    stop_event: threading.Event,
+) -> None:
+    from swarmer import openshell_client
+    from openshell._proto import openshell_pb2
+
+    sandbox_name = session.sandbox_name
+
+    # Resolve sandbox_id synchronously (brief blocking call)
+    try:
+        sandbox_id = await openshell_client._sandbox_id(sandbox_name, openshell_client._get_client())
+    except Exception as exc:
+        log.error("TUI: sandbox_id lookup failed for %s: %s", sandbox_name, exc)
+        await websocket.close(code=4004, reason="Sandbox lookup failed")
+        return
+
+    command = ["sh", "-c", tui_shell]
+
+    try:
+        client = openshell_client._get_client()
+        response_stream, input_q = openshell_client.exec_interactive(
+            sandbox_name=sandbox_name,
+            sandbox_id=sandbox_id,
+            command=command,
+            cols=cols,
+            rows=rows,
+            client=client,
+        )
+    except Exception as exc:
+        log.error("TUI: exec_interactive failed for sandbox %s: %s", sandbox_name, exc)
+        await websocket.close(code=4004, reason="Exec failed")
+        return
+
+    def _stream_reader() -> None:
+        """Drain the gRPC response stream into read_q (background thread)."""
+        try:
+            for event in response_stream:
+                if stop_event.is_set():
+                    break
+                which = event.WhichOneof("payload")
+                if which == "stdout":
+                    data = event.stdout.data
+                    if data:
+                        loop.call_soon_threadsafe(read_q.put_nowait, data)
+                elif which == "stderr":
+                    data = event.stderr.data
+                    if data:
+                        chunk = b"\r\n\x1b[31m" + data + b"\x1b[0m"
+                        loop.call_soon_threadsafe(read_q.put_nowait, chunk)
+                elif which == "exit":
+                    break
+        except Exception as exc:
+            if not stop_event.is_set():
+                log.error("TUI gRPC stream reader error for sandbox %s: %s", sandbox_name, exc)
+        finally:
+            loop.call_soon_threadsafe(read_q.put_nowait, None)
+
+    reader_thread = threading.Thread(target=_stream_reader, daemon=True)
+    reader_thread.start()
+
+    async def read_loop() -> None:
+        try:
+            while True:
+                chunk = await read_q.get()
+                if chunk is None:
+                    break
+                await websocket.send_bytes(chunk)
+        except Exception:
+            pass
+
+    async def write_loop() -> None:
+        try:
+            while True:
+                msg = await websocket.receive()
+                if msg.get("bytes"):
+                    input_q.put(openshell_pb2.ExecSandboxInput(stdin=msg["bytes"]))
+                elif msg.get("text"):
+                    try:
+                        payload = json.loads(msg["text"])
+                        if payload.get("type") == "resize":
+                            input_q.put(openshell_pb2.ExecSandboxInput(
+                                resize=openshell_pb2.ExecSandboxWindowResize(
+                                    cols=payload.get("cols", 80),
+                                    rows=payload.get("rows", 24),
+                                )
+                            ))
+                    except Exception:
+                        pass
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            pass
+
+    read_task = asyncio.create_task(read_loop())
+    write_task = asyncio.create_task(write_loop())
+
+    try:
+        done, pending = await asyncio.wait(
+            [read_task, write_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+    except Exception as exc:
+        log.error("TUI proxy error for sandbox %s: %s", sandbox_name, exc)
+    finally:
+        stop_event.set()
+        input_q.put(None)  # stop the gRPC request generator
+        reader_thread.join(timeout=2.0)
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+async def _run_k8s_tui(
+    websocket: WebSocket,
+    session: Session,
+    ws: Workspace,
+    tool,
+    tui_shell: str,
+    cols: int,
+    rows: int,
+    loop,
+    read_q: asyncio.Queue,
+    stop_event: threading.Event,
+) -> None:
+    namespace = ws.k8s_namespace
+    pod_name = session.pod_name
+    container_name = tool.get_container_name()
+
     from kubernetes import client as k8s_client
     from kubernetes.stream import stream as k8s_stream
 
@@ -118,10 +291,6 @@ async def session_tui(
         )
     except Exception:
         pass
-
-    loop = asyncio.get_running_loop()
-    read_q: asyncio.Queue[bytes | None] = asyncio.Queue()
-    stop_event = threading.Event()
 
     def _stream_reader() -> None:
         """Pump pod stdout/stderr into read_q (runs in a background thread)."""

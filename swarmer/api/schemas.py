@@ -82,6 +82,7 @@ class SessionOut(BaseModel):
     pod_name: str | None
     pvc_name: str | None
     sandbox_name: str | None = None
+    service_url: str | None = None
     cron_schedule: str
     cron_label: str
     run_started_at: datetime | None

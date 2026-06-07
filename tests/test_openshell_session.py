@@ -842,7 +842,8 @@ class TestRunOpenshellAgent:
         mock_exec.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_tui_mode_calls_start_agent(self, client):
+    async def test_tui_mode_does_not_call_start_agent(self, client):
+        """TUI mode skips start_agent — the WebSocket handler starts the agent interactively."""
         ws = await _create_workspace(client)
         s = await _create_session(client, ws["id"], mode="tui")
 
@@ -860,7 +861,7 @@ class TestRunOpenshellAgent:
                 s["id"], "sandbox-tui", ["sh", "-c", "sleep infinity"], "tui", "opencode"
             )
 
-        mock_start.assert_called_once()
+        mock_start.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_exception_sets_phase_failed(self, client):
