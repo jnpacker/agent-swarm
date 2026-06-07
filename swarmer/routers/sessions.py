@@ -701,6 +701,51 @@ def _build_expected_hosts(model: str, repos_data: list[dict], tool_name: str, mo
     return hosts
 
 
+def _extract_vertex_model(model: str) -> str:
+    """Extract the bare model ID from a google-vertex-anthropic model string.
+
+    "google-vertex-anthropic/claude-sonnet-4-6@default" → "claude-sonnet-4-6"
+    Falls back to the raw model string if it doesn't match the expected format.
+    """
+    if "/" in model:
+        model = model.split("/", 1)[1]
+    if "@" in model:
+        model = model.split("@", 1)[0]
+    return model
+
+
+async def _wait_vertex_provider_ready(provider_name: str, timeout: float = 30.0) -> None:
+    """Wait for the gateway to complete the initial ADC token refresh for a Vertex AI provider.
+
+    The gateway refreshes the token asynchronously after configure_vertex_provider.
+    Creating the sandbox before the first refresh means the provider may not be able
+    to intercept aiplatform.googleapis.com calls with a valid token yet.
+    """
+    from swarmer import openshell_client
+    from openshell._proto import openshell_pb2
+    import time as _time
+
+    client = openshell_client._get_client()
+
+    def _poll():
+        deadline = _time.time() + timeout
+        while _time.time() < deadline:
+            try:
+                sr = client._stub.GetProviderRefreshStatus(
+                    openshell_pb2.GetProviderRefreshStatusRequest(provider=provider_name),
+                    timeout=5,
+                )
+                statuses = {c.credential_key: c.status for c in sr.credentials}
+                if statuses.get("gcloud_adc_token") == "configured":
+                    return
+            except Exception:
+                pass
+            _time.sleep(1)
+        log.warning("_wait_vertex_provider_ready: timed out after %.0fs for %s", timeout, provider_name)
+
+    await asyncio.to_thread(_poll)
+
+
 async def _do_launch(session: Session, ws: Workspace, db: AsyncSession, user_id: str = "") -> None:
     """Core launch logic shared by the HTTP endpoint and the background scheduler."""
     if user_id == "unknown":
@@ -823,38 +868,32 @@ async def _do_launch_openshell(
         provider_names.append(pname)
     if oc_secret and oc_secret.google_api_key:
         pname = f"swarmer-ws-{ws_id}-google-ai-studio"
-        await openshell_client.ensure_provider(pname, "google-ai-studio", {}, credentials={"GOOGLE_API_KEY": oc_secret.google_api_key})
+        await openshell_client.ensure_provider(pname, "google-ai-studio", {}, credentials={
+                "GOOGLE_API_KEY": oc_secret.google_api_key,
+                "GOOGLE_GENERATIVE_AI_API_KEY": oc_secret.google_api_key,
+            })
         provider_names.append(pname)
+    # Vertex AI (ADC) provider registration kept for future inference.local support.
+    # inference.local routing is not active; Vertex AI sessions are not supported yet.
     if oc_secret and oc_secret.has_adc and oc_secret.has_vertex:
         pname = f"swarmer-ws-{ws_id}-google-vertex-ai"
         _project = oc_secret.google_cloud_project or ""
         _location = oc_secret.vertex_location or ""
-        # Provider passes credential, project, and location to the gateway.
-        # The gateway routes inference.local calls through this provider using
-        # ADC-based token refresh — no credentials enter the sandbox directly.
-        # In OpenShell 0.0.55, credential KEYS are injected as env var names.
-        # Include all env var names agents may check so the gateway injects them.
-        # gcloud_adc_token is the one configured for ADC refresh; the others get
-        # the same refreshed token value via profile env_var aliasing.
-        await openshell_client.ensure_provider(
-            pname, "google-vertex-ai",
-            config={"VERTEX_AI_PROJECT_ID": _project, "VERTEX_AI_REGION": _location},
-            credentials={
-                "gcloud_adc_token": "__placeholder__",
-                "GOOGLE_VERTEX_AI_TOKEN": "__placeholder__",
-                "GOOGLE_OAUTH_ACCESS_TOKEN": "__placeholder__",
-                "GOOGLE_CLOUD_PROJECT": _project,
-                "VERTEX_LOCATION": _location,
-                "ANTHROPIC_VERTEX_PROJECT_ID": _project,
-            },
-        )
-        await openshell_client.configure_vertex_provider(
-            pname,
-            adc_json=oc_secret.application_default_credentials,
-            project=_project,
-            location=_location,
-        )
-        provider_names.append(pname)
+        try:
+            await openshell_client.ensure_provider(
+                pname, "google-vertex-ai",
+                config={"VERTEX_AI_PROJECT_ID": _project, "VERTEX_AI_REGION": _location},
+                credentials={"gcloud_adc_token": "__placeholder__"},
+            )
+            await openshell_client.configure_vertex_provider(
+                pname,
+                adc_json=oc_secret.application_default_credentials,
+                project=_project,
+                location=_location,
+            )
+            provider_names.append(pname)
+        except Exception:
+            log.warning("Vertex AI provider setup failed (non-fatal)", exc_info=True)
     if session.github_pat:
         pname = f"swarmer-ws-{ws_id}-github"
         pat_token = getattr(session.github_pat, "token", None) or getattr(session.github_pat, "pat", "")
@@ -875,6 +914,9 @@ async def _do_launch_openshell(
         model = session.model
     else:
         model = tool.get_default_model(has_adc, has_gemini)
+
+    # When routing through inference.local, rewrite the model to use the plain
+    # anthropic/ provider. OpenCode's google-vertex-anthropic provider invokes
 
     # Capture serialisable data for the background task before committing.
     # ORM objects cannot be used across DB sessions.
@@ -1009,10 +1051,15 @@ async def _setup_openshell_sandbox(
         # config that includes enabled_providers and any MCP config.
         from swarmer.agent_tools.registry import get as _get_tool
         _tool = _get_tool(tool_name)
-        _config_data = _tool.build_config_data(mcp_servers=[
+        _is_inference_local = bool(inference_env and inference_env.get("ANTHROPIC_BASE_URL"))
+        _mcp_list = [
             type("_MCP", (), {"slug": k, **v})()
             for k, v in (mcp_patch.get("mcp", {}) or {}).items()
-        ] if mcp_patch else [])
+        ] if mcp_patch else []
+        _config_data = _tool.build_config_data(
+            mcp_servers=_mcp_list,
+            use_inference_local=_is_inference_local,
+        )
         _config_json = _config_data.get(f"{tool_name}.json", "{}")
         await openshell_client.write_agent_config(
             sandbox_name=ref.name,
@@ -1078,23 +1125,20 @@ async def _setup_openshell_sandbox(
         # the denied AI API connections and generates draft policy chunks.
         # Then approve expected chunks so the actual agent run can reach the API.
         # Without this probe, approval runs before any chunks exist.
-        if mode == "prompt":
-            import asyncio as _asyncio
-            await _update_db(status_detail="Configuring network policy…")
-            # Use a real prompt so the agent makes an API call and generates policy denials.
-            # An empty prompt causes opencode to exit immediately without calling the API.
-            _probe_prompt = shlex.quote("Reply with one word: ready")
-            _probe_bin = {"opencode": "opencode run", "crush": "crush run"}.get(tool_name, "opencode run")
-            _inf_prefix = (" ".join(f"{k}={shlex.quote(v)}" for k, v in (inference_env or {}).items()) + " ") if inference_env else ""
-            _probe_cmd = f"{_inf_prefix}HOME=/sandbox {_probe_bin} --model {shlex.quote(model)} {_probe_prompt} 2>/dev/null; true"
-            try:
-                await openshell_client.exec_command(
-                    ref.name, ["sh", "-c", _probe_cmd], client=None,
-                    timeout_seconds=30,
-                )
-            except Exception:
-                pass  # probe failure is non-fatal; approval may still find existing chunks
-            await _asyncio.sleep(12)  # supervisor needs ~10s to submit denial analysis
+        import asyncio as _asyncio
+        await _update_db(status_detail="Configuring network policy…")
+        _probe_prompt = shlex.quote("Reply with one word: ready")
+        _probe_bin = {"opencode": "opencode run", "crush": "crush run"}.get(tool_name, "opencode run")
+        _inf_prefix = (" ".join(f"{k}={shlex.quote(v)}" for k, v in (inference_env or {}).items()) + " ") if inference_env else ""
+        _probe_cmd = f"{_inf_prefix}HOME=/sandbox {_probe_bin} --model {shlex.quote(model)} {_probe_prompt} 2>/dev/null; true"
+        try:
+            await openshell_client.exec_command(
+                ref.name, ["sh", "-c", _probe_cmd], client=None,
+                timeout_seconds=30,
+            )
+        except Exception:
+            pass  # probe failure is non-fatal; approval may still find existing chunks
+        await _asyncio.sleep(12)  # supervisor needs ~10s to submit denial analysis
 
         expected = _build_expected_hosts(model, repos_data, tool_name, mode)
         await openshell_client.approve_draft_policy_chunks(ref.name, expected_hosts=expected)
@@ -1163,7 +1207,10 @@ async def _run_openshell_agent(
             break
 
     try:
-        await _update_db(phase="running")
+        if mode != "server":
+            # Server mode stays "pending" until expose_service succeeds and the
+            # service_url is stored — the Chat tab only becomes accessible then.
+            await _update_db(phase="running")
 
         if mode == "prompt":
             result = await openshell_client.exec_command(sandbox_name, cmd, client=None,
@@ -1196,8 +1243,38 @@ async def _run_openshell_agent(
                 sandbox_name=new_sandbox_name,
             )
         else:
-            # Server/TUI: fire agent without blocking; sandbox stays alive
-            await openshell_client.start_agent(sandbox_name, cmd)
+            if mode == "server":
+                # Launch server agent as a background nohup process so exec() returns
+                # immediately; the sandbox stays alive serving HTTP.
+                await openshell_client.start_agent(sandbox_name, cmd)
+
+            # TUI mode: the sandbox is ready; the TUI WebSocket handler starts the
+            # agent interactively via exec_interactive when the user connects.
+
+            # For server mode, expose the agent HTTP port so the chat proxy can reach it
+            if mode == "server":
+                from swarmer.agent_tools.registry import get as _get_tool
+                _tool = _get_tool(agent_tool)
+                port = _tool.get_server_port() or 4096
+                try:
+                    await _update_db(status_detail="Waiting for server to start…")
+                    await asyncio.sleep(8)  # let the server process start listening
+                    service_url = await openshell_client.expose_service(
+                        sandbox_name, "agent", port
+                    )
+                    # Transition to running and store the URL atomically so the
+                    # Chat tab is only accessible once it's reachable.
+                    await _update_db(phase="running", service_url=service_url, status_detail="")
+                except Exception:
+                    log.exception(
+                        "ExposeService failed for session %d sandbox %s",
+                        session_id, sandbox_name,
+                    )
+                    await _update_db(
+                        phase="failed",
+                        status_detail="Failed to expose service URL — check server logs",
+                        run_completed_at=datetime.utcnow(),
+                    )
 
     except asyncio.CancelledError:
         raise
@@ -1321,11 +1398,17 @@ async def session_stop(
 
     if session.sandbox_name:
         from swarmer import openshell_client
+        if session.service_url:
+            try:
+                await openshell_client.delete_service(session.sandbox_name, "agent")
+            except Exception as exc:
+                log.warning("DeleteService failed for session %d: %s", sid, exc)
         try:
             await openshell_client.delete_sandbox(session.sandbox_name)
         except Exception as exc:
             flash(request, f"Sandbox deletion failed: {exc}", "warning")
         session.sandbox_name = None
+        session.service_url = None
 
     session.run_completed_at = datetime.utcnow()
     session.phase = "stopped"
@@ -1537,6 +1620,11 @@ async def session_delete(
     if session.sandbox_name:
         # OpenShell session — delete sandbox; skip K8s PVC/Secret cleanup
         from swarmer import openshell_client
+        if session.service_url:
+            try:
+                await openshell_client.delete_service(session.sandbox_name, "agent")
+            except Exception as exc:
+                log.warning("DeleteService failed for session %d: %s", sid, exc)
         try:
             await openshell_client.delete_sandbox(session.sandbox_name)
         except Exception as exc:
