@@ -696,9 +696,11 @@ def _build_expected_hosts(model: str, repos_data: list[dict], tool_name: str, mo
     if repos_data:
         hosts.add("github.com")
         hosts.add("api.github.com")
+        # Pack-file CDN and shallow clone host — required for git clone to complete
+        hosts.add("objects.githubusercontent.com")
+        hosts.add("codeload.github.com")
         # Raw content for public repos
         hosts.add("raw.githubusercontent.com")
-        hosts.add("objects.githubusercontent.com")
 
     return hosts
 
@@ -1125,51 +1127,9 @@ async def _setup_openshell_sandbox(
         if agents_md:
             await openshell_client.write_agents_md(sandbox_name=ref.name, content=agents_md)
 
-        # Network policy probe+approval cycle.
-        # OPA enforces per-process network policy: the git binary and the AI agent binary
-        # each need their own draft policy chunk approved before they can reach the network.
-        # We trigger denial events (which the supervisor converts to approvable draft chunks)
-        # by running a probe for each binary, then approve all expected hosts in one pass.
-        # The git clone must happen AFTER this approval so OPA allows git→github.com.
-        import asyncio as _asyncio
-        await _update_db(status_detail="Configuring network policy…")
-
-        # Git probe: causes OPA to generate a draft chunk for the git binary → github.com.
-        # Runs without credentials so the clone probe can't succeed on its own.
-        _github_repos_data = [rd for rd in repos_data if "github.com" in rd["url"]]
-        if _github_repos_data:
-            _git_probe_url = _github_repos_data[0]["url"]
-            try:
-                await openshell_client.exec_command(
-                    ref.name,
-                    ["sh", "-c", f"git ls-remote {shlex.quote(_git_probe_url)} HEAD 2>/dev/null; true"],
-                    client=None,
-                    timeout_seconds=15,
-                )
-            except Exception:
-                pass
-
-        # AI agent probe: causes OPA to generate draft chunks for the agent binary → AI APIs.
-        _probe_prompt = shlex.quote("Reply with one word: ready")
-        _probe_bin = {"opencode": "opencode run", "crush": "crush run"}.get(tool_name, "opencode run")
-        _inf_prefix = (" ".join(f"{k}={shlex.quote(v)}" for k, v in (inference_env or {}).items()) + " ") if inference_env else ""
-        _probe_cmd = f"{_inf_prefix}HOME=/sandbox {_probe_bin} --model {shlex.quote(model)} {_probe_prompt} 2>/dev/null; true"
-        try:
-            await openshell_client.exec_command(
-                ref.name, ["sh", "-c", _probe_cmd], client=None,
-                timeout_seconds=30,
-            )
-        except Exception:
-            pass
-        await _asyncio.sleep(12)  # supervisor needs ~10s to submit denial analysis
-
-        expected = _build_expected_hosts(model, repos_data, tool_name, mode)
-        try:
-            await openshell_client.approve_draft_policy_chunks(ref.name, expected_hosts=expected)
-        except Exception:
-            pass  # sandbox may have been stopped or never reached the denial stage; non-fatal
-
-        # Clone repos AFTER OPA approval so the git binary has network access to github.com.
+        # Clone repos — network policies are pre-applied via SandboxSpec.policy so the
+        # git binary has Landlock network access to github.com immediately at sandbox
+        # creation time.  No probe-deny-approve cycle needed (ACM-34909).
         # PAT embedded as x-access-token — works for all GitHub PAT types, avoids username-mismatch 403s.
         if repos_data:
             for rd in repos_data:

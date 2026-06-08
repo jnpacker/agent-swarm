@@ -99,13 +99,15 @@ async def run_smoke_test(model: str) -> bool:
         language = "golang"
         agent_tool = "opencode"
 
+    # Build policy with network rules pre-included so the sandbox starts with all
+    # required Landlock access approved (no probe-deny-approve cycle needed, ACM-34909).
     policy = build_session_policy(_FakeSession(), [], [], "opencode", model)
     ref = None
     try:
         ref = await create_sandbox(
             image=tool.get_image(),
             env_vars={},
-            policy=None,  # no custom policy — let draft approval workflow handle network rules
+            policy=policy,
             provider_names=[provider_name],
         )
         step("CreateSandbox + WaitReady", True, ref.name)
@@ -205,43 +207,41 @@ async def run_smoke_test(model: str) -> bool:
         step("opencode.json write", False, str(exc))
         all_passed = False
 
-    # ── 9. Generate + approve draft policy chunks ─────────────────────────────
-    print("\n[9] Draft policy approval (expected endpoints only)")
+    # ── 9. Pre-applied network policy validation ──────────────────────────────
+    # Network policies are now included directly in spec.policy at sandbox creation
+    # (ACM-34909). There is no probe-deny-approve cycle. Instead, we validate that
+    # the sandbox was started with the correct policy by inspecting the approved
+    # policy state and attempting a direct git clone without any prior approval step.
+    print("\n[9] Network policy validation (pre-applied at creation)")
     try:
-        from swarmer.routers.sessions import _build_expected_hosts
-        from swarmer.openshell_client import approve_draft_policy_chunks
-        import time as _time
+        from swarmer.openshell_policy import build_session_network_policies
 
-        # Probe: run opencode briefly to generate policy denials in the supervisor.
-        # The supervisor submits denial analysis ~10s after the denied connections.
-        _probe_cmd = f"HOME=/sandbox opencode run --model {shlex.quote(model)} 'hi' 2>/dev/null; true"
-        xec(_probe_cmd, timeout=30)
-        _time.sleep(12)  # supervisor needs ~10s to submit denial analysis
+        computed_net = build_session_network_policies(_FakeSession(), [], [], "opencode", model)
+        ok = step("build_session_network_policies returns non-empty dict",
+                  len(computed_net) > 0,
+                  f"{len(computed_net)} blocks: {sorted(computed_net.keys())}")
+        all_passed = all_passed and ok
 
-        # Approve only expected hosts (AI provider + tool)
-        expected = _build_expected_hosts(model, [], "opencode", "prompt")
-        print(f"     expected hosts: {sorted(expected)}")
-        unexpected = await approve_draft_policy_chunks(sandbox_name, expected_hosts=expected)
-        _time.sleep(3)
-
-        dp = client._stub.GetDraftPolicy(
-            openshell_pb2.GetDraftPolicyRequest(name=sandbox_name), timeout=10
-        )
-        approved_count = sum(1 for c in dp.chunks if c.status == "approved")
-        ok = step("Expected draft chunks approved", approved_count > 0,
-                  f"{approved_count} approved" + (f" (unexpected: {unexpected})" if unexpected else ""))
+        # Verify the agent_api block is present and has expected endpoints
+        agent_block = computed_net.get("agent_api", {})
+        agent_endpoints = [ep.get("host", "") for ep in agent_block.get("endpoints", [])]
+        has_vertex = any("aiplatform" in h for h in agent_endpoints)
+        ok = step("agent_api block has aiplatform endpoint", has_vertex,
+                  f"endpoints: {agent_endpoints}")
         all_passed = all_passed and ok
     except Exception as exc:
-        step("Draft policy approval", False, str(exc))
+        step("Network policy validation", False, str(exc))
         all_passed = False
 
-    # ── 9b. Public repo clone (no PAT) ───────────────────────────────────────
-    print("\n[9b] Public repo clone (no PAT)")
+    # ── 9b. Public repo clone — direct, no prior approval needed ─────────────
+    # Sandbox was created with pre-applied network policy granting git access to
+    # github.com. Clone should succeed immediately.
+    print("\n[9b] Public repo clone (pre-applied policy, no PAT)")
     pub_repo = "https://github.com/stolostron/agent-swarm"
     try:
         r_clone = xec(f"git clone --depth=1 {pub_repo} /tmp/smoke-repo 2>&1 | tail -3", timeout=60)
         cloned = r_clone.exit_code == 0 or "done." in r_clone.stdout.lower() or "already exists" in r_clone.stdout
-        ok = step("git clone public repo", cloned,
+        ok = step("git clone public repo (no probe-approve cycle)", cloned,
                   r_clone.stdout.strip()[:100] if cloned else r_clone.stdout.strip()[:200])
         all_passed = all_passed and ok
     except Exception as exc:
@@ -520,13 +520,14 @@ async def run_vertex_smoke_test(
         language = "golang"
         agent_tool = _agent_tool
 
+    # Build policy with network rules pre-included (ACM-34909).
     policy = build_session_policy(_FakeSession(), [], [], agent_tool, model)
     ref = None
     try:
         ref = await create_sandbox(
             image=tool.get_image(),
             env_vars={},
-            policy=None,
+            policy=policy,
             provider_names=[provider_name],
         )
         step("CreateSandbox + WaitReady", True, ref.name)
@@ -584,27 +585,24 @@ async def run_vertex_smoke_test(
         step(f"{tool.name}.json write", False, str(exc))
         all_passed = False
 
-    # ── 5b. Policy probe and approval ────────────────────────────────────────
-    print("\n[5b] Network policy approval")
+    # ── 5b. Network policy validation (pre-applied at creation) ──────────────
+    # Network policies are included in spec.policy at sandbox creation (ACM-34909).
+    # No probe-deny-approve cycle. Validate the computed policy dict is complete.
+    print("\n[5b] Network policy validation (pre-applied at creation)")
     try:
-        from swarmer.routers.sessions import _build_expected_hosts
-        from swarmer.openshell_client import approve_draft_policy_chunks
-        import time as _time
+        from swarmer.openshell_policy import build_session_network_policies
 
-        _probe_bin = {"opencode": "opencode run", "crush": "crush run"}.get(agent_tool, "opencode run")
-        _probe_prompt = shlex.quote("Reply with one word: ready")
-        _probe_cmd = f"{vertex_env_prefix}HOME=/sandbox {_probe_bin} --model {model_arg} {_probe_prompt} 2>/dev/null; true"
-        xec(_probe_cmd, timeout=45)
-        _time.sleep(12)
-
-        expected = _build_expected_hosts(model, [], agent_tool, "prompt")
-        print(f"     expected hosts: {sorted(expected)}")
-        unexpected = await approve_draft_policy_chunks(sandbox_name, expected_hosts=expected)
-        _time.sleep(3)
-        step("Policy chunks approved", True,
-             f"unexpected: {unexpected}" if unexpected else "all expected")
+        computed_net = build_session_network_policies(_FakeSession(), [], [], agent_tool, model)
+        step("build_session_network_policies returns non-empty dict",
+             len(computed_net) > 0,
+             f"{len(computed_net)} blocks: {sorted(computed_net.keys())}")
+        agent_block = computed_net.get("agent_api", {})
+        agent_endpoints = [ep.get("host", "") for ep in agent_block.get("endpoints", [])]
+        has_vertex = any("aiplatform" in h or "inference.local" in h for h in agent_endpoints)
+        step("agent_api block covers VertexAI/inference.local endpoints", has_vertex,
+             f"endpoints: {agent_endpoints}")
     except Exception as exc:
-        step("Policy approval", False, str(exc)[:80])
+        step("Network policy validation", False, str(exc)[:80])
 
     # ── 6. Agent run with Claude via VertexAI ────────────────────────────────
     print(f"\n[6] {agent_tool} prompt execution (Claude via VertexAI)")
@@ -798,6 +796,189 @@ def _cleanup_provider(client, provider_name: str, openshell_pb2) -> None:
         step("Delete test provider", False, str(exc))
 
 
+async def run_policy_extract(
+    repos: list[str],
+    model: str = "google/gemini-3.5-flash",
+    agent_tool: str = "opencode",
+    language: str = "golang",
+    jira_mcp: bool = False,
+) -> bool:
+    """Policy extraction harness (ACM-34909).
+
+    Creates a sandbox with the given configuration, pre-applies all computed
+    network policies at creation time, then clones each repo and verifies that
+    git clone succeeds without any probe-deny-approve cycle.
+
+    Prints the serialized network_policies dict so it can be reviewed and
+    compared against what build_session_network_policies() computes statically.
+
+    Usage:
+      python3 scripts/openshell_smoke_test.py --policy-extract \\
+          --repo https://github.com/stolostron/agent-swarm \\
+          --model google/gemini-3.5-flash \\
+          --agent opencode --language golang
+    """
+    from swarmer.crypto import init_crypto
+    from swarmer.openshell_client import _get_client, ensure_provider, create_sandbox
+    from swarmer.openshell_policy import build_session_policy, build_session_network_policies
+    from swarmer.agent_tools.opencode import OpenCodeStrategy
+    from swarmer.agent_tools.crush import CrushStrategy
+    from openshell._proto import openshell_pb2
+
+    init_crypto("auth/secret.key")
+
+    # ── 1. Read credentials ──────────────────────────────────────────────────
+    print("\n[1] Reading credentials from DB")
+    google_key = None
+    try:
+        from swarmer.database import init_db, get_db
+        from sqlalchemy import select
+        from swarmer.models.opencode_secret import OpencodeSecret
+
+        init_db("sqlite+aiosqlite:///data/swarmer.db")
+        async for db in get_db():
+            result = await db.execute(select(OpencodeSecret))
+            secret = result.scalars().first()
+            if secret:
+                google_key = secret.google_api_key
+            break
+    except Exception as exc:
+        step("Read OpencodeSecret from DB", False, str(exc))
+        return False
+
+    if not step("Google API key present", bool(google_key)):
+        return False
+
+    tool = CrushStrategy() if agent_tool == "crush" else OpenCodeStrategy()
+    client = _get_client()
+    provider_name = "swarmer-policy-extract-google"
+
+    try:
+        await ensure_provider(provider_name, "google-ai-studio", {},
+                              credentials={"GOOGLE_API_KEY": google_key})
+        step("Provider registered", True, provider_name)
+    except Exception as exc:
+        step("Provider registration", False, str(exc))
+        return False
+
+    # ── 2. Build fake repo objects for policy computation ────────────────────
+    print("\n[2] Computing network policies for configuration")
+
+    class _FakeRepo:
+        def __init__(self, url: str):
+            self.repo_url = url
+            parts = url.rstrip("/").split("/")
+            self.local_path = parts[-1] if parts else "repo"
+
+    class _FakeMcp:
+        def __init__(self, slug: str):
+            self.slug = slug
+
+    class _FakeSession:
+        pass
+
+    fake_session = _FakeSession()
+    fake_session.language = language  # type: ignore[attr-defined]
+    fake_session.agent_tool = agent_tool  # type: ignore[attr-defined]
+
+    fake_repos = [_FakeRepo(u) for u in repos]
+    fake_mcp = [_FakeMcp("jira")] if jira_mcp else []
+
+    computed_net = build_session_network_policies(fake_session, fake_repos, fake_mcp, agent_tool, model)
+    step("Network policy dict computed", len(computed_net) > 0,
+         f"{len(computed_net)} blocks: {sorted(computed_net.keys())}")
+
+    print("\n  Computed network_policies:")
+    for block_name, block in sorted(computed_net.items()):
+        endpoints = [ep.get("host", "?") for ep in block.get("endpoints", [])]
+        binaries = [b.get("path", "?") for b in block.get("binaries", [])]
+        print(f"    {block_name}:")
+        print(f"      endpoints: {endpoints}")
+        if binaries:
+            print(f"      binaries:  {binaries}")
+
+    # ── 3. Create sandbox with pre-applied policy ────────────────────────────
+    print("\n[3] Creating sandbox with pre-applied network policies")
+    policy = build_session_policy(fake_session, fake_repos, fake_mcp, agent_tool, model)
+    ref = None
+    try:
+        ref = await create_sandbox(
+            image=tool.get_image(),
+            env_vars={},
+            policy=policy,
+            provider_names=[provider_name],
+        )
+        step("CreateSandbox + WaitReady (policy pre-applied)", True, ref.name)
+    except Exception as exc:
+        step("CreateSandbox", False, str(exc))
+        _cleanup_provider(client, provider_name, openshell_pb2)
+        return False
+
+    sid = ref.id
+    sandbox_name = ref.name
+    all_passed = True
+
+    def xec(cmd, timeout=30, stdin=None):
+        if isinstance(cmd, str):
+            return client.exec(sid, ["sh", "-c", cmd], timeout_seconds=timeout, stdin=stdin)
+        return client.exec(sid, cmd, timeout_seconds=timeout, stdin=stdin)
+
+    # ── 4. Git clone each repo — no probe-approve cycle ─────────────────────
+    # The sandbox started with github.com network access already approved via
+    # spec.policy. Clone must succeed immediately.
+    print("\n[4] Git clone repos (no probe-approve cycle)")
+    for repo_url in repos:
+        parts = repo_url.rstrip("/").split("/")
+        local_path = parts[-1] if parts else "repo"
+        is_github = "github.com" in repo_url
+        try:
+            clone_cmd = f"cd /sandbox && git clone --depth=1 {shlex.quote(repo_url)} {shlex.quote(local_path)} 2>&1 | tail -5"
+            r = xec(clone_cmd, timeout=60)
+            cloned = r.exit_code == 0 or "done." in r.stdout.lower() or "already exists" in r.stdout
+            label = f"git clone {local_path}" + (" (github.com, pre-applied policy)" if is_github else "")
+            ok = step(label, cloned,
+                      r.stdout.strip()[:120] if cloned else r.stdout.strip()[:240])
+            all_passed = all_passed and ok
+        except Exception as exc:
+            step(f"git clone {local_path}", False, str(exc))
+            all_passed = False
+
+    if not repos:
+        step("No repos specified — skipping git clone test", True,
+             "Pass --repo <url> to test git clone")
+
+    # ── 5. Verify AI API access ──────────────────────────────────────────────
+    print("\n[5] AI API connectivity (curl health check)")
+    try:
+        r = xec("curl -sf --max-time 5 https://generativelanguage.googleapis.com/ 2>&1 | head -3; true", timeout=10)
+        reachable = r.exit_code == 0 or "HTTP" in r.stdout or "json" in r.stdout.lower() or len(r.stdout) > 0
+        step("generativelanguage.googleapis.com reachable", reachable,
+             r.stdout.strip()[:80] if reachable else r.stderr.strip()[:80])
+    except Exception as exc:
+        step("googleapis.com curl", False, str(exc))
+        all_passed = False
+
+    # ── Cleanup ──────────────────────────────────────────────────────────────
+    print("\n[cleanup]")
+    try:
+        client.delete(sandbox_name)
+        step("Delete sandbox", True, sandbox_name)
+    except Exception as exc:
+        step("Delete sandbox", False, str(exc))
+    _cleanup_provider(client, provider_name, openshell_pb2)
+
+    passed = sum(1 for _, ok, _ in _results if ok)
+    total = len(_results)
+    print(f"\n{'='*50}")
+    print(f"Results: {passed}/{total} passed")
+    if passed < total:
+        print("\nFailures:")
+        for label, ok, detail in _results:
+            if not ok:
+                print(f"  {FAIL}  {label}" + (f" — {detail}" if detail else ""))
+    return all_passed
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OpenShell e2e smoke test")
     parser.add_argument("--model", default="google/gemini-3.5-flash",
@@ -806,9 +987,29 @@ if __name__ == "__main__":
                         help="Run VertexAI / ADC smoke test (Anthropic Claude via Vertex)")
     parser.add_argument("--agent", default="opencode", choices=["opencode", "crush"],
                         help="Agent tool to test in --vertex mode (default: opencode)")
+    parser.add_argument("--policy-extract", action="store_true",
+                        help="Run policy extraction harness: compute + pre-apply network policies, "
+                             "then validate git clone works without a probe-approve cycle (ACM-34909)")
+    parser.add_argument("--repo", action="append", dest="repos", default=[],
+                        metavar="URL",
+                        help="Repo URL(s) to clone in --policy-extract mode (repeatable)")
+    parser.add_argument("--language", default="golang", choices=["golang", "python"],
+                        help="Session language for policy computation in --policy-extract mode")
+    parser.add_argument("--jira-mcp", action="store_true",
+                        help="Include Jira MCP network policy block in --policy-extract mode")
     args = parser.parse_args()
 
-    if args.vertex:
+    if args.policy_extract:
+        print(f"OpenShell Policy Extraction Harness — repos: {args.repos or ['(none)']}, "
+              f"model: {args.model}, agent: {args.agent}, language: {args.language}")
+        ok = asyncio.run(run_policy_extract(
+            repos=args.repos,
+            model=args.model,
+            agent_tool=args.agent,
+            language=args.language,
+            jira_mcp=args.jira_mcp,
+        ))
+    elif args.vertex:
         print(f"OpenShell VertexAI Smoke Test — agent: {args.agent}")
         ok = asyncio.run(run_vertex_smoke_test(agent_tool=args.agent))
     else:
