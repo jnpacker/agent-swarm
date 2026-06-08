@@ -3,6 +3,7 @@ Tests for swarmer.openshell_policy.build_session_policy().
 
 Validates that build_session_policy() returns a SandboxPolicy proto with:
   - Required structural sections (version, filesystem, network_policies)
+  - network_policies included directly in the proto (ACM-34909: pre-applied at creation time)
   - Per-repo GitHub git + API blocks with scoped paths
   - Conditional Jira MCP block (present when Jira MCP enabled, absent otherwise)
   - Conditional Go development block (proxy.golang.org etc.)
@@ -103,6 +104,41 @@ def test_policy_has_network_policies_section():
     assert len(net) > 0
 
 
+def test_build_session_policy_includes_network_policies_in_proto():
+    """build_session_policy() must include network_policies in the proto (ACM-34909).
+
+    Network policies are pre-applied at sandbox creation so git clone and AI API
+    calls work immediately without a probe-deny-approve cycle.
+    """
+    repo = _make_repo(org="stolostron", name="agent-swarm")
+    session = _make_session(language="golang")
+    result = build_session_policy(session, repos=[repo], mcp_servers=[], agent_tool="opencode", model=_MODEL)
+    # network_policies map must be populated in the proto
+    assert len(result.network_policies) > 0, "network_policies must be set in the SandboxPolicy proto"
+    # At least the agent-api block should be present
+    assert "agent_api" in result.network_policies, "agent_api block must be in proto network_policies"
+    # Per-repo github blocks must also appear
+    net_keys = list(result.network_policies.keys())
+    assert any(k.startswith("github_git_") for k in net_keys), f"github_git_ block missing from proto: {net_keys}"
+    assert any(k.startswith("github_api_") for k in net_keys), f"github_api_ block missing from proto: {net_keys}"
+
+
+def test_build_session_policy_network_policies_match_build_session_network_policies():
+    """build_session_policy() proto network_policies must match build_session_network_policies() dict."""
+    repo = _make_repo()
+    session = _make_session(language="python")
+    mcp = _make_mcp("jira")
+
+    expected_net = build_session_network_policies(session, [repo], [mcp], "opencode", _MODEL)
+    proto = build_session_policy(session, repos=[repo], mcp_servers=[mcp], agent_tool="opencode", model=_MODEL)
+
+    proto_keys = set(proto.network_policies.keys())
+    expected_keys = set(expected_net.keys())
+    assert proto_keys == expected_keys, (
+        f"Proto network_policies keys {proto_keys} != computed keys {expected_keys}"
+    )
+
+
 def test_policy_sandbox_uses_sandbox_path():
     result = build_session_policy(_make_session(), repos=[], mcp_servers=[], agent_tool="opencode", model="google-vertex-anthropic/claude-sonnet-4-6")
     assert "/sandbox" in result.filesystem.read_write
@@ -132,6 +168,74 @@ def test_github_blocks_scoped_to_repo_path():
     net = _bnet(repos=[repo])
     assert "github_git_stolostron_agent_swarm" in net
     assert "github_api_stolostron_agent_swarm" in net
+
+
+def test_github_git_block_includes_objects_cdn():
+    """git clone requires objects.githubusercontent.com for pack-file/blob data (ACM-34909)."""
+    repo = _make_repo(org="stolostron", name="agent-swarm")
+    net = _bnet(repos=[repo])
+    git_block = net["github_git_stolostron_agent_swarm"]
+    hosts = [ep.get("host", "") for ep in git_block.get("endpoints", [])]
+    assert "objects.githubusercontent.com" in hosts, (
+        f"objects.githubusercontent.com missing from git block endpoints: {hosts}"
+    )
+
+
+def test_github_git_block_includes_codeload():
+    """git clone --depth=1 uses codeload.github.com for shallow pack data (ACM-34909)."""
+    repo = _make_repo(org="stolostron", name="agent-swarm")
+    net = _bnet(repos=[repo])
+    git_block = net["github_git_stolostron_agent_swarm"]
+    hosts = [ep.get("host", "") for ep in git_block.get("endpoints", [])]
+    assert "codeload.github.com" in hosts, (
+        f"codeload.github.com missing from git block endpoints: {hosts}"
+    )
+
+
+def test_github_git_block_includes_both_git_binary_paths():
+    """Both /usr/local/bin/git and /usr/bin/git must be in binaries (OPA matches resolved path)."""
+    repo = _make_repo(org="stolostron", name="agent-swarm")
+    net = _bnet(repos=[repo])
+    git_block = net["github_git_stolostron_agent_swarm"]
+    binaries = [b.get("path", "") for b in git_block.get("binaries", [])]
+    assert "/usr/local/bin/git" in binaries, f"/usr/local/bin/git missing from binaries: {binaries}"
+    assert "/usr/bin/git" in binaries, f"/usr/bin/git missing from binaries: {binaries}"
+
+
+def test_all_binary_entries_have_harness_true():
+    """Every binary entry in every network policy block must have harness=True.
+
+    OPA resolves binary paths via /proc/{pid}/root symlink traversal, which
+    fails inside sandbox containers ('Cannot access container filesystem for
+    symlink resolution'). harness=True tells OPA to use process harness matching
+    instead, which is what the supervisor uses when generating draft chunks.
+    Without this, all binary-scoped rules are silently inert (ACM-34909).
+    """
+    repo = _make_repo(org="stolostron", name="agent-swarm")
+    session = _make_session(language="golang")
+    mcp = _make_mcp("jira")
+    net = build_session_network_policies(session, [repo], [mcp], "opencode", _MODEL)
+
+    for block_name, block in net.items():
+        for binary in block.get("binaries", []):
+            path = binary.get("path", "?")
+            harness = binary.get("harness", False)
+            assert harness is True, (
+                f"Block '{block_name}' binary '{path}' has harness={harness!r}, expected True. "
+                f"OPA symlink resolution fails in sandbox containers — harness=True is required."
+            )
+
+
+def test_crush_agent_api_binary_has_harness_true():
+    """Crush binary in agent_api block must also have harness=True."""
+    net = _bnet(agent_tool="crush", model="vertexai/claude-sonnet-4-6")
+    agent_block = net.get("agent_api", {})
+    for binary in agent_block.get("binaries", []):
+        path = binary.get("path", "?")
+        harness = binary.get("harness", False)
+        assert harness is True, (
+            f"agent_api binary '{path}' for crush has harness={harness!r}, expected True."
+        )
 
 
 def test_two_repos_generate_two_github_block_pairs():
