@@ -26,7 +26,7 @@ class OpenCodeStrategy(AgentToolStrategy):
     def get_config_map_name(self) -> str:
         return "opencode-config"
 
-    def build_config_data(self, secret=None, mcp_servers=None, use_inference_local: bool = False) -> dict[str, str]:
+    def build_config_data(self, secret=None, mcp_servers=None, use_inference_local: bool = False, model: str = "") -> dict[str, str]:
         config: dict = {
             "$schema": "https://opencode.ai/config.json",
             "enabled_providers": ["google", "google-vertex-anthropic", "anthropic"],

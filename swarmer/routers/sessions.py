@@ -939,6 +939,42 @@ async def _do_launch_openshell(
 
         except Exception:
             log.warning("Vertex AI provider setup failed (non-fatal)", exc_info=True)
+
+    elif oc_secret and oc_secret.has_adc and oc_secret.has_vertex and model.startswith("vertex-anthropic/"):
+        # Crush: route Vertex Anthropic models through inference.local — same approach as OpenCode.
+        # Register the google-vertex-ai provider on the gateway and set up cluster inference
+        # routes so requests to https://inference.local/v1 are proxied through the
+        # gateway's VertexAI credentials.  Do NOT attach the provider to the sandbox;
+        # Crush uses the anthropic provider type (not openai-compat) and reads
+        # ANTHROPIC_BASE_URL from the environment to reach inference.local.
+        pname = f"swarmer-ws-{ws_id}-google-vertex-ai"
+        _project = oc_secret.google_cloud_project or ""
+        _location = oc_secret.vertex_location or ""
+        try:
+            await openshell_client.create_vertex_provider(
+                pname, project=_project, location=_location,
+            )
+            await openshell_client.configure_vertex_provider(
+                pname,
+                adc_json=oc_secret.application_default_credentials,
+                project=_project,
+                location=_location,
+            )
+            await _wait_vertex_provider_ready(pname)
+            # Register all Claude models that Crush may use so the gateway routes them.
+            _bare_model = _extract_vertex_model(model)
+            _all_claude_models = {"claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"}
+            for _mid in _all_claude_models:
+                await openshell_client.set_cluster_inference(
+                    provider_name=pname,
+                    model_id=_mid,
+                    no_verify=True,
+                )
+            # Point Crush at inference.local and rewrite model to standard Anthropic format.
+            inference_env["ANTHROPIC_BASE_URL"] = "https://inference.local/v1"
+            model = f"anthropic/{_bare_model}"
+        except Exception:
+            log.warning("Vertex AI provider setup failed for Crush (non-fatal)", exc_info=True)
     if session.github_pat:
         pname = f"swarmer-ws-{ws_id}-github"
         pat_token = getattr(session.github_pat, "token", None) or getattr(session.github_pat, "pat", "")
@@ -1099,6 +1135,7 @@ async def _setup_openshell_sandbox(
         _config_data = _tool.build_config_data(
             mcp_servers=_mcp_list,
             use_inference_local=_is_inference_local,
+            model=model,
         )
         _config_json = _config_data.get(f"{tool_name}.json", "{}")
         await openshell_client.write_agent_config(

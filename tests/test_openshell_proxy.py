@@ -1099,3 +1099,46 @@ class TestE2eSmokeProxy:
         )
         assert phase == "succeeded", f"Gemini prompt failed: {last_output}"
         assert last_output.strip(), "Expected non-empty output from Gemini prompt session"
+
+    @pytest.mark.asyncio
+    async def test_smoke_vertex_anthropic_crush(self):
+        """Vertex AI Anthropic prompt session via Crush: completes with non-empty output.
+
+        Verifies the full inference.local routing path for Crush + vertex-anthropic models:
+        - swarmer creates a google-vertex-ai gateway provider and registers cluster inference routes
+        - ANTHROPIC_BASE_URL=https://inference.local/v1 is injected into the sandbox env
+        - model is rewritten from vertex-anthropic/<id> → anthropic/<id>
+        - Crush reaches Claude via the gateway proxy and returns a response
+
+        Pre-requisites:
+          1. Create a Crush prompt session in the UI with model "vertex-anthropic/claude-sonnet-4-5"
+             and prompt "Reply with exactly one word: ready".
+          2. Wait for it to complete (phase: succeeded or failed).
+          3. Note the workspace ID and session ID.
+
+        To run:
+          SWARMER_E2E=1 SWARMER_E2E_WS_ID=1 SWARMER_E2E_VERTEX_CRUSH_SID=<sid> \\
+          pytest tests/test_openshell_proxy.py -k smoke_vertex_anthropic_crush -v -s
+        """
+        import httpx
+        ws_id = self._ws_id
+        sid_val = _os.environ.get("SWARMER_E2E_VERTEX_CRUSH_SID")
+        if not sid_val:
+            pytest.skip("SWARMER_E2E_VERTEX_CRUSH_SID not set")
+        sid = int(sid_val)
+
+        async with httpx.AsyncClient(base_url=_E2E_BASE, follow_redirects=True) as hc:
+            resp = await hc.get(f"/api/v1/workspaces/{ws_id}/sessions/{sid}")
+        assert resp.status_code == 200
+        data = resp.json()
+        phase = data.get("phase", "")
+        last_output = data.get("last_output", "") or ""
+
+        print(f"\n--- Crush vertex-anthropic session phase: {phase} ---")
+        print(f"--- last_output: {last_output[:200]} ---")
+
+        assert phase in ("succeeded", "failed"), (
+            f"Session not complete (phase={phase}). Ensure it has finished running."
+        )
+        assert phase == "succeeded", f"Crush vertex-anthropic prompt failed: {last_output}"
+        assert last_output.strip(), "Expected non-empty output from Crush vertex-anthropic prompt session"

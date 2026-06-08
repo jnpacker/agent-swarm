@@ -10,22 +10,30 @@ def _b64(value: str) -> str:
     return base64.b64encode(value.encode()).decode()
 
 
-_HAIKU_BY_PROVIDER = {
-    "vertexai": "claude-haiku-4-5-20251001",
-    "anthropic": "claude-haiku-3.5",
-}
-
-
 def _derive_small_model(model: str) -> str | None:
+    """Derive a cheaper/faster companion model for the given large model.
+
+    Rules (applied in order):
+    - opus   → sonnet (same provider)
+    - sonnet → haiku  (same provider, provider-specific ID)
+    - gemini *-pro → *-flash (same provider)
+    """
     if "/" not in model:
         return None
     provider_id, model_id = model.split("/", 1)
 
-    if provider_id in {"vertexai", "anthropic"} and "opus" in model_id:
-        return f"{provider_id}/claude-sonnet-4-6"
-    if provider_id in {"vertexai", "anthropic"} and "sonnet" in model_id:
-        haiku_id = _HAIKU_BY_PROVIDER.get(provider_id)
-        return f"{provider_id}/{haiku_id}" if haiku_id else None
+    _HAIKU_ID: dict[str, str] = {
+        "vertexai": "claude-haiku-4-5-20251001",
+        "vertex-anthropic": "claude-haiku-4-5",
+        "anthropic": "claude-haiku-3.5",
+    }
+
+    if provider_id in {"vertexai", "vertex-anthropic", "anthropic"}:
+        if "opus" in model_id:
+            return f"{provider_id}/claude-sonnet-4-6"
+        if "sonnet" in model_id:
+            haiku_id = _HAIKU_ID.get(provider_id)
+            return f"{provider_id}/{haiku_id}" if haiku_id else None
     if provider_id in {"vertexai", "gemini"} and "gemini" in model_id and "pro" in model_id:
         return f"{provider_id}/{model_id.replace('pro', 'flash')}"
     return None
@@ -53,33 +61,56 @@ class CrushStrategy(AgentToolStrategy):
     def get_config_map_name(self) -> str:
         return "crush-config"
 
-    def build_config_data(self, secret=None, mcp_servers=None, use_inference_local: bool = False) -> dict[str, str]:
+    def build_config_data(self, secret=None, mcp_servers=None, use_inference_local: bool = False, model: str = "") -> dict[str, str]:
         # Crush requires explicit provider entries in the config — it does not
         # auto-detect from env vars alone.  The value is a map[string]ProviderConfig
-        # (keyed by provider ID), NOT an array.  Use $VAR references so values are
-        # resolved at runtime from whatever the sandbox environment provides
-        # (injected by the OpenShell provider mechanism or K8s secret env vars).
-        providers = {
-            "anthropic": {
-                "name": "Anthropic",
-                "type": "anthropic",
-                "api_key": "$ANTHROPIC_API_KEY",
-            },
-            "gemini": {
-                "name": "Google Gemini",
-                "type": "gemini",
-                "api_key": "$GOOGLE_API_KEY",
-            },
-            "openai": {
-                "name": "OpenAI",
-                "type": "openai",
-                "api_key": "$OPENAI_API_KEY",
-            },
-            "vertexai": {
-                "name": "Google Vertex AI",
-                "type": "vertexai",
-            },
-        }
+        # (keyed by provider ID), NOT an array.
+        #
+        # When routing through inference.local (Vertex Anthropic models), only the
+        # anthropic provider is needed.  A dummy api_key is supplied — inference.local
+        # strips it and substitutes the real Vertex AI token, exactly as OpenCode does.
+        # All other providers are omitted so Crush doesn't attempt to initialise
+        # credentials it doesn't have.
+        if use_inference_local:
+            providers: dict = {
+                "anthropic": {
+                    "name": "Anthropic",
+                    "type": "anthropic",
+                    "api_key": "sk-ant-inference-local-proxy",
+                    "base_url": "https://inference.local",
+                },
+            }
+        else:
+            provider_prefix = model.split("/", 1)[0] if "/" in model else ""
+
+            _ALL_PROVIDERS: dict[str, dict] = {
+                "anthropic": {
+                    "name": "Anthropic",
+                    "type": "anthropic",
+                    "api_key": "$ANTHROPIC_API_KEY",
+                },
+                "gemini": {
+                    "name": "Google Gemini",
+                    "type": "gemini",
+                    "api_key": "$GOOGLE_API_KEY",
+                },
+                "openai": {
+                    "name": "OpenAI",
+                    "type": "openai",
+                    "api_key": "$OPENAI_API_KEY",
+                },
+                "vertexai": {
+                    "name": "Google Vertex AI",
+                    "type": "vertexai",
+                },
+            }
+
+            if provider_prefix and provider_prefix in _ALL_PROVIDERS:
+                # Only include the provider matching the chosen model.
+                providers = {provider_prefix: _ALL_PROVIDERS[provider_prefix]}
+            else:
+                # Unknown/no prefix — include all as a fallback.
+                providers = dict(_ALL_PROVIDERS)
 
         config = {
             "$schema": "https://charm.land/crush.json",
@@ -180,23 +211,23 @@ class CrushStrategy(AgentToolStrategy):
         return [client.V1ContainerPort(container_port=port, name="crush")]
 
     def is_valid_model(self, model: str) -> bool:
-        return model.startswith(("vertexai/", "anthropic/", "gemini/", "openai/"))
+        return model.startswith(("vertexai/", "vertex-anthropic/", "anthropic/", "gemini/", "openai/"))
 
     def get_model_options(self, secret=None) -> list[dict]:
         options = []
         if secret and secret.has_adc:
             options.extend([
-                {"value": "vertexai/claude-sonnet-4-6", "label": "Claude Sonnet 4.6 (balanced)", "group": "Vertex AI — Claude"},
-                {"value": "vertexai/claude-opus-4-6", "label": "Claude Opus 4.6 (most capable)", "group": "Vertex AI — Claude"},
-                {"value": "vertexai/claude-haiku-4-5-20251001", "label": "Claude Haiku 4.5 (fast)", "group": "Vertex AI — Claude"},
+                {"value": "vertex-anthropic/claude-sonnet-4-6", "label": "Claude Sonnet 4.6 (balanced)", "group": "Vertex AI — Anthropic"},
+                {"value": "vertex-anthropic/claude-opus-4-6", "label": "Claude Opus 4.6 (most capable)", "group": "Vertex AI — Anthropic"},
+                {"value": "vertex-anthropic/claude-haiku-4-5", "label": "Claude Haiku 4.5 (fast)", "group": "Vertex AI — Anthropic"},
                 {"value": "vertexai/gemini-3.5-pro", "label": "Gemini 3.5 Pro", "group": "Vertex AI — Gemini"},
                 {"value": "vertexai/gemini-3.5-flash", "label": "Gemini 3.5 Flash (fast)", "group": "Vertex AI — Gemini"},
             ])
         elif secret and getattr(secret, "has_vertex", False):
             options.extend([
-                {"value": "vertexai/claude-sonnet-4-6", "label": "Claude Sonnet 4.6 (balanced)", "group": "Vertex AI — Claude"},
-                {"value": "vertexai/claude-opus-4-6", "label": "Claude Opus 4.6 (most capable)", "group": "Vertex AI — Claude"},
-                {"value": "vertexai/claude-haiku-4-5-20251001", "label": "Claude Haiku 4.5 (fast)", "group": "Vertex AI — Claude"},
+                {"value": "vertex-anthropic/claude-sonnet-4-6", "label": "Claude Sonnet 4.6 (balanced)", "group": "Vertex AI — Anthropic"},
+                {"value": "vertex-anthropic/claude-opus-4-6", "label": "Claude Opus 4.6 (most capable)", "group": "Vertex AI — Anthropic"},
+                {"value": "vertex-anthropic/claude-haiku-4-5", "label": "Claude Haiku 4.5 (fast)", "group": "Vertex AI — Anthropic"},
                 {"value": "vertexai/gemini-3.5-pro", "label": "Gemini 3.5 Pro", "group": "Vertex AI — Gemini"},
                 {"value": "vertexai/gemini-3.5-flash", "label": "Gemini 3.5 Flash (fast)", "group": "Vertex AI — Gemini"},
             ])
@@ -220,7 +251,7 @@ class CrushStrategy(AgentToolStrategy):
 
     def get_default_model(self, has_adc: bool, has_gemini: bool) -> str:
         if has_adc:
-            return "vertexai/claude-sonnet-4-6"
+            return "vertex-anthropic/claude-sonnet-4-6"
         if has_gemini:
             return "gemini/gemini-3.5-flash"
         return ""
@@ -300,35 +331,12 @@ class CrushStrategy(AgentToolStrategy):
         return data
 
     def build_mcp_config_cmd(self, mcp_servers) -> str:
-        config = {
-            "$schema": "https://charm.land/crush.json",
-            "options": {
-                "disable_metrics": True,
-                "disable_notifications": True,
-                "data_directory": ".crush",
-                "auto_lsp": True,
-            },
-            "lsp": {
-                "go": {"command": "gopls"},
-                "python": {"command": "pyright-langserver", "args": ["--stdio"]},
-            },
-        }
-        if mcp_servers:
-            mcp_config = {}
-            for srv in mcp_servers:
-                mcp_config[srv.slug] = {
-                    "type": "stdio",
-                    "command": "jira-mcp-server",
-                    "env": {
-                        "JIRA_SERVER_URL": "$JIRA_SERVER_URL",
-                        "JIRA_ACCESS_TOKEN": "$JIRA_ACCESS_TOKEN",
-                        "JIRA_EMAIL": "$JIRA_EMAIL",
-                    },
-                }
-            config["mcp"] = mcp_config
-        config_json = json.dumps(config)
+        config_data = self.build_config_data(mcp_servers=mcp_servers)
+        config_json = config_data["crush.json"]
         config_path = self.get_config_mount_path()
         return (
             f"printf '%s' {shlex.quote(config_json)} "
             f"> {config_path}/crush.json && "
         )
+
+

@@ -2050,3 +2050,186 @@ class TestVertexOpenshellSetup:
         passed_env_vars = mock_create_sandbox.call_args.kwargs.get("env_vars", {})
         assert passed_env_vars.get("EXISTING_ENV") == "123"
         assert passed_env_vars.get("ANTHROPIC_BASE_URL") == "https://inference.local/v1"
+
+
+# ---------------------------------------------------------------------------
+# Crush vertex-anthropic provider attachment tests
+# ---------------------------------------------------------------------------
+
+async def _launch_crush_with_secret(client, ws_id, session_id, oc_secret, model):
+    """Like _launch_with_secret but for Crush sessions with a specific model.
+
+    Returns (mock_create_vertex, mock_configure_vertex, mock_setup) so callers
+    can assert provider calls and inspect provider_names passed to setup.
+    """
+    from swarmer.routers.sessions import _do_launch_openshell
+    from swarmer.models.session import Session as _Session
+    from swarmer.models.workspace import Workspace as _Workspace
+
+    fake_session = MagicMock(spec=_Session)
+    fake_session.id = session_id
+    fake_session.workspace_id = ws_id
+    fake_session.agent_tool = "crush"
+    fake_session.model = model
+    fake_session.mode = "prompt"
+    fake_session.working_branch = None
+    fake_session.repos = []
+    fake_session.github_pat = None
+    fake_session.instruction_prompt = ""
+
+    fake_ws = MagicMock(spec=_Workspace)
+    fake_ws.id = ws_id
+
+    fake_db = AsyncMock()
+
+    mock_create_vertex = AsyncMock()
+    mock_configure_vertex = AsyncMock()
+    mock_setup = AsyncMock()
+
+    with patch("swarmer.openshell_client.create_provider", new=AsyncMock(return_value={})), \
+         patch("swarmer.openshell_client.ensure_provider", new=AsyncMock()), \
+         patch("swarmer.openshell_client.create_vertex_provider", mock_create_vertex), \
+         patch("swarmer.openshell_client.configure_vertex_provider", mock_configure_vertex), \
+         patch("swarmer.openshell_client.set_cluster_inference", new=AsyncMock()), \
+         patch("swarmer.routers.sessions._wait_vertex_provider_ready", new=AsyncMock()), \
+         patch("swarmer.openshell_client.configure_provider_credential", new=AsyncMock()), \
+         patch("swarmer.openshell_client.attach_sandbox_provider", new=AsyncMock()), \
+         patch("swarmer.openshell_policy.build_session_policy", return_value="version: 1\n"), \
+         patch("swarmer.routers.sessions._setup_openshell_sandbox", mock_setup):
+        has_adc = oc_secret.has_adc if oc_secret else False
+        has_gemini = bool(oc_secret and oc_secret.google_api_key)
+        await _do_launch_openshell(
+            session=fake_session,
+            ws=fake_ws,
+            db=fake_db,
+            suffix="test",
+            oc_secret=oc_secret,
+            has_adc=has_adc,
+            has_gemini=has_gemini,
+            mcp_servers=None,
+            resolved_prompt="test prompt",
+        )
+
+    return mock_create_vertex, mock_configure_vertex, mock_setup
+
+
+class TestCrushVertexAnthropicProviderAttachment:
+    """Verify that the google-vertex-ai provider is created for Crush vertex-anthropic sessions.
+
+    Crush now uses the same inference.local routing approach as OpenCode:
+    - google-vertex-ai provider is created and configured on the gateway
+    - set_cluster_inference registers Claude model routes through inference.local
+    - The provider is NOT attached to the sandbox (no env var injection needed)
+    - ANTHROPIC_BASE_URL=https://inference.local/v1 is set in inference_env
+    - model is rewritten from vertex-anthropic/<id> → anthropic/<id>
+    """
+
+    @pytest.mark.asyncio
+    async def test_crush_vertex_provider_created(self, client):
+        """create_vertex_provider is called for Crush vertex-anthropic sessions."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        fake_secret = _fake_oc_secret(has_adc=True, has_vertex=True)
+        mock_create, _, _ = await _launch_crush_with_secret(
+            client, ws["id"], s["id"], fake_secret,
+            model="vertex-anthropic/claude-sonnet-4-5",
+        )
+
+        mock_create.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_crush_vertex_provider_configured_with_adc(self, client):
+        """configure_vertex_provider is called with correct project/location."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        fake_secret = _fake_oc_secret(has_adc=True, has_vertex=True)
+        _, mock_configure, _ = await _launch_crush_with_secret(
+            client, ws["id"], s["id"], fake_secret,
+            model="vertex-anthropic/claude-sonnet-4-5",
+        )
+
+        mock_configure.assert_called_once()
+        kwargs = mock_configure.call_args.kwargs
+        assert kwargs.get("project") == "my-project"
+        assert kwargs.get("location") == "us-central1"
+
+    @pytest.mark.asyncio
+    async def test_crush_vertex_provider_not_in_sandbox_providers(self, client):
+        """The vertex provider is NOT appended to provider_names for Crush.
+
+        Crush now routes through inference.local (same as OpenCode).  The gateway
+        provider is registered for inference routing but not attached to the sandbox,
+        so GOOGLE_VERTEX_AI_TOKEN / VERTEX_AI_PROJECT_ID / VERTEX_AI_REGION are NOT
+        injected as sandbox env vars — the model is rewritten to anthropic/<id> and
+        ANTHROPIC_BASE_URL points at inference.local instead.
+        """
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        fake_secret = _fake_oc_secret(has_adc=True, has_vertex=True)
+        _, _, mock_setup = await _launch_crush_with_secret(
+            client, ws["id"], s["id"], fake_secret,
+            model="vertex-anthropic/claude-sonnet-4-5",
+        )
+
+        mock_setup.assert_called_once()
+        provider_names = mock_setup.call_args.kwargs.get("provider_names", [])
+        # Vertex provider is NOT in the sandbox provider list (no env var injection)
+        assert not any("google-vertex-ai" in p for p in provider_names), (
+            f"google-vertex-ai should not be in provider_names, got: {provider_names}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_crush_vertex_uses_inference_local_rewrite(self, client):
+        """Crush rewrites model to anthropic/<id> and sets ANTHROPIC_BASE_URL for vertex-anthropic sessions."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        fake_secret = _fake_oc_secret(has_adc=True, has_vertex=True)
+        _, _, mock_setup = await _launch_crush_with_secret(
+            client, ws["id"], s["id"], fake_secret,
+            model="vertex-anthropic/claude-sonnet-4-5",
+        )
+
+        mock_setup.assert_called_once()
+        inference_env = mock_setup.call_args.kwargs.get("inference_env", {})
+        assert inference_env.get("ANTHROPIC_BASE_URL") == "https://inference.local/v1", (
+            f"Expected ANTHROPIC_BASE_URL=https://inference.local/v1, got: {inference_env}"
+        )
+
+        model_passed = mock_setup.call_args.kwargs.get("model", "")
+        assert model_passed.startswith("anthropic/"), (
+            f"Model should be rewritten to anthropic/<id>, got: {model_passed}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_crush_vertex_provider_not_created_without_adc(self, client):
+        """No vertex provider is created when ADC is absent for Crush sessions."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        fake_secret = _fake_oc_secret(has_adc=False, has_vertex=False)
+        mock_create, mock_configure, _ = await _launch_crush_with_secret(
+            client, ws["id"], s["id"], fake_secret,
+            model="vertex-anthropic/claude-sonnet-4-5",
+        )
+
+        mock_create.assert_not_called()
+        mock_configure.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_crush_non_vertex_model_no_provider(self, client):
+        """No vertex provider is created for Crush sessions using non-vertex models."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        fake_secret = _fake_oc_secret(has_adc=True, has_vertex=True, anthropic_api_key="key")
+        mock_create, mock_configure, _ = await _launch_crush_with_secret(
+            client, ws["id"], s["id"], fake_secret,
+            model="anthropic/claude-sonnet-4-6",
+        )
+
+        mock_create.assert_not_called()
+        mock_configure.assert_not_called()

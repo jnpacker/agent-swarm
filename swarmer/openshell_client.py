@@ -205,8 +205,8 @@ async def configure_vertex_provider(
     - authorized_user → OAUTH2_REFRESH_TOKEN (gateway exchanges refresh token)
 
     Also stores project/location as non-secret config on the provider so the
-    gateway injects them as env vars (GOOGLE_CLOUD_PROJECT, VERTEXAI_PROJECT,
-    VERTEX_LOCATION, VERTEXAI_LOCATION) alongside the access token.
+    gateway injects them as env vars (VERTEX_AI_PROJECT_ID, VERTEX_AI_REGION)
+    alongside the access token (GOOGLE_VERTEX_AI_TOKEN).
     """
     import json as _json
     from openshell._proto import openshell_pb2
@@ -688,6 +688,27 @@ except Exception as exc:
             return ""
 
     return await asyncio.to_thread(_do_read)
+
+
+async def get_sandbox_provider_environment(sandbox_name: str, client=None) -> dict[str, str]:
+    """Fetch the current provider-injected environment for a sandbox.
+
+    Returns a dict of env var names → values as currently injected by all
+    attached providers (including live short-lived tokens such as
+    GOOGLE_VERTEX_AI_TOKEN).  Call this just before exec to get a fresh token.
+    """
+    from openshell._proto import openshell_pb2
+
+    if client is None:
+        client = _get_client()
+    sid = await _sandbox_id(sandbox_name, client)
+
+    def _do_get(s=sid):
+        req = openshell_pb2.GetSandboxProviderEnvironmentRequest(sandbox_id=s)
+        return client._stub.GetSandboxProviderEnvironment(req, timeout=client._timeout)
+
+    resp = await asyncio.to_thread(_do_get)
+    return dict(resp.environment)
 
 
 async def exec_command(
