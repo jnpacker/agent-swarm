@@ -5,9 +5,29 @@ build_session_policy() assembles a complete OpenShell SandboxPolicy proto from
 composable blocks based on: repos attached, agent tool, model provider,
 Jira MCP enablement, and session language (golang/python).
 
+Network policies are included directly in the returned SandboxPolicy proto so
+the sandbox starts with all required network access pre-approved.  This avoids
+the fragile probe-deny-approve cycle that depended on a hardcoded sleep timer
+and was the root cause of intermittent git clone failures (ACM-34909).
+
+IMPORTANT — harness: True on all binary entries:
+  OPA resolves binary paths by traversing /proc/{pid}/root inside the sandbox
+  container.  This fails with "Cannot access container filesystem for symlink
+  resolution" for binaries that are installed at paths OPA cannot traverse.
+  Setting harness=True tells OPA to use its process harness for binary matching
+  instead of symlink resolution, which works reliably regardless of the binary's
+  installation path.  The supervisor generates harness=True automatically when it
+  creates draft chunks from denial analysis — we must match that behaviour in all
+  statically pre-set rules (confirmed by inspecting live sandbox draft chunk state).
+
 Returns a SandboxPolicy proto object that is set directly on SandboxSpec.policy.
 All filesystem paths use /sandbox/ — /workspace/ is never referenced.
 """
+
+
+def _bin(path: str) -> dict:
+    """Binary entry with harness=True so OPA uses process harness matching."""
+    return {"path": path, "harness": True}
 
 
 # ── Static base policy sections ───────────────────────────────────────────────
@@ -26,8 +46,9 @@ _GO_DEVELOPMENT_BLOCK = {
         {"host": "storage.googleapis.com", "port": 443},
     ],
     "binaries": [
-        {"path": "/usr/local/go/bin/go"},
-        {"path": "/usr/bin/git"},
+        _bin("/usr/local/go/bin/go"),
+        _bin("/usr/local/bin/git"),  # agent container image path (confirmed via OPA logs)
+        _bin("/usr/bin/git"),        # fallback for other base images
     ],
 }
 
@@ -38,8 +59,9 @@ _GOVULNCHECK_BLOCK = {
         {"host": "storage.googleapis.com", "port": 443},
     ],
     "binaries": [
-        {"path": "/usr/local/go/bin/govulncheck"},
-        {"path": "/home/node/go/bin/govulncheck"},
+        _bin("/usr/local/go/bin/govulncheck"),
+        _bin("/home/node/go/bin/govulncheck"),
+        _bin("/home/sandbox/go/bin/govulncheck"),  # sandbox user GOPATH variant
     ],
 }
 
@@ -51,10 +73,10 @@ _PYTHON_DEVELOPMENT_BLOCK = {
         {"host": "downloads.python.org", "port": 443},
     ],
     "binaries": [
-        {"path": "/usr/bin/pip"},
-        {"path": "/usr/local/bin/uv"},
-        {"path": "/sandbox/.venv/bin/pip"},
-        {"path": "/sandbox/.venv/bin/python*"},
+        _bin("/usr/bin/pip"),
+        _bin("/usr/local/bin/uv"),
+        _bin("/sandbox/.venv/bin/pip"),
+        _bin("/sandbox/.venv/bin/python*"),
     ],
 }
 
@@ -70,9 +92,9 @@ _JIRA_MCP_BLOCK = {
         }
     ],
     "binaries": [
-        {"path": "/usr/local/bin/jira-mcp-server"},
-        {"path": "/usr/bin/python3"},
-        {"path": "/sandbox/.venv/bin/python*"},
+        _bin("/usr/local/bin/jira-mcp-server"),
+        _bin("/usr/bin/python3"),
+        _bin("/sandbox/.venv/bin/python*"),
     ],
 }
 
@@ -97,22 +119,54 @@ def _repo_slug(repo) -> str:
 
 
 def _build_github_git_block(org: str, name: str) -> dict:
+    """Build the Landlock network policy block for git clone of a GitHub repo.
+
+    git clone over HTTPS touches three hosts:
+      - github.com:443                    — smart HTTP protocol (info/refs + upload-pack)
+      - objects.githubusercontent.com:443 — pack-file / blob CDN (actual object data)
+      - codeload.github.com:443           — shallow clone pack data (--depth=1 tarballs)
+
+    All three must be accessible to the git binary or the clone will fail partway
+    through even if the initial ref-discovery handshake succeeds (ACM-34909).
+
+    Both /usr/local/bin/git and /usr/bin/git are listed — the agent container image
+    installs git at /usr/local/bin/git, but some base images use /usr/bin/git.
+    OPA matches on the actual resolved binary path so both must be present.
+    """
     return {
         "name": f"github-git-{org}-{name}",
         "endpoints": [
             {
+                # Full access to github.com for git smart HTTP protocol.
+                # Path-scoped rules caused 403s because OPA enforces at the TLS CONNECT
+                # layer before git can send the HTTP request (ACM-34909).
                 "host": "github.com",
                 "port": 443,
                 "protocol": "rest",
                 "enforcement": "enforce",
-                "rules": [
-                    {"allow": {"method": "GET", "path": f"/{org}/{name}.git/info/refs*"}},
-                    {"allow": {"method": "POST", "path": f"/{org}/{name}.git/git-upload-pack"}},
-                    {"allow": {"method": "POST", "path": f"/{org}/{name}.git/git-receive-pack"}},
-                ],
-            }
+                "access": "full",
+            },
+            {
+                # Pack-file object data served from GitHub's CDN — needed for all clones.
+                "host": "objects.githubusercontent.com",
+                "port": 443,
+                "protocol": "rest",
+                "enforcement": "enforce",
+                "access": "full",
+            },
+            {
+                # Shallow clone (--depth=1) pack data and tarball downloads.
+                "host": "codeload.github.com",
+                "port": 443,
+                "protocol": "rest",
+                "enforcement": "enforce",
+                "access": "full",
+            },
         ],
-        "binaries": [{"path": "/usr/bin/git"}],
+        "binaries": [
+            _bin("/usr/local/bin/git"),  # agent container image path (confirmed via OPA logs)
+            _bin("/usr/bin/git"),         # fallback for other base images
+        ],
     }
 
 
@@ -130,8 +184,8 @@ def _build_github_api_block(org: str, name: str) -> dict:
             }
         ],
         "binaries": [
-            {"path": "/usr/bin/gh"},
-            {"path": "/usr/bin/curl"},
+            _bin("/usr/bin/gh"),
+            _bin("/usr/bin/curl"),
         ],
     }
 
@@ -159,7 +213,7 @@ def _build_agent_api_block(agent_tool: str, model: str) -> dict:
                 _endpoint("api.openai.com"),
             ],
             "binaries": [
-                {"path": "/usr/local/bin/crush"},
+                _bin("/usr/local/bin/crush"),
             ],
         }
     else:
@@ -172,7 +226,8 @@ def _build_agent_api_block(agent_tool: str, model: str) -> dict:
                 _endpoint("api.anthropic.com"),
                 _endpoint("opencode.ai"),
             ],
-            # No binaries restriction — opencode runs via node (npm-global path varies)
+            # No binaries restriction — opencode runs via node (npm-global path varies);
+            # empty binaries list means all processes can reach these endpoints.
         }
     return {"agent_api": block}
 
@@ -188,41 +243,28 @@ def build_session_policy(
 ):
     """Assemble a complete OpenShell SandboxPolicy proto for this session.
 
+    Network policies are pre-computed from the session's repos, agent tool,
+    model provider, MCP configuration, and language — and are included
+    directly in the returned SandboxPolicy proto.  This means the sandbox
+    starts with all required Landlock network rules already approved, so git
+    clone and AI API calls work immediately without any probe-deny-approve
+    cycle (ACM-34909).
+
     Returns a SandboxPolicy proto object to be set on SandboxSpec.policy.
     """
     from google.protobuf.json_format import ParseDict
     from openshell._proto import openshell_pb2
 
-    network_policies_dict: dict = {}
-    network_policies_dict.update(_build_agent_api_block(agent_tool, model))
+    network_policies_dict = build_session_network_policies(
+        session, repos, mcp_servers, agent_tool, model
+    )
 
-    for repo in repos:
-        slug = _repo_slug(repo)
-        org, name = _repo_org_name(repo)
-        network_policies_dict[f"github_git_{slug}"] = _build_github_git_block(org, name)
-        network_policies_dict[f"github_api_{slug}"] = _build_github_api_block(org, name)
-
-    if any(getattr(mcp, "slug", None) == "jira" for mcp in (mcp_servers or [])):
-        network_policies_dict["jira_mcp"] = _JIRA_MCP_BLOCK
-
-    lang = getattr(session, "language", "golang")
-    if lang == "golang":
-        network_policies_dict["golang"] = _GO_DEVELOPMENT_BLOCK
-        network_policies_dict["govulncheck"] = _GOVULNCHECK_BLOCK
-    elif lang == "python":
-        network_policies_dict["pypi"] = _PYTHON_DEVELOPMENT_BLOCK
-
-    # Network policies are intentionally NOT included in spec.policy.
-    # The OpenShell supervisor uses a draft-approval workflow: when the sandbox
-    # makes a connection that is denied, the supervisor proposes draft chunks.
-    # swarmer approves expected chunks via approve_draft_policy_chunks() after
-    # creation. Pre-setting network_policies in spec.policy suppresses draft
-    # chunk generation, breaking the approval flow.
     policy_dict = {
         "version": 1,
         "filesystem": _BASE_FILESYSTEM,
         "landlock": {"compatibility": "best_effort"},
         "process": {"run_as_group": "sandbox", "run_as_user": "sandbox"},
+        "network_policies": network_policies_dict,
     }
     # Get SandboxPolicy class from a SandboxSpec instance
     policy_instance = openshell_pb2.SandboxSpec().policy.__class__()
@@ -238,8 +280,9 @@ def build_session_network_policies(
 ) -> dict:
     """Return the computed network_policies dict for this session.
 
-    This is NOT set on spec.policy (the draft-approval workflow handles network
-    access). This function is exposed for reference, logging, and testing.
+    Called by build_session_policy() to populate spec.policy.network_policies
+    at sandbox creation time.  Also exposed directly for testing and for the
+    policy-extract smoke test harness (scripts/openshell_smoke_test.py).
     """
     network_policies_dict: dict = {}
     network_policies_dict.update(_build_agent_api_block(agent_tool, model))
