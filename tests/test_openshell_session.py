@@ -2075,3 +2075,110 @@ class TestPolicyRulesEndpoints:
         assert len(stored) == 1
         assert stored[0]["rule_name"] == "test-rule"
 
+    @pytest.mark.asyncio
+    async def test_add_chunk_backfills_access_on_endpoints(self, client):
+        """Promoting a chunk whose endpoints have protocol but no access/rules
+        should store access=full so the gateway does not reject the policy."""
+        import json as _j
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        # Simulate a raw OPA draft chunk: protocol present, access/rules absent.
+        chunk = {
+            "id": "chunk-raw",
+            "status": "pending",
+            "rule_name": "allow-raw-githubusercontent-com-443",
+            "endpoints": [
+                {"host": "raw.githubusercontent.com", "port": 443, "protocol": "rest"}
+            ],
+            "binaries": [{"path": "/usr/bin/curl", "harness": True}],
+        }
+        resp = await client.post(
+            f"/workspaces/{ws['id']}/sessions/{s['id']}/policy-rules/add",
+            data={"chunk": _j.dumps(chunk)},
+        )
+        assert resp.status_code == 200
+
+        async with _TestSession() as db:
+            from swarmer.models.session import Session
+            from sqlalchemy import select
+            sess = (await db.execute(select(Session).where(Session.id == s["id"]))).scalar_one()
+
+        rules = _j.loads(sess.custom_policies)
+        assert len(rules) == 1
+        ep = rules[0]["endpoints"][0]
+        assert ep.get("access") == "full", (
+            f"Expected access=full to be backfilled on endpoint missing access/rules, got: {ep}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_add_chunk_preserves_existing_rules_on_endpoints(self, client):
+        """Promoting a chunk whose endpoints already have rules should preserve
+        them and must NOT add access=full."""
+        import json as _j
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        chunk = {
+            "id": "chunk-scoped",
+            "status": "pending",
+            "rule_name": "scoped-api-access",
+            "endpoints": [
+                {
+                    "host": "api.github.com",
+                    "port": 443,
+                    "protocol": "rest",
+                    "rules": [{"allow": {"method": "GET", "path": "/repos/org/repo/**"}}],
+                }
+            ],
+            "binaries": [],
+        }
+        resp = await client.post(
+            f"/workspaces/{ws['id']}/sessions/{s['id']}/policy-rules/add",
+            data={"chunk": _j.dumps(chunk)},
+        )
+        assert resp.status_code == 200
+
+        async with _TestSession() as db:
+            from swarmer.models.session import Session
+            from sqlalchemy import select
+            sess = (await db.execute(select(Session).where(Session.id == s["id"]))).scalar_one()
+
+        rules = _j.loads(sess.custom_policies)
+        ep = rules[0]["endpoints"][0]
+        assert "access" not in ep, f"access must not be added when rules are present, got: {ep}"
+        assert ep["rules"], "rules should be preserved"
+
+    @pytest.mark.asyncio
+    async def test_add_chunk_preserves_existing_access_on_endpoints(self, client):
+        """Promoting a chunk whose endpoints already have access set preserves
+        that value and does not overwrite it."""
+        import json as _j
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        chunk = {
+            "id": "chunk-full",
+            "status": "pending",
+            "rule_name": "full-access-host",
+            "endpoints": [
+                {"host": "example.com", "port": 443, "protocol": "rest", "access": "full"}
+            ],
+            "binaries": [],
+        }
+        resp = await client.post(
+            f"/workspaces/{ws['id']}/sessions/{s['id']}/policy-rules/add",
+            data={"chunk": _j.dumps(chunk)},
+        )
+        assert resp.status_code == 200
+
+        async with _TestSession() as db:
+            from swarmer.models.session import Session
+            from sqlalchemy import select
+            sess = (await db.execute(select(Session).where(Session.id == s["id"]))).scalar_one()
+
+        rules = _j.loads(sess.custom_policies)
+        ep = rules[0]["endpoints"][0]
+        assert ep["access"] == "full"
+        assert "rules" not in ep
+

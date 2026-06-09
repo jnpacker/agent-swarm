@@ -436,9 +436,19 @@ def build_session_network_policies(
         network_policies_dict["pypi"] = _PYTHON_DEVELOPMENT_BLOCK
 
     # Merge session-level custom rules approved from draft chunks.
+    # Backfill access="full" on any endpoint that carries a protocol but lacks
+    # both "access" and "rules" — guards against rules stored before the
+    # promotion-time fix was applied (the gateway rejects such endpoints with
+    # "protocol requires rules or access to define allowed traffic").
     for i, rule in enumerate(custom_policies or []):
         rule_name = rule.get("name", "")
         key = f"custom_{rule_name.replace('-', '_').replace(' ', '_') or i}"
-        network_policies_dict[key] = rule
+        endpoints = []
+        for ep in rule.get("endpoints", []):
+            ep = dict(ep)
+            if ep.get("protocol") and not ep.get("access") and not ep.get("rules"):
+                ep["access"] = "full"
+            endpoints.append(ep)
+        network_policies_dict[key] = {**rule, "endpoints": endpoints}
 
     return network_policies_dict

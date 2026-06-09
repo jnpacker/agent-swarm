@@ -31,7 +31,7 @@
       <tr style="border-bottom:1px solid var(--pf-t--global--border--color--default);">
         <td style="padding:var(--pf-t--global--spacer--xs) var(--pf-t--global--spacer--sm);">
           {% if is_pending %}
-          <input type="checkbox" name="chunk" value="{{ chunk | tojson | e }}"
+          <input type="checkbox" name="chunk" value="{{ chunk | tojson | forceescape }}"
                  class="policy-chunk-cb"
                  style="cursor:pointer;" title="Add to session rules">
           {% endif %}

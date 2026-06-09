@@ -1677,10 +1677,29 @@ async def session_policy_rules_add(
         except Exception:
             pass
 
-    existing_names = {r.get("name") for r in existing}
+    # Index existing rules by name for O(1) lookup and in-place merge.
+    existing_by_name: dict[str, dict] = {
+        str(r["name"]): r for r in existing if r.get("name")
+    }
     added = 0
     from datetime import timezone
     now_iso = datetime.now(timezone.utc).isoformat()
+
+    def _normalize_endpoints(raw_eps: list) -> list:
+        """Ensure every L7-protocol endpoint has access or rules.
+
+        Draft chunks from OPA include host/port/protocol but omit these fields,
+        which causes gateway validation to fail with 'protocol requires rules or
+        access to define allowed traffic'. Default to access=full for
+        user-approved traffic.
+        """
+        result = []
+        for ep in raw_eps:
+            ep = dict(ep)
+            if ep.get("protocol") and not ep.get("access") and not ep.get("rules"):
+                ep["access"] = "full"
+            result.append(ep)
+        return result
 
     for raw in selected_raw:
         try:
@@ -1688,17 +1707,36 @@ async def session_policy_rules_add(
         except Exception:
             continue
         rule_name = chunk.get("rule_name") or chunk.get("name") or ""
-        if not rule_name or rule_name in existing_names:
+        if not rule_name:
             continue
-        existing.append({
-            "name": rule_name,
-            "endpoints": chunk.get("endpoints", []),
-            "binaries": chunk.get("binaries", []),
-            "source": "chunk",
-            "added_at": now_iso,
-        })
-        existing_names.add(rule_name)
-        added += 1
+
+        new_eps = _normalize_endpoints(chunk.get("endpoints", []))
+        new_bins = chunk.get("binaries", [])
+
+        if rule_name in existing_by_name:
+            # Same rule name already exists — merge binaries rather than
+            # dropping the chunk. OPA emits one chunk per (rule_name, binary)
+            # pair so two chunks can share a name but differ only in binary.
+            rule = existing_by_name[rule_name]
+            existing_bin_paths = {b.get("path") for b in rule.get("binaries", [])}
+            merged = False
+            for b in new_bins:
+                if b.get("path") not in existing_bin_paths:
+                    rule.setdefault("binaries", []).append(b)
+                    existing_bin_paths.add(b.get("path"))
+                    merged = True
+            if merged:
+                added += 1
+        else:
+            existing.append({
+                "name": rule_name,
+                "endpoints": new_eps,
+                "binaries": new_bins,
+                "source": "chunk",
+                "added_at": now_iso,
+            })
+            existing_by_name[rule_name] = existing[-1]
+            added += 1
 
     if added:
         session.custom_policies = _j.dumps(existing)
