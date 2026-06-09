@@ -17,6 +17,38 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+# ---------------------------------------------------------------------------
+# Inject openshell SDK stub before any swarmer imports so that the real
+# openshell package (if installed) does not interfere with unit tests.
+# Force-assign replaces any already-loaded openshell module in sys.modules.
+# ---------------------------------------------------------------------------
+
+from unittest.mock import MagicMock as _MagicMock  # noqa: E402
+
+
+class _SandboxSpec:
+    def __init__(self):
+        class _T:
+            image = ""
+        self.template = _T()
+        self.environment = {}
+        self.policy = None
+        self.providers = []
+
+
+_proto_stub = _MagicMock()
+_proto_stub.openshell_pb2 = _MagicMock()
+_proto_stub.openshell_pb2.SandboxSpec = _SandboxSpec
+
+_sdk_stub = _MagicMock()
+_sdk_stub.SandboxClient = _MagicMock
+_sdk_stub.TlsConfig = _MagicMock
+_sdk_stub._proto = _proto_stub
+
+sys.modules["openshell"] = _sdk_stub
+sys.modules["openshell._proto"] = _proto_stub
+sys.modules["openshell._proto.openshell_pb2"] = _proto_stub.openshell_pb2
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient

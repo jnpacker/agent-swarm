@@ -21,6 +21,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from swarmer.openshell_policy import build_session_policy, build_session_network_policies
 
+# Tests that call build_session_policy() need the real openshell protobuf
+# classes to construct a SandboxPolicy proto.  The stub package on PyPI
+# (0.0.0a0) provides the proto classes but they get replaced by MagicMock
+# stubs in other test files when the full suite runs.  Skip these tests when
+# the real SDK (identified by the presence of SandboxClient) is not available.
+try:
+    from openshell import SandboxClient  # noqa: F401
+    _REAL_SDK = True
+except Exception:
+    _REAL_SDK = False
+
+_requires_sdk = pytest.mark.skipif(
+    not _REAL_SDK,
+    reason="Requires real openshell SDK (SandboxClient); not available in CI",
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers to build minimal test fixtures matching the real model shapes
@@ -110,11 +126,13 @@ def _bhosts(
 # 1. Required structure
 # ---------------------------------------------------------------------------
 
+@_requires_sdk
 def test_policy_has_version_1():
     result = build_session_policy(_make_session(), repos=[], mcp_servers=[], agent_tool="opencode", model="google-vertex-anthropic/claude-sonnet-4-6")
     assert result.version == 1
 
 
+@_requires_sdk
 def test_policy_has_filesystem_policy():
     result = build_session_policy(_make_session(), repos=[], mcp_servers=[], agent_tool="opencode", model="google-vertex-anthropic/claude-sonnet-4-6")
     assert result.filesystem.include_workdir is True
@@ -126,6 +144,7 @@ def test_policy_has_network_policies_section():
     assert len(net) > 0
 
 
+@_requires_sdk
 def test_build_session_policy_includes_network_policies_in_proto():
     """build_session_policy() must include network_policies in the proto (ACM-34909).
 
@@ -145,6 +164,7 @@ def test_build_session_policy_includes_network_policies_in_proto():
     assert any(k.startswith("github_api_") for k in net_keys), f"github_api_ block missing from proto: {net_keys}"
 
 
+@_requires_sdk
 def test_build_session_policy_network_policies_match_build_session_network_policies():
     """build_session_policy() proto network_policies must match build_session_network_policies() dict."""
     repo = _make_repo()
@@ -161,6 +181,7 @@ def test_build_session_policy_network_policies_match_build_session_network_polic
     )
 
 
+@_requires_sdk
 def test_policy_sandbox_uses_sandbox_path():
     result = build_session_policy(_make_session(), repos=[], mcp_servers=[], agent_tool="opencode", model="google-vertex-anthropic/claude-sonnet-4-6")
     assert "/sandbox" in result.filesystem.read_write

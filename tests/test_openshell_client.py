@@ -44,11 +44,24 @@ _sdk_stub.SandboxClient = MagicMock
 _sdk_stub.TlsConfig = MagicMock
 _sdk_stub._proto = _proto_stub
 
-sys.modules.setdefault("openshell", _sdk_stub)
-sys.modules.setdefault("openshell._proto", _proto_stub)
-sys.modules.setdefault("openshell._proto.openshell_pb2", _proto_stub.openshell_pb2)
+# Save any real openshell modules already in sys.modules so we can restore
+# them after importing swarmer.openshell_client with our stubs.  This prevents
+# the stubs from polluting sys.modules for other test files (e.g.
+# test_openshell_policy.py) that need the real protobuf classes.
+_saved_modules = {k: v for k, v in sys.modules.items() if "openshell" in k}
+
+sys.modules["openshell"] = _sdk_stub
+sys.modules["openshell._proto"] = _proto_stub
+sys.modules["openshell._proto.openshell_pb2"] = _proto_stub.openshell_pb2
 
 import swarmer.openshell_client as oc  # noqa: E402
+
+# Restore real openshell modules (or remove the stubs if none were there before)
+for _k in ("openshell", "openshell._proto", "openshell._proto.openshell_pb2"):
+    if _k in _saved_modules:
+        sys.modules[_k] = _saved_modules[_k]
+    else:
+        sys.modules.pop(_k, None)
 
 
 # ---------------------------------------------------------------------------
