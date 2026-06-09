@@ -462,7 +462,14 @@ async def get_draft_chunks(sandbox_name: str, client=None) -> list[dict]:
                 })
             return result
         except Exception as exc:
-            log.warning("get_draft_chunks failed for %s: %s", sandbox_name, exc)
+            # NOT_FOUND is expected for TUI/server sessions whose sandbox has
+            # not yet recorded any policy chunks — log at debug, not warning.
+            code = getattr(getattr(exc, "code", None), "value", None) or str(exc)
+            is_not_found = "NOT_FOUND" in str(exc) or code == 5  # grpc StatusCode.NOT_FOUND = 5
+            if is_not_found:
+                log.debug("get_draft_chunks: sandbox %s not found (no chunks yet)", sandbox_name)
+            else:
+                log.warning("get_draft_chunks failed for %s: %s", sandbox_name, exc)
             return []
 
     return await asyncio.to_thread(_do_fetch)

@@ -1593,7 +1593,7 @@ async def session_policy_chunks(
         try:
             chunks = await openshell_client.get_draft_chunks(session.sandbox_name)
         except Exception:
-            log.warning("Live chunk fetch failed for session %d", sid, exc_info=True)
+            pass  # get_draft_chunks logs internally; [] is the safe fallback
     elif session.policy_chunks:
         # Completed run — use snapshot
         import json as _j
