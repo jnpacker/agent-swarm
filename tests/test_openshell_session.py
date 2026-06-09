@@ -647,7 +647,8 @@ class TestDoLaunchOpenshell:
              patches["create_sandbox"], patches["write_agent_config"], \
              patches["write_agents_md"], patches["exec_command"], \
              patches["start_agent"], patches["delete_sandbox"], \
-             patches["build_policy"], patches["run_agent"], patches["setup_sandbox"]:
+             patches["build_policy"], patches["run_agent"], \
+             patches["setup_sandbox"] as mock_setup:
             await client.post(
                 f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/launch"
             )
@@ -659,15 +660,37 @@ class TestDoLaunchOpenshell:
         assert len(jira_calls) == 1, (
             f"Expected 1 jira provider call when MCP is configured, got {len(jira_calls)}"
         )
+        # Token must go through provider credentials — gateway stores it securely and
+        # injects as an opaque reference token (openshell:resolve:...), never plaintext.
         creds = jira_calls[0].kwargs.get("credentials", {})
         assert creds.get("JIRA_ACCESS_TOKEN") == "jira-tok-secret", (
             f"Expected JIRA_ACCESS_TOKEN in jira provider credentials, got: {creds}"
         )
-        assert creds.get("JIRA_SERVER_URL") == "https://redhat.atlassian.net", (
-            f"Expected JIRA_SERVER_URL in jira provider credentials, got: {creds}"
+        assert "JIRA_SERVER_URL" not in creds, (
+            f"JIRA_SERVER_URL must not be in credentials (non-secret): {creds}"
         )
-        assert creds.get("JIRA_EMAIL") == "test@redhat.com", (
-            f"Expected JIRA_EMAIL in jira provider credentials, got: {creds}"
+        assert "JIRA_EMAIL" not in creds, (
+            f"JIRA_EMAIL must not be in credentials (non-secret): {creds}"
+        )
+        # Non-secret config goes in provider config (gateway-internal, not injected as env var).
+        cfg = jira_calls[0].kwargs.get("config", {})
+        assert cfg.get("JIRA_SERVER_URL") == "https://redhat.atlassian.net", (
+            f"Expected JIRA_SERVER_URL in jira provider config, got: {cfg}"
+        )
+        assert cfg.get("JIRA_EMAIL") == "test@redhat.com", (
+            f"Expected JIRA_EMAIL in jira provider config, got: {cfg}"
+        )
+        # URL and email also go into env_vars so the sandbox process sees them directly.
+        setup_kwargs = mock_setup.call_args.kwargs if mock_setup.call_args else {}
+        sandbox_env = setup_kwargs.get("env_vars", {})
+        assert sandbox_env.get("JIRA_SERVER_URL") == "https://redhat.atlassian.net", (
+            f"Expected JIRA_SERVER_URL in sandbox env_vars, got: {sandbox_env}"
+        )
+        assert sandbox_env.get("JIRA_EMAIL") == "test@redhat.com", (
+            f"Expected JIRA_EMAIL in sandbox env_vars, got: {sandbox_env}"
+        )
+        assert "JIRA_ACCESS_TOKEN" not in sandbox_env, (
+            f"JIRA_ACCESS_TOKEN must not appear in plaintext sandbox env_vars: {sandbox_env}"
         )
 
     @pytest.mark.asyncio

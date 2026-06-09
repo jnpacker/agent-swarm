@@ -49,12 +49,12 @@ _OPENSHELL_CUSTOM_PROFILES = [
         "display_name": "Jira",
         "inference_capable": False,
         "credentials": [
-            # All three values go in credentials so the gateway injects them
-            # as env vars into the sandbox via GetSandboxProviderEnvironment.
-            # provider config values are NOT injected as env vars.
+            # Only the secret token goes in credentials — the gateway stores it
+            # securely and injects it as an opaque reference token (openshell:resolve:...)
+            # into the sandbox via GetSandboxProviderEnvironment.
+            # JIRA_SERVER_URL and JIRA_EMAIL are non-secret config; they are passed
+            # as plain env vars via SandboxSpec.environment / ExecSandboxRequest.environment.
             {"name": "JIRA_ACCESS_TOKEN", "env_vars": ["JIRA_ACCESS_TOKEN"], "required": True},
-            {"name": "JIRA_SERVER_URL",   "env_vars": ["JIRA_SERVER_URL"],   "required": True},
-            {"name": "JIRA_EMAIL",        "env_vars": ["JIRA_EMAIL"],        "required": True},
         ],
     },
 ]

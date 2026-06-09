@@ -850,12 +850,22 @@ async def _do_launch_openshell(
     for mcp in (mcp_servers or []):
         if "jira" in getattr(mcp, "slug", "") and getattr(mcp, "jira_access_token_enc", ""):
             pname = f"swarmer-ws-{ws_id}-jira"
-            await openshell_client.ensure_provider(pname, "jira", {}, credentials={
-                "JIRA_ACCESS_TOKEN": mcp.jira_access_token,
-                "JIRA_SERVER_URL": mcp.jira_server_url or "",
-                "JIRA_EMAIL": mcp.jira_email or "",
-            })
+            # Token goes through the gateway Provider API — stored securely and injected
+            # as an opaque reference token (openshell:resolve:...), never as plaintext.
+            # URL and email are non-secret config; they go as plain env vars via env_vars.
+            await openshell_client.ensure_provider(
+                pname, "jira",
+                config={
+                    "JIRA_SERVER_URL": mcp.jira_server_url or "",
+                    "JIRA_EMAIL": mcp.jira_email or "",
+                },
+                credentials={"JIRA_ACCESS_TOKEN": mcp.jira_access_token},
+            )
             provider_names.append(pname)
+            # Pass URL and email as plain env vars so the sandbox process can read them.
+            # These are non-secret config values; only the token is gateway-managed.
+            env_vars["JIRA_SERVER_URL"] = mcp.jira_server_url or ""
+            env_vars["JIRA_EMAIL"] = mcp.jira_email or ""
             break  # only one Jira provider per workspace
 
     # 2. Build policy YAML (pure computation, no I/O)
