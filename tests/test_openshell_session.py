@@ -862,6 +862,7 @@ class TestRunOpenshellAgent:
         exec_result = MagicMock(exit_code=0, stdout="agent done", stderr="")
         with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
              patch("swarmer.openshell_client.exec_command", new=AsyncMock(return_value=exec_result)), \
+             patch("swarmer.openshell_client.read_opencode_response", new=AsyncMock(return_value="agent done")), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
             from swarmer.routers.sessions import _run_openshell_agent
             await _run_openshell_agent(s["id"], "sandbox-prompt", ["sh", "-c", "opencode run"], "prompt", "opencode")
@@ -915,6 +916,7 @@ class TestRunOpenshellAgent:
         exec_result = MagicMock(exit_code=0, stdout="done", stderr="")
         with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
              patch("swarmer.openshell_client.exec_command", new=AsyncMock(return_value=exec_result)), \
+             patch("swarmer.openshell_client.read_opencode_response", new=AsyncMock(return_value="done")), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()) as mock_del:
             from swarmer.routers.sessions import _run_openshell_agent
             await _run_openshell_agent(s["id"], "sandbox-autoclean", ["sh", "-c", "opencode run"], "prompt", "opencode")
@@ -951,6 +953,7 @@ class TestRunOpenshellAgent:
 
         with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
              patch("swarmer.openshell_client.exec_command", new=_fake_exec), \
+             patch("swarmer.openshell_client.read_opencode_response", new=AsyncMock(return_value="")), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
             from swarmer.routers.sessions import _run_openshell_agent
             await _run_openshell_agent(s["id"], "sandbox-running", ["sh", "-c", "opencode run"], "prompt", "opencode")
@@ -1792,6 +1795,7 @@ class TestMcpPatchInjection:
 
         from swarmer.agent_tools.crush import CrushStrategy
         from swarmer.routers.sessions import _setup_openshell_sandbox
+        from swarmer.config import settings as _settings
 
         tool = CrushStrategy()
         model = "anthropic/claude-sonnet-4-6"
@@ -1812,24 +1816,27 @@ class TestMcpPatchInjection:
             }
         }
 
-        patches = _make_crush_setup_patches()
-        with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
-             patches["create_sandbox"], \
-             patch("swarmer.openshell_client.write_agent_config", new=_capture_write_agent_config), \
-             patches["write_agents_md"], \
-             patches["approve_chunks"], \
-             patches["run_agent"], \
-             patches["sleep"], \
-             patch("swarmer.openshell_client.exec_command", new=AsyncMock(
-                 return_value=MagicMock(exit_code=0, stdout="", stderr="")
-             )):
-            await _setup_openshell_sandbox(
-                session_id=s["id"],
-                provider_names=[],
-                env_vars={},
-                policy=None,
-                image=tool.get_image(),
-                tool_name="crush",
+        _orig_crush_image = _settings.agent_image_crush
+        _settings.agent_image_crush = "quay.io/test/crush:test"
+        try:
+            patches = _make_crush_setup_patches()
+            with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
+                 patches["create_sandbox"], \
+                 patch("swarmer.openshell_client.write_agent_config", new=_capture_write_agent_config), \
+                 patches["write_agents_md"], \
+                 patches["approve_chunks"], \
+                 patches["run_agent"], \
+                 patches["sleep"], \
+                 patch("swarmer.openshell_client.exec_command", new=AsyncMock(
+                     return_value=MagicMock(exit_code=0, stdout="", stderr="")
+                 )):
+                await _setup_openshell_sandbox(
+                    session_id=s["id"],
+                    provider_names=[],
+                    env_vars={},
+                    policy=None,
+                    image=tool.get_image(),
+                    tool_name="crush",
                 model=model,
                 model_setup_cmd=tool.build_model_setup_cmd(model).replace("/workspace/", "/sandbox/"),
                 share_cmd=tool.build_share_setup_cmd().replace("/workspace/", "/sandbox/"),
@@ -1843,6 +1850,8 @@ class TestMcpPatchInjection:
                 main_cmd=f"crush run --model {model} 'hello'",
                 resolved_prompt="hello",
             )
+        finally:
+            _settings.agent_image_crush = _orig_crush_image
 
         assert captured_config, "write_agent_config was never called"
         written = _json.loads(captured_config[0])

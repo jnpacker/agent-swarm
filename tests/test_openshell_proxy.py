@@ -39,9 +39,26 @@ class _SandboxSpec:
         self.providers = []
 
 
+class _ProtoMessage:
+    """Minimal proto-message stub that stores constructor kwargs as attributes."""
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+class _ExecSandboxRequest(_ProtoMessage):
+    pass
+
+
+class _ExecSandboxInput(_ProtoMessage):
+    pass
+
+
 _proto_stub = MagicMock()
 _proto_stub.openshell_pb2 = MagicMock()
 _proto_stub.openshell_pb2.SandboxSpec = _SandboxSpec
+_proto_stub.openshell_pb2.ExecSandboxRequest = _ExecSandboxRequest
+_proto_stub.openshell_pb2.ExecSandboxInput = _ExecSandboxInput
 
 _sdk_stub = MagicMock()
 _sdk_stub.SandboxClient = MagicMock
