@@ -199,7 +199,7 @@
     {% if show_policy_tab %}
     <li class="pf-v6-c-tabs__item" id="tab-policy">
       <button class="pf-v6-c-tabs__link" role="tab" aria-selected="false" aria-controls="panel-policy" tabindex="-1" onclick="switchTab('policy')">
-        <span class="pf-v6-c-tabs__item-text" id="policy-tab-text">Policy</span>
+        <span class="pf-v6-c-tabs__item-text" id="policy-tab-text">Net Rules</span>
       </button>
     </li>
     {% endif %}
@@ -566,15 +566,15 @@ git apply /path/to/{{ patch_filename }}
 {% endif %}
 
 {# ════════════════════════════════════════════════════════════
-   Tab panel: Policy (OpenShell sessions with sandbox/chunks/custom rules)
+   Tab panel: Net Rules (OpenShell sessions)
    ════════════════════════════════════════════════════════════ #}
 {% if show_policy_tab %}
 <div id="panel-policy" class="pf-v6-c-tab-content" role="tabpanel" aria-labelledby="tab-policy" hidden style="margin-top:var(--pf-t--global--spacer--lg);">
 
-  {# ── Custom Rules card ── #}
+  {# ── Net Rules card ── #}
   <div class="pf-v6-c-card" style="margin-bottom:var(--pf-t--global--spacer--md);">
     <div class="pf-v6-c-card__header">
-      <h3 class="pf-v6-c-card__header-main" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">Custom Rules</h3>
+      <h3 class="pf-v6-c-card__header-main" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">Net Rules</h3>
     </div>
     <div class="pf-v6-c-card__body"
          hx-get="/workspaces/{{ ws.id }}/sessions/{{ session.id }}/policy-rules-partial"
@@ -586,10 +586,10 @@ git apply /path/to/{{ patch_filename }}
     </div>
   </div>
 
-  {# ── Draft Chunks card ── #}
+  {# ── Pending Chunks card ── #}
   <div class="pf-v6-c-card">
     <div class="pf-v6-c-card__header">
-      <h3 class="pf-v6-c-card__header-main" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">Draft Policy Chunks</h3>
+      <h3 class="pf-v6-c-card__header-main" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">Pending Chunks</h3>
     </div>
     <div class="pf-v6-c-card__body" style="padding:0;"
          id="policy-chunks-container">
@@ -604,7 +604,7 @@ git apply /path/to/{{ patch_filename }}
            {% endif %}
            hx-swap="innerHTML"
            style="padding:var(--pf-t--global--spacer--md);">
-        <span style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm);">Loading chunks…</span>
+        <span style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm);">Loading…</span>
       </div>
     </div>
   </div>
@@ -644,6 +644,11 @@ function switchTab(name) {
   if (name === 'output') {
     const textEl = document.getElementById('output-tab-text');
     if (textEl) textEl.textContent = 'Output';
+  }
+  // Clear Net Rules tab dot when visiting
+  if (name === 'policy') {
+    const textEl = document.getElementById('policy-tab-text');
+    if (textEl) textEl.textContent = 'Net Rules';
   }
 }
 
@@ -940,6 +945,83 @@ document.addEventListener('htmx:afterSwap', function () {
   }, 2000);
 })();
 {% endif %}
+
+// ── Net Rules / Policy tab JS ──
+// All policy interactions are handled here at page level so that
+// HTMX swapping _policy_chunks.html (innerHTML) never loses event bindings.
+(function () {
+  // ── Pause/resume the 30s chunk poll while checkboxes are selected ──
+  var _pollPaused = false;
+
+  function _chunkContainerEl() {
+    return document.getElementById('policy-chunks-content');
+  }
+
+  function _pauseChunkPoll() {
+    var el = _chunkContainerEl();
+    if (!_pollPaused && el) {
+      _pollPaused = true;
+      el.removeAttribute('hx-trigger');
+      htmx.process(el);
+    }
+  }
+
+  function _resumeChunkPoll() {
+    var el = _chunkContainerEl();
+    if (_pollPaused && el) {
+      _pollPaused = false;
+      if (el.dataset.active === '1') {
+        el.setAttribute('hx-trigger', 'every 30s');
+        htmx.process(el);
+      }
+    }
+  }
+
+  // Delegate checkbox change to document so it survives innerHTML swaps.
+  document.addEventListener('change', function (e) {
+    if (!e.target.classList.contains('policy-chunk-cb')) return;
+    var anyChecked = document.querySelectorAll('.policy-chunk-cb:checked').length > 0;
+    if (anyChecked) { _pauseChunkPoll(); } else { _resumeChunkPoll(); }
+  });
+
+  // ── Handle form submission result via htmx:afterRequest ──
+  // Using event delegation so the listener survives innerHTML swaps.
+  document.addEventListener('htmx:afterRequest', function (e) {
+    var form = document.getElementById('policy-chunks-form');
+    if (!e.target || e.target !== form) return;
+
+    var status = e.detail && e.detail.xhr ? e.detail.xhr.status : 0;
+    var trigger = e.detail && e.detail.xhr
+      ? (e.detail.xhr.getResponseHeader('HX-Trigger') || '')
+      : '';
+
+    // Reset checkboxes regardless of outcome.
+    if (form) form.reset();
+    _resumeChunkPoll();
+
+    if (trigger === 'policyNoop') {
+      // All selected rules were already in the session — show inline feedback.
+      var fb = document.getElementById('policy-add-feedback');
+      if (fb) {
+        fb.style.display = 'block';
+        setTimeout(function () { fb.style.display = 'none'; }, 4000);
+      }
+    }
+    // policyChanged is fired by the server HX-Trigger header; HTMX dispatches
+    // it on document.body and the #policy-rules-container picks it up.
+    // Also fire client-side to handle policyNoop case where we still want the
+    // rules container to confirm no change.
+    htmx.trigger(document.body, 'policyChanged');
+  });
+
+  // ── Dot indicator on Net Rules tab when rules change ──
+  document.body.addEventListener('policyChanged', function () {
+    var tab = document.getElementById('tab-policy');
+    if (tab && tab.classList.contains('pf-m-current')) return; // already viewing
+    var textEl = document.getElementById('policy-tab-text');
+    if (textEl) textEl.textContent = 'Net Rules ●';
+  });
+}());
 </script>
 
 {% if session.mode == 'tui' and session.phase == 'running' and tui_token %}
