@@ -733,12 +733,35 @@ async def exec_command(
     return await asyncio.to_thread(_do_exec)
 
 
+async def get_sandbox_provider_environment(sandbox_id: str, client=None) -> dict[str, str]:
+    """Fetch the provider-injected environment for a sandbox from the gateway.
+
+    Returns a dict of env var name → value (opaque reference tokens for credentials).
+    Returns {} if the call fails (e.g. no providers attached).
+    """
+    from openshell._proto import openshell_pb2
+
+    if client is None:
+        client = _get_client()
+
+    def _do_get():
+        req = openshell_pb2.GetSandboxProviderEnvironmentRequest(sandbox_id=sandbox_id)
+        resp = client._stub.GetSandboxProviderEnvironment(req, timeout=10)
+        return dict(resp.environment)
+
+    try:
+        return await asyncio.to_thread(_do_get)
+    except Exception:
+        return {}
+
+
 def exec_interactive(
     sandbox_name: str,
     sandbox_id: str,
     command: list[str],
     cols: int,
     rows: int,
+    env: dict[str, str] | None = None,
     client=None,
 ):
     """Open an interactive PTY exec stream for a sandbox (for TUI WebSocket bridge).
@@ -758,16 +781,17 @@ def exec_interactive(
     input_q: queue.Queue = queue.Queue()
 
     def _request_generator():
-        start_msg = openshell_pb2.ExecSandboxInput(
-            start=openshell_pb2.ExecSandboxRequest(
-                sandbox_id=sandbox_id,
-                command=command,
-                workdir="/sandbox",
-                tty=True,
-                cols=cols,
-                rows=rows,
-            )
+        req = openshell_pb2.ExecSandboxRequest(
+            sandbox_id=sandbox_id,
+            command=command,
+            workdir="/sandbox",
+            tty=True,
+            cols=cols,
+            rows=rows,
         )
+        for k, v in (env or {}).items():
+            req.environment[k] = v
+        start_msg = openshell_pb2.ExecSandboxInput(start=req)
         yield start_msg
         while True:
             item = input_q.get()
