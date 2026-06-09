@@ -196,7 +196,7 @@
       </button>
     </li>
     {% endif %}
-    {% if session.sandbox_name or session.policy_chunks or session.custom_policies %}
+    {% if show_policy_tab %}
     <li class="pf-v6-c-tabs__item" id="tab-policy">
       <button class="pf-v6-c-tabs__link" role="tab" aria-selected="false" aria-controls="panel-policy" tabindex="-1" onclick="switchTab('policy')">
         <span class="pf-v6-c-tabs__item-text" id="policy-tab-text">Policy</span>
@@ -568,7 +568,7 @@ git apply /path/to/{{ patch_filename }}
 {# ════════════════════════════════════════════════════════════
    Tab panel: Policy (OpenShell sessions with sandbox/chunks/custom rules)
    ════════════════════════════════════════════════════════════ #}
-{% if session.sandbox_name or session.policy_chunks or session.custom_policies %}
+{% if show_policy_tab %}
 <div id="panel-policy" class="pf-v6-c-tab-content" role="tabpanel" aria-labelledby="tab-policy" hidden style="margin-top:var(--pf-t--global--spacer--lg);">
 
   {# ── Custom Rules card ── #}
@@ -597,8 +597,10 @@ git apply /path/to/{{ patch_filename }}
            hx-get="/workspaces/{{ ws.id }}/sessions/{{ session.id }}/policy-chunks"
            {% if session.is_active %}
            hx-trigger="load, every 30s"
+           data-active="1"
            {% else %}
            hx-trigger="load"
+           data-active="0"
            {% endif %}
            hx-swap="innerHTML"
            style="padding:var(--pf-t--global--spacer--md);">

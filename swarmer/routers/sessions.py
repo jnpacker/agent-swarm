@@ -484,6 +484,12 @@ async def session_detail(
             "mcp_servers": mcp_servers,
             "prompt_sources": prompt_sources,
             "custom_policy_rules": _json_filter.loads(session.custom_policies) if session.custom_policies else [],
+            "show_policy_tab": bool(
+                settings.openshell_gateway_url
+                or session.sandbox_name
+                or session.policy_chunks
+                or session.custom_policies
+            ),
         },
     )
 
@@ -1687,8 +1693,11 @@ async def session_policy_rules_add(
     if added:
         session.custom_policies = _j.dumps(existing)
         await db.commit()
+        return HTMLResponse("", headers={"HX-Trigger": "policyChanged"})
 
-    return HTMLResponse("", headers={"HX-Trigger": "policyChanged"})
+    # Nothing added — either no checkboxes were submitted or all were duplicates.
+    trigger = "policyNoop" if selected_raw else "policyChanged"
+    return HTMLResponse("", headers={"HX-Trigger": trigger})
 
 
 @router.post(

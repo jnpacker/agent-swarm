@@ -7,7 +7,13 @@
       action="/workspaces/{{ ws_id }}/sessions/{{ session.id }}/policy-rules/add"
       hx-post="/workspaces/{{ ws_id }}/sessions/{{ session.id }}/policy-rules/add"
       hx-swap="none"
-      hx-on::after-request="this.reset(); htmx.trigger(document.body, 'policyChanged')">
+      hx-on::after-request="this.reset(); _policyChunksPollResume();">
+  {# Inline feedback banner — shown on policyNoop, hidden after next poll swap #}
+  <div id="policy-add-feedback" style="display:none; margin-bottom:var(--pf-t--global--spacer--sm);">
+    <span class="pf-v6-c-label pf-m-gold pf-m-compact">
+      <span class="pf-v6-c-label__content">Rule already in session — no changes made</span>
+    </span>
+  </div>
   <table style="width:100%; border-collapse:collapse; font-size:var(--pf-t--global--font--size--sm);">
     <thead>
       <tr style="border-bottom:2px solid var(--pf-t--global--border--color--default); text-align:left;">
@@ -25,6 +31,7 @@
         <td style="padding:var(--pf-t--global--spacer--xs) var(--pf-t--global--spacer--sm);">
           {% if is_pending %}
           <input type="checkbox" name="chunk" value="{{ chunk | tojson | e }}"
+                 class="policy-chunk-cb"
                  style="cursor:pointer;" title="Add to session rules">
           {% endif %}
         </td>
@@ -66,13 +73,65 @@
     </tbody>
   </table>
   {% if chunks | selectattr("status", "equalto", "pending") | list %}
-  <div style="margin-top:var(--pf-t--global--spacer--sm); display:flex; justify-content:flex-end;">
+  <div style="margin-top:var(--pf-t--global--spacer--sm); display:flex; justify-content:flex-end; align-items:center; gap:var(--pf-t--global--spacer--sm);">
     <button type="submit" class="pf-v6-c-button pf-m-secondary pf-m-small">
       Add Selected to Session
     </button>
   </div>
   {% endif %}
 </form>
+<script>
+(function () {
+  // Pause the 30s chunk poll while any checkbox is checked so the form is
+  // not swapped out underneath the user mid-selection.
+  var _pollPaused = false;
+  var _chunkContainer = document.getElementById('policy-chunks-content');
+
+  function _policyChunksPollPause() {
+    if (!_pollPaused && _chunkContainer) {
+      _pollPaused = true;
+      _chunkContainer.removeAttribute('hx-trigger');
+      htmx.process(_chunkContainer);
+    }
+  }
+
+  function _policyChunksPollResume() {
+    // Always fire policyChanged after add request; also restore polling.
+    htmx.trigger(document.body, 'policyChanged');
+    if (_pollPaused && _chunkContainer) {
+      _pollPaused = false;
+      // Restore trigger only if the session is still active (container has
+      // data-active attribute set by the outer template).
+      if (_chunkContainer.dataset.active === '1') {
+        _chunkContainer.setAttribute('hx-trigger', 'every 30s');
+        htmx.process(_chunkContainer);
+      }
+    }
+  }
+  window._policyChunksPollResume = _policyChunksPollResume;
+
+  // Attach checkbox change listeners after HTMX processes the new content.
+  document.querySelectorAll('.policy-chunk-cb').forEach(function (cb) {
+    cb.addEventListener('change', function () {
+      var anyChecked = document.querySelectorAll('.policy-chunk-cb:checked').length > 0;
+      if (anyChecked) {
+        _policyChunksPollPause();
+      } else {
+        _policyChunksPollResume();
+      }
+    });
+  });
+
+  // Show inline feedback when the server signals nothing was added (all dupes).
+  document.body.addEventListener('policyNoop', function () {
+    var fb = document.getElementById('policy-add-feedback');
+    if (fb) {
+      fb.style.display = 'block';
+      setTimeout(function () { fb.style.display = 'none'; }, 4000);
+    }
+  });
+}());
+</script>
 {% else %}
 <p style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm); margin:0; padding:var(--pf-t--global--spacer--md) 0;">
   No policy chunks recorded. Chunks appear when the sandbox denies network connections not covered by the static policy.
