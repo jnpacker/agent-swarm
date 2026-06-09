@@ -1602,6 +1602,16 @@ async def session_policy_chunks(
         except Exception:
             pass
 
+    # Filter out chunks that have already been promoted to custom_policies
+    # so they disappear from the pending list immediately after being added.
+    if chunks and session.custom_policies:
+        import json as _j2
+        try:
+            promoted = {r.get("name") for r in _j2.loads(session.custom_policies)}
+            chunks = [c for c in chunks if c.get("rule_name") not in promoted]
+        except Exception:
+            pass
+
     return templates.TemplateResponse(
         request,
         "sessions/_policy_chunks.html",
@@ -1693,11 +1703,13 @@ async def session_policy_rules_add(
     if added:
         session.custom_policies = _j.dumps(existing)
         await db.commit()
-        return HTMLResponse("", headers={"HX-Trigger": "policyChanged"})
+        trigger_val = _j.dumps({"policyChanged": {"added": added}})
+        return HTMLResponse("", headers={"HX-Trigger": trigger_val})
 
     # Nothing added — either no checkboxes were submitted or all were duplicates.
-    trigger = "policyNoop" if selected_raw else "policyChanged"
-    return HTMLResponse("", headers={"HX-Trigger": trigger})
+    if selected_raw:
+        return HTMLResponse("", headers={"HX-Trigger": "policyNoop"})
+    return HTMLResponse("", headers={"HX-Trigger": "policyChanged"})
 
 
 @router.post(
@@ -1725,12 +1737,15 @@ async def session_policy_rules_delete(
         except Exception:
             pass
 
+    deleted = False
     if 0 <= idx < len(rules):
         rules.pop(idx)
         session.custom_policies = _j.dumps(rules)
         await db.commit()
+        deleted = True
 
-    return HTMLResponse("", headers={"HX-Trigger": "policyChanged"})
+    trigger_val = _j.dumps({"policyChanged": {"deleted": 1 if deleted else 0}})
+    return HTMLResponse("", headers={"HX-Trigger": trigger_val})
 
 
 # ============================================================

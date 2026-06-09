@@ -612,6 +612,27 @@ git apply /path/to/{{ patch_filename }}
 </div>
 {% endif %}
 
+{# ── Floating toast notification (bottom-right) ── #}
+<div id="policy-toast"
+     style="display:none; position:fixed; bottom:var(--pf-t--global--spacer--lg); right:var(--pf-t--global--spacer--lg);
+            z-index:9999; min-width:280px; max-width:400px;
+            background:var(--pf-t--global--background--color--secondary--default);
+            border:1px solid var(--pf-t--global--border--color--default);
+            border-radius:var(--pf-t--global--border--radius--medium);
+            box-shadow:0 4px 16px rgba(0,0,0,0.4);
+            padding:var(--pf-t--global--spacer--md) var(--pf-t--global--spacer--lg);
+            align-items:center; gap:var(--pf-t--global--spacer--md);">
+  <span id="policy-toast-msg" style="flex:1; font-size:var(--pf-t--global--font--size--sm);"></span>
+  <span id="policy-toast-cd"
+        style="font-size:var(--pf-t--global--font--size--xs);
+               color:var(--pf-t--global--text--color--subtle);
+               min-width:1.2em; text-align:right;"></span>
+  <button onclick="_policyHideToast()"
+          style="background:none; border:none; cursor:pointer; padding:0; line-height:1;
+                 color:var(--pf-t--global--text--color--subtle); font-size:1rem;"
+          title="Dismiss">&#x2715;</button>
+</div>
+
 {% endblock %}
 
 {% block scripts %}
@@ -947,18 +968,50 @@ document.addEventListener('htmx:afterSwap', function () {
 {% endif %}
 
 // ── Net Rules / Policy tab JS ──
-// All policy interactions are handled here at page level so that
-// HTMX swapping _policy_chunks.html (innerHTML) never loses event bindings.
+// All policy interactions live here (page-level) so that HTMX innerHTML
+// swaps of _policy_chunks.html never destroy event bindings.
 (function () {
-  // ── Pause/resume the 30s chunk poll while checkboxes are selected ──
-  var _pollPaused = false;
 
-  function _chunkContainerEl() {
-    return document.getElementById('policy-chunks-content');
+  // ── Toast helpers ──
+  var _toastTimer = null;
+  var _toastCountdown = null;
+
+  function _showToast(msg, seconds) {
+    var toast = document.getElementById('policy-toast');
+    var msgEl = document.getElementById('policy-toast-msg');
+    var cdEl  = document.getElementById('policy-toast-cd');
+    if (!toast || !msgEl) return;
+    msgEl.textContent = msg;
+    toast.style.display = 'flex';
+    clearTimeout(_toastTimer);
+    clearInterval(_toastCountdown);
+    var remaining = seconds || 10;
+    if (cdEl) cdEl.textContent = remaining;
+    _toastCountdown = setInterval(function () {
+      remaining--;
+      if (cdEl) cdEl.textContent = remaining;
+      if (remaining <= 0) {
+        clearInterval(_toastCountdown);
+        _hideToast();
+      }
+    }, 1000);
   }
 
+  function _hideToast() {
+    clearInterval(_toastCountdown);
+    var toast = document.getElementById('policy-toast');
+    if (toast) toast.style.display = 'none';
+  }
+
+  window._policyHideToast = _hideToast;
+
+  // ── Chunk poll pause/resume ──
+  var _pollPaused = false;
+
+  function _chunkEl() { return document.getElementById('policy-chunks-content'); }
+
   function _pauseChunkPoll() {
-    var el = _chunkContainerEl();
+    var el = _chunkEl();
     if (!_pollPaused && el) {
       _pollPaused = true;
       el.removeAttribute('hx-trigger');
@@ -967,60 +1020,88 @@ document.addEventListener('htmx:afterSwap', function () {
   }
 
   function _resumeChunkPoll() {
-    var el = _chunkContainerEl();
-    if (_pollPaused && el) {
-      _pollPaused = false;
-      if (el.dataset.active === '1') {
-        el.setAttribute('hx-trigger', 'every 30s');
-        htmx.process(el);
-      }
+    var el = _chunkEl();
+    _pollPaused = false;
+    if (el && el.dataset.active === '1') {
+      el.setAttribute('hx-trigger', 'every 30s');
+      htmx.process(el);
     }
   }
 
-  // Delegate checkbox change to document so it survives innerHTML swaps.
+  function _refreshChunks() {
+    var el = _chunkEl();
+    if (el) htmx.trigger(el, 'load');
+  }
+
+  // Checkbox change — pause poll when anything is checked.
   document.addEventListener('change', function (e) {
     if (!e.target.classList.contains('policy-chunk-cb')) return;
-    var anyChecked = document.querySelectorAll('.policy-chunk-cb:checked').length > 0;
-    if (anyChecked) { _pauseChunkPoll(); } else { _resumeChunkPoll(); }
+    var any = document.querySelectorAll('.policy-chunk-cb:checked').length > 0;
+    if (any) { _pauseChunkPoll(); } else { _resumeChunkPoll(); }
   });
 
-  // ── Handle form submission result via htmx:afterRequest ──
-  // Using event delegation so the listener survives innerHTML swaps.
+  // ── Handle add-form submission ──
+  // Listen on document so the handler survives innerHTML swaps of the partial.
   document.addEventListener('htmx:afterRequest', function (e) {
+    // Match requests to the add endpoint by URL pattern.
+    var url = (e.detail && e.detail.pathInfo && e.detail.pathInfo.requestPath) || '';
+    var xhr = e.detail && e.detail.xhr;
+    if (!url.endsWith('/policy-rules/add') || !xhr) return;
+
+    var rawTrigger = xhr.getResponseHeader('HX-Trigger') || '';
     var form = document.getElementById('policy-chunks-form');
-    if (!e.target || e.target !== form) return;
-
-    var status = e.detail && e.detail.xhr ? e.detail.xhr.status : 0;
-    var trigger = e.detail && e.detail.xhr
-      ? (e.detail.xhr.getResponseHeader('HX-Trigger') || '')
-      : '';
-
-    // Reset checkboxes regardless of outcome.
     if (form) form.reset();
     _resumeChunkPoll();
 
-    if (trigger === 'policyNoop') {
-      // All selected rules were already in the session — show inline feedback.
-      var fb = document.getElementById('policy-add-feedback');
-      if (fb) {
-        fb.style.display = 'block';
-        setTimeout(function () { fb.style.display = 'none'; }, 4000);
-      }
+    if (rawTrigger === 'policyNoop') {
+      _showToast('Rule already in Net Rules — no changes made', 10);
+      return;
     }
-    // policyChanged is fired by the server HX-Trigger header; HTMX dispatches
-    // it on document.body and the #policy-rules-container picks it up.
-    // Also fire client-side to handle policyNoop case where we still want the
-    // rules container to confirm no change.
-    htmx.trigger(document.body, 'policyChanged');
+
+    // Parse JSON trigger to get added count.
+    var added = 0;
+    try {
+      var parsed = JSON.parse(rawTrigger);
+      added = (parsed.policyChanged && parsed.policyChanged.added) || 0;
+    } catch (_) {}
+
+    if (added > 0) {
+      _showToast('Added ' + added + ' rule' + (added === 1 ? '' : 's') + ' to Net Rules', 10);
+    }
+
+    // Refresh both panels: rules container (via policyChanged event that HTMX
+    // dispatches from the HX-Trigger header) and chunks (force a reload so
+    // promoted rules are removed from the pending list immediately).
+    _refreshChunks();
   });
 
-  // ── Dot indicator on Net Rules tab when rules change ──
+  // ── Handle delete-button responses ──
+  document.addEventListener('htmx:afterRequest', function (e) {
+    var url = (e.detail && e.detail.pathInfo && e.detail.pathInfo.requestPath) || '';
+    var xhr = e.detail && e.detail.xhr;
+    if (!/\/policy-rules\/\d+\/delete$/.test(url) || !xhr) return;
+
+    var rawTrigger = xhr.getResponseHeader('HX-Trigger') || '';
+    var deleted = 0;
+    try {
+      var parsed = JSON.parse(rawTrigger);
+      deleted = (parsed.policyChanged && parsed.policyChanged.deleted) || 0;
+    } catch (_) {}
+
+    if (deleted) {
+      _showToast('Rule removed from Net Rules', 10);
+      _refreshChunks(); // chunks may now show the removed rule as pending again
+    }
+  });
+
+  // ── Dot indicator on Net Rules tab ──
   document.body.addEventListener('policyChanged', function () {
     var tab = document.getElementById('tab-policy');
-    if (tab && tab.classList.contains('pf-m-current')) return; // already viewing
+    if (tab && tab.classList.contains('pf-m-current')) return;
     var textEl = document.getElementById('policy-tab-text');
     if (textEl) textEl.textContent = 'Net Rules ●';
   });
+
 }());
 </script>
 

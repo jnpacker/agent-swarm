@@ -1953,7 +1953,9 @@ class TestPolicyRulesEndpoints:
             data={"chunk": _j.dumps(chunk)},
         )
         assert resp.status_code == 200
-        assert resp.headers.get("hx-trigger") == "policyChanged"
+        trigger = _j.loads(resp.headers.get("hx-trigger", "{}"))
+        assert "policyChanged" in trigger
+        assert trigger["policyChanged"]["added"] == 1
 
         async with _TestSession() as db:
             from sqlalchemy import select
@@ -2017,7 +2019,9 @@ class TestPolicyRulesEndpoints:
             f"/workspaces/{ws['id']}/sessions/{s['id']}/policy-rules/0/delete"
         )
         assert resp.status_code == 200
-        assert resp.headers.get("hx-trigger") == "policyChanged"
+        trigger = _j.loads(resp.headers.get("hx-trigger", "{}"))
+        assert "policyChanged" in trigger
+        assert trigger["policyChanged"]["deleted"] == 1
 
         async with _TestSession() as db:
             from swarmer.models.session import Session
