@@ -105,11 +105,13 @@ async def _setup_db():
 async def client():
     from swarmer.api.deps import get_current_user, require_api_auth
     from swarmer.database import get_db
+    from swarmer.deps import require_auth
     from swarmer.main import app
 
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[require_api_auth] = _override_require_api_auth
     app.dependency_overrides[get_current_user] = _override_get_current_user
+    app.dependency_overrides[require_auth] = lambda: None  # bypass browser session auth
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -918,6 +920,7 @@ class TestRunOpenshellAgent:
         with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
              patch("swarmer.openshell_client.exec_command", new=AsyncMock(return_value=exec_result)), \
              patch("swarmer.openshell_client.read_opencode_response", new=AsyncMock(return_value="agent done")), \
+             patch("swarmer.openshell_client.get_draft_chunks", new=AsyncMock(return_value=[])), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
             from swarmer.routers.sessions import _run_openshell_agent
             await _run_openshell_agent(s["id"], "sandbox-prompt", ["sh", "-c", "opencode run"], "prompt", "opencode")
@@ -945,6 +948,7 @@ class TestRunOpenshellAgent:
         exec_result = MagicMock(exit_code=1, stdout="", stderr="error: tool crashed")
         with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
              patch("swarmer.openshell_client.exec_command", new=AsyncMock(return_value=exec_result)), \
+             patch("swarmer.openshell_client.get_draft_chunks", new=AsyncMock(return_value=[])), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
             from swarmer.routers.sessions import _run_openshell_agent
             await _run_openshell_agent(s["id"], "sandbox-fail", ["sh", "-c", "opencode run"], "prompt", "opencode")
@@ -972,6 +976,7 @@ class TestRunOpenshellAgent:
         with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
              patch("swarmer.openshell_client.exec_command", new=AsyncMock(return_value=exec_result)), \
              patch("swarmer.openshell_client.read_opencode_response", new=AsyncMock(return_value="done")), \
+             patch("swarmer.openshell_client.get_draft_chunks", new=AsyncMock(return_value=[])), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()) as mock_del:
             from swarmer.routers.sessions import _run_openshell_agent
             await _run_openshell_agent(s["id"], "sandbox-autoclean", ["sh", "-c", "opencode run"], "prompt", "opencode")
@@ -1009,6 +1014,7 @@ class TestRunOpenshellAgent:
         with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
              patch("swarmer.openshell_client.exec_command", new=_fake_exec), \
              patch("swarmer.openshell_client.read_opencode_response", new=AsyncMock(return_value="")), \
+             patch("swarmer.openshell_client.get_draft_chunks", new=AsyncMock(return_value=[])), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
             from swarmer.routers.sessions import _run_openshell_agent
             await _run_openshell_agent(s["id"], "sandbox-running", ["sh", "-c", "opencode run"], "prompt", "opencode")
@@ -1919,4 +1925,149 @@ class TestMcpPatchInjection:
         assert written["mcp"]["atlassian-jira"]["command"] == "jira-mcp-server", (
             "Jira MCP command must be 'jira-mcp-server' (string, not list, for Crush)"
         )
+
+
+# ---------------------------------------------------------------------------
+# Policy rules CRUD endpoint tests (ACM-34993)
+# ---------------------------------------------------------------------------
+
+class TestPolicyRulesEndpoints:
+    """Verify the policy-rules/add and policy-rules/{idx}/delete endpoints."""
+
+    @pytest.mark.asyncio
+    async def test_add_chunk_to_custom_policies(self, client):
+        """POST policy-rules/add promotes a selected chunk into custom_policies."""
+        import json as _j
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        chunk = {
+            "id": "chunk-1",
+            "status": "pending",
+            "rule_name": "vuln-go-dev",
+            "endpoints": [{"host": "vuln.go.dev", "port": 443, "protocol": "rest"}],
+            "binaries": [{"path": "/usr/local/go/bin/govulncheck", "harness": True}],
+        }
+        resp = await client.post(
+            f"/workspaces/{ws['id']}/sessions/{s['id']}/policy-rules/add",
+            data={"chunk": _j.dumps(chunk)},
+        )
+        assert resp.status_code == 200
+        assert resp.headers.get("hx-trigger") == "policyChanged"
+
+        async with _TestSession() as db:
+            from sqlalchemy import select
+            from swarmer.models.session import Session
+            sess = (await db.execute(select(Session).where(Session.id == s["id"]))).scalar_one()
+
+        rules = _j.loads(sess.custom_policies)
+        assert len(rules) == 1
+        assert rules[0]["name"] == "vuln-go-dev"
+        assert rules[0]["source"] == "chunk"
+        assert rules[0]["endpoints"][0]["host"] == "vuln.go.dev"
+
+    @pytest.mark.asyncio
+    async def test_add_chunk_deduplicates_by_rule_name(self, client):
+        """Adding a chunk with a rule_name that already exists in custom_policies is a no-op."""
+        import json as _j
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        chunk = {
+            "id": "chunk-1",
+            "status": "pending",
+            "rule_name": "vuln-go-dev",
+            "endpoints": [{"host": "vuln.go.dev", "port": 443, "protocol": "rest"}],
+            "binaries": [],
+        }
+        # Add twice
+        for _ in range(2):
+            await client.post(
+                f"/workspaces/{ws['id']}/sessions/{s['id']}/policy-rules/add",
+                data={"chunk": _j.dumps(chunk)},
+            )
+
+        async with _TestSession() as db:
+            from sqlalchemy import select
+            from swarmer.models.session import Session
+            sess = (await db.execute(select(Session).where(Session.id == s["id"]))).scalar_one()
+
+        rules = _j.loads(sess.custom_policies)
+        assert len(rules) == 1, "Duplicate rule should not be added"
+
+    @pytest.mark.asyncio
+    async def test_delete_custom_rule_by_index(self, client):
+        """POST policy-rules/{idx}/delete removes the rule at that index."""
+        import json as _j
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        # Pre-populate two rules
+        async with _TestSession() as db:
+            from swarmer.models.session import Session
+            from sqlalchemy import select
+            sess = (await db.execute(select(Session).where(Session.id == s["id"]))).scalar_one()
+            sess.custom_policies = _j.dumps([
+                {"name": "rule-a", "endpoints": [], "binaries": [], "source": "chunk", "added_at": "2026-01-01"},
+                {"name": "rule-b", "endpoints": [], "binaries": [], "source": "chunk", "added_at": "2026-01-01"},
+            ])
+            await db.commit()
+
+        resp = await client.post(
+            f"/workspaces/{ws['id']}/sessions/{s['id']}/policy-rules/0/delete"
+        )
+        assert resp.status_code == 200
+        assert resp.headers.get("hx-trigger") == "policyChanged"
+
+        async with _TestSession() as db:
+            from swarmer.models.session import Session
+            from sqlalchemy import select
+            sess = (await db.execute(select(Session).where(Session.id == s["id"]))).scalar_one()
+
+        rules = _j.loads(sess.custom_policies)
+        assert len(rules) == 1
+        assert rules[0]["name"] == "rule-b"
+
+    @pytest.mark.asyncio
+    async def test_policy_chunks_snapshot_on_completion(self, client):
+        """_run_openshell_agent stores chunk JSON in policy_chunks on completion."""
+        import json as _j
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="prompt")
+
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name='sb-policy', phase='pending' WHERE id=:id"),
+                {"id": s["id"]},
+            )
+            await db.commit()
+
+        fake_chunks = [
+            {
+                "id": "chunk-1",
+                "status": "pending",
+                "rule_name": "test-rule",
+                "endpoints": [{"host": "example.com", "port": 443, "protocol": "rest"}],
+                "binaries": [],
+            }
+        ]
+        exec_result = MagicMock(exit_code=0, stdout="done", stderr="")
+        with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
+             patch("swarmer.openshell_client.exec_command", new=AsyncMock(return_value=exec_result)), \
+             patch("swarmer.openshell_client.read_opencode_response", new=AsyncMock(return_value="done")), \
+             patch("swarmer.openshell_client.get_draft_chunks", new=AsyncMock(return_value=fake_chunks)), \
+             patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
+            from swarmer.routers.sessions import _run_openshell_agent
+            await _run_openshell_agent(s["id"], "sb-policy", ["opencode", "run"], "prompt", "opencode")
+
+        async with _TestSession() as db:
+            from swarmer.models.session import Session
+            from sqlalchemy import select
+            sess = (await db.execute(select(Session).where(Session.id == s["id"]))).scalar_one()
+
+        assert sess.phase == "succeeded"
+        assert sess.policy_chunks, "policy_chunks should be set after completion"
+        stored = _j.loads(sess.policy_chunks)
+        assert len(stored) == 1
+        assert stored[0]["rule_name"] == "test-rule"
 

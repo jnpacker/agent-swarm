@@ -337,6 +337,7 @@ def build_session_policy(
     agent_tool: str,
     model: str,
     prompt_sources: list | None = None,
+    custom_policies: list[dict] | None = None,
 ):
     """Assemble a complete OpenShell SandboxPolicy proto for this session.
 
@@ -347,6 +348,10 @@ def build_session_policy(
     clone and AI API calls work immediately without any probe-deny-approve
     cycle (ACM-34909).
 
+    custom_policies: optional list of session-level rule dicts promoted from
+    draft chunks.  These are merged into the static policy so approved rules
+    take effect on the next sandbox launch without any code change.
+
     Returns a SandboxPolicy proto object to be set on SandboxSpec.policy.
     """
     from google.protobuf.json_format import ParseDict
@@ -355,6 +360,7 @@ def build_session_policy(
     network_policies_dict = build_session_network_policies(
         session, repos, mcp_servers, agent_tool, model,
         prompt_sources=prompt_sources,
+        custom_policies=custom_policies,
     )
 
     policy_dict = {
@@ -376,12 +382,17 @@ def build_session_network_policies(
     agent_tool: str,
     model: str,
     prompt_sources: list | None = None,
+    custom_policies: list[dict] | None = None,
 ) -> dict:
     """Return the computed network_policies dict for this session.
 
     Called by build_session_policy() to populate spec.policy.network_policies
     at sandbox creation time.  Also exposed directly for testing and for the
     policy-extract smoke test harness (scripts/openshell_smoke_test.py).
+
+    custom_policies: optional list of session-level rule dicts promoted from
+    draft chunks.  Each entry is merged into the dict keyed by a slugified
+    version of its "name" field (or "custom_{i}" as a fallback).
     """
     network_policies_dict: dict = {}
     network_policies_dict.update(_build_agent_api_block(agent_tool, model))
@@ -423,5 +434,11 @@ def build_session_network_policies(
         network_policies_dict["govulncheck"] = _GOVULNCHECK_BLOCK
     elif lang == "python":
         network_policies_dict["pypi"] = _PYTHON_DEVELOPMENT_BLOCK
+
+    # Merge session-level custom rules approved from draft chunks.
+    for i, rule in enumerate(custom_policies or []):
+        rule_name = rule.get("name", "")
+        key = f"custom_{rule_name.replace('-', '_').replace(' ', '_') or i}"
+        network_policies_dict[key] = rule
 
     return network_policies_dict

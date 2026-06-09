@@ -520,3 +520,64 @@ def test_raw_github_multiple_prompt_sources_each_get_block():
     assert len(raw_keys) == 2, f"Expected 2 raw_github blocks, got: {raw_keys}"
     assert "raw_github_stolostron_agentic_sdlc" in raw_keys
     assert "raw_github_openshift_fleet_runbooks" in raw_keys
+
+
+# ---------------------------------------------------------------------------
+# custom_policies merge tests (no real SDK needed)
+# ---------------------------------------------------------------------------
+
+def test_custom_policies_merged_into_network_policies():
+    """Custom rules from session.custom_policies are merged into network_policies dict."""
+    custom = [
+        {
+            "name": "vuln-go-dev",
+            "endpoints": [{"host": "vuln.go.dev", "port": 443, "protocol": "rest"}],
+            "binaries": [{"path": "/usr/local/go/bin/govulncheck", "harness": True}],
+        }
+    ]
+    net = build_session_network_policies(
+        _make_session(language="golang"),
+        repos=[],
+        mcp_servers=[],
+        agent_tool="opencode",
+        model=_MODEL,
+        custom_policies=custom,
+    )
+    # The custom rule should appear under a slugified key
+    matching = [k for k in net if "vuln_go_dev" in k or "custom_vuln" in k]
+    assert matching, f"Custom rule not found in network_policies keys: {list(net.keys())}"
+    rule = net[matching[0]]
+    assert rule["endpoints"][0]["host"] == "vuln.go.dev"
+
+
+def test_custom_policies_none_does_not_error():
+    """Passing custom_policies=None (the default) does not raise."""
+    net = build_session_network_policies(
+        _make_session(),
+        repos=[],
+        mcp_servers=[],
+        agent_tool="opencode",
+        model=_MODEL,
+        custom_policies=None,
+    )
+    assert "agent_api" in net
+
+
+def test_custom_policies_empty_list_does_not_add_keys():
+    """Passing an empty custom_policies list adds no extra keys."""
+    net_no_custom = build_session_network_policies(
+        _make_session(),
+        repos=[],
+        mcp_servers=[],
+        agent_tool="opencode",
+        model=_MODEL,
+    )
+    net_empty_custom = build_session_network_policies(
+        _make_session(),
+        repos=[],
+        mcp_servers=[],
+        agent_tool="opencode",
+        model=_MODEL,
+        custom_policies=[],
+    )
+    assert set(net_no_custom.keys()) == set(net_empty_custom.keys())

@@ -196,6 +196,13 @@
       </button>
     </li>
     {% endif %}
+    {% if session.sandbox_name or session.policy_chunks or session.custom_policies %}
+    <li class="pf-v6-c-tabs__item" id="tab-policy">
+      <button class="pf-v6-c-tabs__link" role="tab" aria-selected="false" aria-controls="panel-policy" tabindex="-1" onclick="switchTab('policy')">
+        <span class="pf-v6-c-tabs__item-text" id="policy-tab-text">Policy</span>
+      </button>
+    </li>
+    {% endif %}
   </ul>
 </div>
 
@@ -555,6 +562,51 @@ git apply /path/to/{{ patch_filename }}
       {% endif %}
     </div>
   </div>
+</div>
+{% endif %}
+
+{# ════════════════════════════════════════════════════════════
+   Tab panel: Policy (OpenShell sessions with sandbox/chunks/custom rules)
+   ════════════════════════════════════════════════════════════ #}
+{% if session.sandbox_name or session.policy_chunks or session.custom_policies %}
+<div id="panel-policy" class="pf-v6-c-tab-content" role="tabpanel" aria-labelledby="tab-policy" hidden style="margin-top:var(--pf-t--global--spacer--lg);">
+
+  {# ── Custom Rules card ── #}
+  <div class="pf-v6-c-card" style="margin-bottom:var(--pf-t--global--spacer--md);">
+    <div class="pf-v6-c-card__header">
+      <h3 class="pf-v6-c-card__header-main" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">Custom Rules</h3>
+    </div>
+    <div class="pf-v6-c-card__body"
+         hx-get="/workspaces/{{ ws.id }}/sessions/{{ session.id }}/policy-rules-partial"
+         hx-trigger="policyChanged from:body"
+         hx-swap="innerHTML"
+         id="policy-rules-container">
+      {% set rules = custom_policy_rules %}
+      {% include "sessions/_policy_rules.html" with context %}
+    </div>
+  </div>
+
+  {# ── Draft Chunks card ── #}
+  <div class="pf-v6-c-card">
+    <div class="pf-v6-c-card__header">
+      <h3 class="pf-v6-c-card__header-main" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">Draft Policy Chunks</h3>
+    </div>
+    <div class="pf-v6-c-card__body" style="padding:0;"
+         id="policy-chunks-container">
+      <div id="policy-chunks-content"
+           hx-get="/workspaces/{{ ws.id }}/sessions/{{ session.id }}/policy-chunks"
+           {% if session.is_active %}
+           hx-trigger="load, every 30s"
+           {% else %}
+           hx-trigger="load"
+           {% endif %}
+           hx-swap="innerHTML"
+           style="padding:var(--pf-t--global--spacer--md);">
+        <span style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm);">Loading chunks…</span>
+      </div>
+    </div>
+  </div>
+
 </div>
 {% endif %}
 
