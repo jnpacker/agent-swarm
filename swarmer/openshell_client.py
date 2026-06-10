@@ -326,6 +326,31 @@ async def attach_sandbox_provider(sandbox_name: str, provider_name: str, client=
     await asyncio.to_thread(_do_attach)
 
 
+async def detach_sandbox_provider(sandbox_name: str, provider_name: str, client=None) -> None:
+    """Detach a provider from a sandbox, ignoring NOT_FOUND errors."""
+    from openshell._proto import openshell_pb2
+    import grpc
+
+    if client is None:
+        client = _get_client()
+
+    def _do_detach():
+        req = openshell_pb2.DetachSandboxProviderRequest()
+        req.sandbox_name = sandbox_name
+        req.provider_name = provider_name
+        try:
+            client._stub.DetachSandboxProvider(req, timeout=client._timeout)
+        except grpc.RpcError as exc:
+            if isinstance(exc, grpc.Call) and exc.code() in (
+                grpc.StatusCode.NOT_FOUND,
+                grpc.StatusCode.FAILED_PRECONDITION,
+            ):
+                return
+            raise
+
+    await asyncio.to_thread(_do_detach)
+
+
 async def approve_draft_policy_chunks(
     sandbox_name: str,
     expected_hosts: set[str] | None = None,

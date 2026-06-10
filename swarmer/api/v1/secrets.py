@@ -250,6 +250,25 @@ async def delete_pat(
     if pat is None:
         raise HTTPException(status_code=404, detail="PAT not found")
 
+    # Clean up the OpenShell gateway provider for this PAT before deleting the DB record.
+    # Best-effort: log errors but do not block deletion if OpenShell is unavailable.
+    provider_name = f"swarmer-ws-{ws_id}-github-pat-{pat_id}"
+    try:
+        from swarmer import openshell_client
+        from swarmer.config import settings
+        if settings.openshell_gateway_url:
+            sandboxes = await openshell_client.list_sandboxes()
+            for sandbox_name in sandboxes:
+                await openshell_client.detach_sandbox_provider(sandbox_name, provider_name)
+            await openshell_client.delete_provider(provider_name)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Failed to clean up OpenShell provider %s during PAT deletion — continuing",
+            provider_name,
+            exc_info=True,
+        )
+
     await db.delete(pat)
     await db.commit()
     return MessageOut(detail="PAT deleted.")

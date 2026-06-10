@@ -203,6 +203,7 @@ class PATUpdate(BaseModel):
 class PATOut(BaseModel):
     id: int
     workspace_id: int
+    user_id: str
     name: str
     github_username: str
     github_org: str

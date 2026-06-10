@@ -852,9 +852,12 @@ async def _do_launch_openshell(
             })
         provider_names.append(pname)
     if session.github_pat:
-        pname = f"swarmer-ws-{ws_id}-github"
-        pat_token = getattr(session.github_pat, "token", None) or getattr(session.github_pat, "pat", "")
-        await openshell_client.ensure_provider(pname, "github", {}, credentials={"api_token": pat_token})
+        pname = f"swarmer-ws-{ws_id}-github-pat-{session.github_pat.id}"
+        pat_token = session.github_pat.pat or ""
+        await openshell_client.ensure_provider(pname, "github", {}, credentials={
+            "GITHUB_TOKEN": pat_token,
+            "GH_TOKEN": pat_token,
+        })
         provider_names.append(pname)
     for mcp in (mcp_servers or []):
         if "jira" in getattr(mcp, "slug", "") and getattr(mcp, "jira_access_token_enc", ""):
