@@ -54,7 +54,6 @@ async def migrate_db() -> None:
     from sqlalchemy import text
 
     migrations = [
-        "ALTER TABLE sessions ADD COLUMN privileged BOOLEAN NOT NULL DEFAULT 0",
         "ALTER TABLE sessions ADD COLUMN agent_tool VARCHAR(32) NOT NULL DEFAULT 'opencode'",
         "ALTER TABLE opencode_secrets ADD COLUMN anthropic_api_key_enc TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE opencode_secrets ADD COLUMN openai_api_key_enc TEXT NOT NULL DEFAULT ''",
@@ -72,7 +71,6 @@ async def migrate_db() -> None:
         "ALTER TABLE mcp_servers ADD COLUMN jira_server_url TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE mcp_servers ADD COLUMN jira_access_token_enc TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE mcp_servers ADD COLUMN jira_email TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE sessions ADD COLUMN k8s_secret_names TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE opencode_secrets ADD COLUMN user_id VARCHAR(255) NOT NULL DEFAULT ''",
         "ALTER TABLE opencode_secrets ADD COLUMN shared BOOLEAN NOT NULL DEFAULT 1",
         "ALTER TABLE github_pats ADD COLUMN user_id VARCHAR(255) NOT NULL DEFAULT ''",

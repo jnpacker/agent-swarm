@@ -30,8 +30,6 @@ make image-build-crush   # Build Crush agent container image
 # Local kind cluster
 make kind-create         # Create kind cluster with NodePort 30080→8080
 make kind-load           # Load swarmer image into kind
-make kind-load-opencode  # Load opencode agent image into kind
-make kind-load-crush     # Load crush agent image into kind
 make kind-deploy         # Full one-shot: create cluster + build + load + deploy
 make kind-delete         # Tear down kind cluster
 
@@ -86,7 +84,7 @@ Use placeholder patterns instead: `<YOUR_PROJECT>`, `example.com`, `your-registr
 - Python 3.12, type hints throughout (using `X | None` union syntax, not `Optional`)
 - `Mapped[type]` for all SQLAlchemy columns (SQLAlchemy 2.x declarative style)
 - Module-level singleton pattern: `settings = Settings()`, `_fernet: Fernet | None = None`
-- Lazy kubernetes imports inside functions (avoid import errors when K8s isn't configured)
+- Lazy kubernetes imports inside functions (avoid import errors when K8s isn't configured) — K8s is used only for auth, pull secrets, and namespace management
 - `noqa: F401` on model imports in `__init__.py` and forward-reference strings in relationships
 
 ### Router Pattern
@@ -105,18 +103,23 @@ Use placeholder patterns instead: `<YOUR_PROJECT>`, `example.com`, `your-registr
 - Router files: plural noun matching the resource (`workspaces.py`, `sessions.py`)
 - Template directories: plural noun matching the resource
 - HTMX partial templates: prefixed with `_` (e.g., `_status_badge.html`, `_repo_list.html`, `_list_rows.html`)
-- K8s resource names: `session-{session_id}-{suffix}` (pods, PVCs), `session-{session_id}-svc` (services), `session-{session_id}-chat` (routes)
-- K8s secret names: derived from model fields (e.g., `github-pat-{slug}`, `opencode-secret`, `crush-secret`); optional unmanaged `swarmer-agent-extra-env` in the workspace namespace injects extra agent env vars (`envFrom`, optional)
+- OpenShell sandbox names: `swarmer-session-{session_id}-{hex}` (auto-generated at launch)
+- K8s resource names (infrastructure only): workspace namespace, `quay-pull-secret`, `swarmer-agent-extra-env` (env vars, pending ACM-35039 migration)
 - URL pattern: `/workspaces/{ws_id}/sessions/{sid}/action`
+
+### Design Principles
+
+- **Favor encrypted database over Kubernetes objects** — Store credentials, configuration, and state in the encrypted SQLite database rather than K8s Secrets/ConfigMaps. Values go through `crypto.encrypt()`/`crypto.decrypt()` and are never stored or logged in plaintext.
+- **OpenShell is the sole session runtime** — All agent session lifecycle goes through OpenShell Gateway + Supervisor APIs. Never create K8s pods, PVCs, Services, or Routes for sessions.
+- **Minimal K8s surface** — New features should not add K8s dependencies. If you need to store data, use the DB. If you need to inject something into a sandbox, use the OpenShell Gateway API.
 
 ### Configuration
 
 - `pydantic-settings` with `.env` file support, `extra="ignore"` (unrecognized env vars silently ignored)
 - All settings have sensible defaults for local development
-- Key env vars: `DATABASE_URL`, `SWARMER_SECRET_KEY`, `K8S_IN_CLUSTER`, `K8S_API_URL`, `OPENSHIFT_OAUTH_URL`
+- Key env vars: `DATABASE_URL`, `SWARMER_SECRET_KEY`, `K8S_IN_CLUSTER`, `K8S_API_URL`, `OPENSHIFT_OAUTH_URL`, `OPENSHELL_GATEWAY_URL`, `OPENSHELL_SUPERVISOR_URL`
 - Agent images: `AGENT_IMAGE_OPENCODE`, `AGENT_IMAGE_CRUSH`, `CRUSH_VERSION`, `DEFAULT_AGENT_TOOL`
 - Concurrency: `MAX_CONCURRENT_AGENTS` (default 5) — global cap on concurrent agent pods; set to 0 to disable
-- Container runtime defaults to `podman` (override with `CONTAINER_CMD=docker`)
 
 ### Testing
 
@@ -135,10 +138,11 @@ Use placeholder patterns instead: `<YOUR_PROJECT>`, `example.com`, `your-registr
 
 4. **SQLite single-writer**: The K8s Deployment uses `strategy: Recreate` (not RollingUpdate) because SQLite doesn't support concurrent writers. Only one replica is safe.
 
-5. **Session mode affects pod lifecycle**:
-   - `prompt` mode: `restartPolicy: Never`, pod exits after agent finishes, auto-cleaned by log_poller
-   - `server`/`tui` modes: `restartPolicy: Always`, pod runs indefinitely
-   - Stopping a session always deletes the pod; if `persist=False`, the PVC is also deleted
+5. **Session mode affects sandbox lifecycle**:
+   - `prompt` mode: sandbox runs the agent command once; on success, `_run_openshell_agent` auto-deletes the sandbox. On app restart, `_restart_prompt_pollers()` resumes monitoring via `exec_command_streaming`.
+   - `server` mode: sandbox runs the agent serve command indefinitely; `expose_service()` creates a routable URL stored in `session.service_url`
+   - `tui` mode: sandbox runs `sleep infinity`; browser connects via xterm.js → WebSocket → OpenShell `exec_interactive()` PTY
+   - Stopping always calls `openshell_client.delete_sandbox()` (and `delete_service()` for server mode)
 
 6. **OpenCode model format quirk**: Model strings use `provider/model@version` format (e.g., `google-vertex-anthropic/claude-sonnet-4-6@default`). The `@version` suffix is part of the model ID. Crush uses simpler `provider/model` format (e.g., `vertexai/claude-sonnet-4-6`).
 
@@ -150,7 +154,7 @@ Use placeholder patterns instead: `<YOUR_PROJECT>`, `example.com`, `your-registr
 
 10. **Manual migrations**: New columns are added via `database.py:migrate_db()` with `ALTER TABLE` statements. Only "duplicate column" / "already exists" errors are suppressed; other failures re-raise so startup fails visibly. When adding a new column to an existing table, add the migration there and include a `server_default` so existing rows work.
 
-11. **Blocking K8s calls in async handlers**: All synchronous `kubernetes` client calls inside async functions must be wrapped with `asyncio.to_thread()` to avoid blocking the event loop. The TUI WebSocket handler uses a background thread with `threading.Event` for the pod exec stream reader.
+11. **Blocking K8s calls in async handlers**: The remaining synchronous `kubernetes` client calls (auth, pull secrets, env vars) inside async functions must be wrapped with `asyncio.to_thread()`. The TUI WebSocket handler uses a background thread with `threading.Event` for the OpenShell gRPC stream reader.
 
 12. **`OpencodeSecret` naming is misleading**: Despite the name, this model stores credentials for all agent tools (OpenCode, Crush), including Anthropic and OpenAI API keys. The table name `opencode_secrets` is a legacy artifact.
 
@@ -162,7 +166,7 @@ Use placeholder patterns instead: `<YOUR_PROJECT>`, `example.com`, `your-registr
 
 16. **Container image runs as non-root**: The Containerfile uses UBI10 `python-312-minimal` with UID 1001. Directories `/data` and `/auth` are created as root then ownership dropped. PVCs must be group-0 writable for the non-root user.
 
-17. **Concurrency limit queues, not rejects**: When `MAX_CONCURRENT_AGENTS` is reached, `_do_launch()` sets `phase="queued"` and returns without creating a pod — it does NOT raise an exception. The queue processor in `scheduler.py` re-evaluates every 2 minutes (with a 2-minute in-memory cooldown). Stopping a queued session (no pod exists) returns it to `"idle"` not `"stopped"`, and skips all K8s cleanup. The `"queued"` phase is included in `is_active`, so the session is protected from re-launch and editing while waiting.
+17. **Concurrency limit queues, not rejects**: When `MAX_CONCURRENT_AGENTS` is reached, `_do_launch()` sets `phase="queued"` and returns without creating a sandbox — it does NOT raise an exception. The queue processor in `scheduler.py` re-evaluates every 2 minutes (with a 2-minute in-memory cooldown). Stopping a queued session (no sandbox exists) returns it to `"idle"` not `"stopped"`, and skips all sandbox cleanup. The `"queued"` phase is included in `is_active`, so the session is protected from re-launch and editing while waiting.
 
 ## Personal configuration
 

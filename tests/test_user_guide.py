@@ -159,8 +159,6 @@ MAKEFILE_TARGETS_IN_GUIDE = [
     "openshift-deploy",
     "kind-create",
     "kind-load",
-    "kind-load-opencode",
-    "kind-load-crush",
     "kind-deploy",
     "kind-delete",
     "user-token",

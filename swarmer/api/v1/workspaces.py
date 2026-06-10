@@ -66,16 +66,12 @@ async def create_workspace(
             detail=f"A workspace with namespace '{namespace}' already exists.",
         )
 
-    # Best-effort K8s setup
-    eff_ns = k8s.effective_namespace(namespace)
+    # Best-effort K8s namespace setup
     try:
         if not settings.k8s_namespace:
-            k8s.ensure_namespace(eff_ns)
-        from swarmer.agent_tools.registry import all_tools
-        for tool in all_tools():
-            k8s.apply_agent_config(eff_ns, agent_tool=tool.name)
+            k8s.ensure_namespace(k8s.effective_namespace(namespace))
     except Exception:
-        pass  # K8s setup failure is non-fatal
+        pass  # K8s namespace creation failure is non-fatal
 
     return ws
 

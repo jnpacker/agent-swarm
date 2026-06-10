@@ -140,28 +140,26 @@ async def test_create_provider_returns_empty_for_no_mcp(sdk_client, session, wor
 
 @pytest.mark.asyncio
 async def test_create_provider_does_not_create_k8s_agent_secret(session, workspace_secret):
-    from swarmer import k8s
-    with patch.object(k8s, "create_session_agent_secret", MagicMock()) as mock_fn:
-        await oc.create_provider(
-            session=session,
-            workspace_secret=workspace_secret,
-            github_pat=None,
-            mcp_servers=[],
-        )
-        mock_fn.assert_not_called()
+    # k8s.create_session_agent_secret has been removed from k8s.py as part of the
+    # OpenShell migration dead-code cleanup.  create_provider() cannot call it.
+    await oc.create_provider(
+        session=session,
+        workspace_secret=workspace_secret,
+        github_pat=None,
+        mcp_servers=[],
+    )
 
 
 @pytest.mark.asyncio
 async def test_create_provider_does_not_create_k8s_pat_secret(session, workspace_secret, github_pat):
-    from swarmer import k8s
-    with patch.object(k8s, "create_session_pat_secret", MagicMock()) as mock_fn:
-        await oc.create_provider(
-            session=session,
-            workspace_secret=workspace_secret,
-            github_pat=github_pat,
-            mcp_servers=[],
-        )
-        mock_fn.assert_not_called()
+    # k8s.create_session_pat_secret has been removed from k8s.py as part of the
+    # OpenShell migration dead-code cleanup.  create_provider() cannot call it.
+    await oc.create_provider(
+        session=session,
+        workspace_secret=workspace_secret,
+        github_pat=github_pat,
+        mcp_servers=[],
+    )
 
 
 @pytest.mark.asyncio
@@ -257,14 +255,13 @@ async def test_wait_ready_called_after_create(sdk_client):
 
 @pytest.mark.asyncio
 async def test_create_sandbox_does_not_create_pvc(sdk_client):
-    from swarmer import k8s_session as k8s_sess
+    # k8s_session.ensure_session_pvc has been removed — k8s_session no longer exists.
+    # Verify create_sandbox succeeds without any PVC creation.
     with patch.object(oc, "_get_client", return_value=sdk_client), \
          patch.object(oc, "_wait_sandbox_ready", new=AsyncMock()):
-        with patch.object(k8s_sess, "ensure_session_pvc") as mock_pvc:
-            await oc.create_sandbox(
-                image="quay.io/jpacker/opencode:latest", env_vars={}, policy=None
-            )
-            mock_pvc.assert_not_called()
+        await oc.create_sandbox(
+            image="quay.io/jpacker/opencode:latest", env_vars={}, policy=None
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -376,17 +373,15 @@ async def test_get_draft_chunks_returns_empty_on_error(sdk_client):
 
 @pytest.mark.asyncio
 async def test_stop_does_not_call_pvc_delete(sdk_client):
-    from swarmer import k8s_session as k8s_sess
+    # k8s_session.delete_session_pvc has been removed — k8s_session no longer exists.
+    # Verify delete_sandbox succeeds without any PVC deletion.
     with patch.object(oc, "_get_client", return_value=sdk_client):
-        with patch.object(k8s_sess, "delete_session_pvc") as mock_pvc:
-            await oc.delete_sandbox(sandbox_name="sandbox-s42-abc1")
-            mock_pvc.assert_not_called()
+        await oc.delete_sandbox(sandbox_name="sandbox-s42-abc1")
 
 
 @pytest.mark.asyncio
 async def test_stop_does_not_call_cleanup_session_secrets(sdk_client):
-    from swarmer import k8s
+    # k8s.cleanup_session_secrets has been removed from k8s.py as part of the
+    # OpenShell migration dead-code cleanup.  delete_sandbox() cannot call it.
     with patch.object(oc, "_get_client", return_value=sdk_client):
-        with patch.object(k8s, "cleanup_session_secrets", MagicMock()) as mock_clean:
-            await oc.delete_sandbox(sandbox_name="sandbox-s42-abc1")
-            mock_clean.assert_not_called()
+        await oc.delete_sandbox(sandbox_name="sandbox-s42-abc1")

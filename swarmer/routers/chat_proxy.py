@@ -2,7 +2,7 @@
 Reverse-proxy router for server-mode sessions.
 
 Swarmer proxies HTTP/WebSocket traffic through /chat/{path} using
-httpx + websockets, connecting to the session's ClusterIP Service via DNS.
+httpx + websockets, connecting to the session's OpenShell service URL.
 HTML asset paths are rewritten so they resolve through the proxy prefix.
 """
 import asyncio
@@ -57,15 +57,7 @@ def _openshell_httpx_kwargs() -> dict:
     return {"verify": False}
 
 
-# ── Upstream URL resolution ───────────────────────────────────────────────────
-
-def _get_upstream_base(session_id: int, namespace: str, remote_port: int = 4096) -> str:
-    """Return the ClusterIP Service base URL for the session's agent process."""
-    svc = f"session-{session_id}-svc"
-    return f"http://{svc}.{namespace}.svc.cluster.local:{remote_port}"
-
-
-# ── HTML rewriting (in-cluster only) ─────────────────────────────────────────
+# ── HTML rewriting ───────────────────────────────────────────────────────────
 
 def _rewrite_html(content: bytes, prefix: str) -> bytes:
     """Rewrite absolute asset paths in HTML so they resolve through the proxy."""
@@ -100,14 +92,14 @@ async def _load(ws_id: int, sid: int, db: AsyncSession):
     return ws_obj, session
 
 
-def _session_ok(ws_obj, session, ws_id: int) -> str | None:
-    """Return an error string if the session can't be proxied, else None."""
+def _session_ok(ws_obj, session, ws_id: int) -> tuple[str, int] | None:
+    """Return (error_message, status_code) if the session can't be proxied, else None."""
     if ws_obj is None or session is None or session.workspace_id != ws_id:
-        return "Not found"
+        return ("Not found", 404)
     if session.mode != "server" or not session.is_active:
-        return "Session is not running in server mode"
-    if not session.pod_name and not session.service_url:
-        return "Session is not running in server mode"
+        return ("Session is not running in server mode", 503)
+    if not session.service_url:
+        return ("Session has no service URL yet", 503)
     return None
 
 
@@ -122,10 +114,8 @@ async def _proxy_root(
     ws_obj, session = await _load(ws_id, sid, db)
     err = _session_ok(ws_obj, session, ws_id)
     if err:
-        return Response(err, status_code=503 if "running" in err else 404, media_type="text/plain")
-
-    from swarmer.k8s import effective_namespace
-    namespace = effective_namespace(ws_obj.k8s_namespace)
+        msg, code = err
+        return Response(msg, status_code=code, media_type="text/plain")
 
     # Crush sessions: serve the built-in chat UI (swarmer renders the page,
     # the JS inside makes API calls through the /chat/{path} proxy).
@@ -141,14 +131,6 @@ async def _proxy_root(
             },
         )
 
-    # Use the OpenShift Route if one exists — the browser connects directly to
-    # opencode with no sub-path mangling.
-    from swarmer.k8s import get_session_route_host
-    host = get_session_route_host(session.id, namespace)
-    if host:
-        return RedirectResponse(url=f"https://{host}/", status_code=302)
-
-    # Fallback: sub-path HTTP proxy (works for HTTP assets, not ideal for WebSockets).
     return RedirectResponse(
         url=f"/workspaces/{ws_id}/sessions/{sid}/chat/",
         status_code=302,
@@ -169,18 +151,10 @@ async def _chat_http_proxy(
     ws_obj, session = await _load(ws_id, sid, db)
     err = _session_ok(ws_obj, session, ws_id)
     if err:
-        return Response(err, status_code=503 if "running" in err else 404, media_type="text/plain")
+        msg, code = err
+        return Response(msg, status_code=code, media_type="text/plain")
 
-    if session.service_url:
-        upstream_base = session.service_url.rstrip("/")
-    else:
-        from swarmer.k8s import effective_namespace
-        namespace = effective_namespace(ws_obj.k8s_namespace)
-        try:
-            upstream_base = _get_upstream_base(session.id, namespace)
-        except Exception as exc:
-            log.warning("Could not connect to session %d: %s", sid, exc)
-            return Response(f"Could not connect to session: {exc}", status_code=503, media_type="text/plain")
+    upstream_base = session.service_url.rstrip("/")
 
     query = str(request.url.query)
     upstream_url = f"{upstream_base}/{path}"
@@ -188,13 +162,13 @@ async def _chat_http_proxy(
         upstream_url += f"?{query}"
 
     fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in _HOP_BY_HOP}
-    fwd_headers["x-opencode-directory"] = "/sandbox/" if session.sandbox_name else "/workspace"
+    fwd_headers["x-opencode-directory"] = "/sandbox/"
 
     # Check if the request wants SSE (event-stream)
     accept = request.headers.get("accept", "")
     is_sse = "text/event-stream" in accept or "/events" in path
 
-    _tls_kwargs = _openshell_httpx_kwargs() if session.sandbox_name else {}
+    _tls_kwargs = _openshell_httpx_kwargs()
 
     if is_sse:
         # Stream SSE responses — long-lived connection, no timeout buffering
@@ -309,29 +283,19 @@ async def chat_ws_proxy(
         or session.workspace_id != ws_id
         or session.mode != "server"
         or not session.is_active
-        or (not session.pod_name and not session.service_url)
+        or not session.service_url
     ):
         await websocket.close(code=4004, reason="Session unavailable")
         return
 
-    if session.service_url:
-        upstream_base = session.service_url.rstrip("/")
-    else:
-        from swarmer.k8s import effective_namespace
-        namespace = effective_namespace(ws_obj.k8s_namespace)
-        try:
-            upstream_base = _get_upstream_base(session.id, namespace)
-        except Exception as exc:
-            log.warning("Could not connect to session %d for WS: %s", sid, exc)
-            await websocket.close(code=4004, reason="Could not connect to session")
-            return
+    upstream_base = session.service_url.rstrip("/")
 
     query = websocket.url.query
     upstream_url = upstream_base.replace("http://", "ws://").replace("https://", "wss://") + f"/{path}"
     if query:
         upstream_url += f"?{query}"
 
-    _ws_ssl = _openshell_ssl_context() if session.sandbox_name and upstream_url.startswith("wss://") else None
+    _ws_ssl = _openshell_ssl_context() if upstream_url.startswith("wss://") else None
 
     try:
         async with websockets.connect(upstream_url, ssl=_ws_ssl) as upstream_ws:

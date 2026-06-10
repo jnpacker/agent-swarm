@@ -1,6 +1,6 @@
 {# HTMX partial — polled every 5s while session is active or queued #}
 <div id="session-status"
-  {% if session.phase in ('queued', 'pending', 'running') or session.pod_name %}
+  {% if session.phase in ('queued', 'pending', 'running') or session.sandbox_name %}
   hx-get="/workspaces/{{ ws.id }}/sessions/{{ session.id }}/status"
   hx-trigger="every 5s"
   hx-swap="outerHTML"
@@ -38,8 +38,8 @@
       <span class="pf-v6-c-label pf-m-grey"><span class="pf-v6-c-label__content">○ Idle</span></span>
     {% endif %}
 
-    {% if session.pod_name %}
-    <span style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm); font-family:var(--pf-t--global--font--family--mono);">{{ session.pod_name }}</span>
+    {% if session.sandbox_name %}
+    <span style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm); font-family:var(--pf-t--global--font--family--mono);">{{ session.sandbox_name }}</span>
     {% endif %}
 
   </div>

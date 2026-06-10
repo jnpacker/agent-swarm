@@ -14,6 +14,7 @@ import logging
 import pathlib
 import queue
 import shlex
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -764,7 +765,7 @@ try:
     ''').fetchall()
     texts = [json.loads(r[0]).get('text', '') for r in rows if r[0]]
     out = '\\n'.join(t for t in texts if t.strip())
-    print(out[:8000] if out else '', end='')
+    print(out[:64000] if out else '', end='')
     conn.close()
 except Exception as exc:
     import sys; print(f'DB_ERR:{exc}', file=sys.stderr, end='')
@@ -809,6 +810,94 @@ async def exec_command(
                            env=env or {})
 
     return await asyncio.to_thread(_do_exec)
+
+
+async def exec_command_streaming(
+    sandbox_name: str,
+    cmd: list[str],
+    on_output: Callable[[str], Awaitable[None]] | None = None,
+    poll_interval: float = 5.0,
+    env: dict[str, str] | None = None,
+    client=None,
+) -> Any:
+    """Execute a command with incremental output updates via an async callback.
+
+    Uses the SDK's exec_stream() (gRPC unary-stream) so chunks arrive as they are
+    produced rather than waiting for the command to complete.  Every *poll_interval*
+    seconds the accumulated stdout+stderr is passed to *on_output* so callers can
+    persist partial output to the database while the agent is still running.
+
+    Returns the final ExecResult (.stdout, .stderr, .exit_code) once the command exits.
+
+    env: extra env vars forwarded via ExecSandboxRequest.environment (same semantics
+         as exec_command — NOT the sandbox spec environment).
+    """
+    import threading
+
+    if client is None:
+        client = _get_client()
+    sid = await _sandbox_id(sandbox_name, client)
+
+    # Shared state between the reader thread and the asyncio polling task.
+    _buf_lock = threading.Lock()
+    _buf: list[str] = []          # accumulated output chunks
+    _done_event = asyncio.Event() # set by reader thread when exec_stream exhausted
+    _result_holder: list[Any] = []
+
+    loop = asyncio.get_event_loop()
+
+    def _stream_reader():
+        """Blocking thread: consume exec_stream() and accumulate output."""
+        try:
+            for item in client.exec_stream(sid, cmd, env=env or {}):
+                # ExecChunk has .stream ("stdout"/"stderr") and .data (bytes)
+                chunk_data = getattr(item, "data", None)
+                if chunk_data is not None:
+                    text = chunk_data.decode("utf-8", errors="replace")
+                    with _buf_lock:
+                        _buf.append(text)
+                else:
+                    # ExecResult — final item; capture it
+                    _result_holder.append(item)
+        except Exception as exc:
+            log.warning("exec_command_streaming: stream error for %s: %s", sandbox_name, exc)
+        finally:
+            loop.call_soon_threadsafe(_done_event.set)
+
+    reader_thread = threading.Thread(target=_stream_reader, daemon=True)
+    reader_thread.start()
+
+    # Asyncio polling task: call on_output every poll_interval seconds.
+    async def _poll_output():
+        if on_output is None:
+            return
+        while not _done_event.is_set():
+            await asyncio.sleep(poll_interval)
+            with _buf_lock:
+                accumulated = "".join(_buf)
+            if accumulated:
+                try:
+                    await on_output(accumulated)
+                except Exception:
+                    log.warning("exec_command_streaming: on_output callback failed", exc_info=True)
+        # Final callback after the stream ends (picks up any last chunks).
+        with _buf_lock:
+            accumulated = "".join(_buf)
+        if accumulated:
+            try:
+                await on_output(accumulated)
+            except Exception:
+                log.warning("exec_command_streaming: final on_output callback failed", exc_info=True)
+
+    poll_task = asyncio.create_task(_poll_output())
+
+    # Wait for the stream reader thread to finish.
+    await _done_event.wait()
+    await poll_task  # let the final callback fire
+
+    reader_thread.join(timeout=5)
+
+    return _result_holder[0] if _result_holder else None
 
 
 async def get_sandbox_provider_environment(sandbox_id: str, client=None) -> dict[str, str]:

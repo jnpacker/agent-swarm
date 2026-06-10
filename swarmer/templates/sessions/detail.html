@@ -245,18 +245,6 @@
             <input type="hidden" name="github_pat_id" id="cfg_pat"
                    value="{{ session.github_pat.id if session.github_pat else '' }}">
 
-            <div style="display:flex; align-items:center; margin-bottom:var(--pf-t--global--spacer--sm);">
-              <div style="flex:0 0 40%; color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm);">Persist workspace</div>
-              <div style="flex:1;">
-                <div class="pf-v6-c-check">
-                  <input type="checkbox" class="pf-v6-c-check__input" name="persist"
-                         id="cfg_persist" value="true"
-                         {{ 'checked' if session.persist }}
-                         {% if session.is_active %}disabled{% endif %}>
-                </div>
-              </div>
-            </div>
-
             {% if model_options %}
             <div class="pf-v6-c-form__group" style="margin-bottom:var(--pf-t--global--spacer--md);">
               <label class="pf-v6-c-form__label" style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm);">
@@ -327,10 +315,6 @@
               </div>
             </div>
             {% endif %}
-
-            <div style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm); margin-bottom:var(--pf-t--global--spacer--md);">
-              PVC: <code style="font-family:var(--pf-t--global--font--family--mono);">{{ session.pvc_name or '—' }}</code>
-            </div>
 
             <p style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm); margin:0;{% if not session.is_active %} display:none;{% endif %}"
                id="cfg-stop-msg">Stop the session to edit settings.</p>

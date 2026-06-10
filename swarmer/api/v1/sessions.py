@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from datetime import datetime, timezone
@@ -13,13 +12,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from swarmer import k8s
+from pydantic import BaseModel
+
 from swarmer.agent_tools.registry import get as get_tool
 from swarmer.database import get_db
 from swarmer.api.deps import get_current_user, get_workspace_or_404, require_api_auth
 from swarmer.api.schemas import (
     MessageOut,
-    PatchResult,
     ScheduleRequest,
     SessionCreate,
     SessionOut,
@@ -31,6 +30,12 @@ from swarmer.api.schemas import (
 )
 from swarmer.models.session import Session
 from swarmer.models.workspace import Workspace
+
+
+class PatchResult(BaseModel):
+    patch: str
+    commit_msg: str
+    filename: str
 
 log = logging.getLogger(__name__)
 
@@ -113,7 +118,6 @@ async def create_session(
         name=body.name.strip(),
         mode=body.mode,
         model=body.model.strip(),
-        persist=body.persist,
         instruction_prompt=body.instruction_prompt.strip(),
         agent_tool=agent_tool,
         working_branch=wb,
@@ -181,8 +185,6 @@ async def update_session(
         session.github_pat_id = body.github_pat_id
     if body.prompt_id is not None:
         session.prompt_id = body.prompt_id
-    if body.persist is not None:
-        session.persist = body.persist
     if body.working_branch is not None:
         wb = body.working_branch.strip()
         if wb and not _is_valid_ref_name(wb):
@@ -216,7 +218,7 @@ async def delete_session(
         raise HTTPException(status_code=409, detail="Stop the session before deleting")
 
     if session.sandbox_name:
-        # OpenShell session — delete sandbox; skip K8s PVC/Secret cleanup
+        # OpenShell session — delete sandbox
         from swarmer import openshell_client
         if session.service_url:
             try:
@@ -227,13 +229,6 @@ async def delete_session(
             await openshell_client.delete_sandbox(session.sandbox_name)
         except Exception:
             pass
-    else:
-        # K8s session — clean up Secrets only if any were created
-        if session.k8s_secret_names:
-            try:
-                k8s.cleanup_session_secrets(ws.k8s_namespace, session)
-            except Exception:
-                pass
 
     name = session.name
     await db.delete(session)
@@ -297,16 +292,8 @@ async def stop_session(
         session.sandbox_name = None
         session.service_url = None
 
-    if not session.cron_schedule:
-        try:
-            # Kept for any legacy K8s sessions still in the database
-            k8s.cleanup_session_secrets(ws.k8s_namespace, session)
-        except Exception:
-            pass
-
     session.run_completed_at = datetime.now(timezone.utc)
     session.phase = "stopped"
-    session.pod_name = None
     await db.commit()
     await db.refresh(session)
     return session
@@ -367,17 +354,6 @@ async def set_model(
     session = await _get_session_or_404(ws_id, sid, db)
     new_model = body.model.strip()
 
-    if session.is_active and session.pod_name:
-        try:
-            tool = get_tool(session.agent_tool)
-            tool.exec_model_update(session.pod_name, ws.k8s_namespace, new_model)
-        except Exception as exc:
-            log.warning("exec_model_update failed for session %d: %s", sid, exc)
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to update model on running pod: {exc}",
-            )
-
     session.model = new_model
     await db.commit()
     await db.refresh(session)
@@ -422,12 +398,6 @@ async def unschedule_session(
     session.cron_schedule = ""
     session.cron_next_run = None
 
-    if session.k8s_secret_names:
-        try:
-            k8s.cleanup_session_secrets(ws.k8s_namespace, session)
-        except Exception:
-            pass
-
     await db.commit()
     await db.refresh(session)
     return session
@@ -468,55 +438,47 @@ async def generate_patch(
     ws: Workspace = Depends(get_workspace_or_404),
     db: AsyncSession = Depends(get_db),
 ):
+    from swarmer import openshell_client
+    from swarmer.routers.sessions import _build_commit_msg, _patch_filename
+
     session = await _get_session_or_404(ws_id, sid, db)
-    if not session.pod_name or not session.is_active:
+    if not session.sandbox_name:
+        raise HTTPException(status_code=404, detail="Session is not an OpenShell session")
+    if session.phase != "running":
         raise HTTPException(status_code=409, detail="Session must be running to generate a patch")
 
-    from swarmer.routers.sessions import (
-        _build_commit_msg,
-        _exec_in_pod,
-        _patch_filename,
-        _prefix_diff_paths,
-    )
+    if session.patch_base_ref:
+        cmd = ["git", "diff", f"origin/{session.patch_base_ref}"]
+    else:
+        cmd = ["git", "diff"]
 
-    combined_diff = ""
-    for repo in session.repos:
-        workdir = f"/workspace/{repo.local_path}"
-        try:
-            if session.working_branch:
-                diff = await asyncio.to_thread(
-                    _exec_in_pod,
-                    session.pod_name, ws.k8s_namespace, workdir,
-                    ["git", "diff", f"origin/{session.working_branch.split('/')[-1]}..HEAD"],
-                    container=get_tool(session.agent_tool).get_container_name(),
-                )
-            else:
-                diff = await asyncio.to_thread(
-                    _exec_in_pod,
-                    session.pod_name, ws.k8s_namespace, workdir,
-                    ["git", "diff"],
-                    container=get_tool(session.agent_tool).get_container_name(),
-                )
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Git diff failed: {exc}")
+    try:
+        result = await openshell_client.exec_command(
+            sandbox_name=session.sandbox_name,
+            cmd=cmd,
+            client=openshell_client._get_client(),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Git diff failed: {exc}")
 
-        if diff.strip() and len(session.repos) > 1:
-            diff = _prefix_diff_paths(diff, repo.local_path)
-        combined_diff += diff
+    patch = result.stdout or ""
+    commit_msg = result.stderr or ""
 
-    if not combined_diff.strip():
+    if not patch.strip():
         session.patch_output = ""
         session.commit_msg = ""
         await db.commit()
         return PatchResult(patch="", commit_msg="No changes detected.", filename=_patch_filename(session))
 
-    commit_msg = await _build_commit_msg(combined_diff, session.workspace_id, db)
-    session.patch_output = combined_diff
+    if not commit_msg:
+        commit_msg = await _build_commit_msg(patch, session.workspace_id, db)
+
+    session.patch_output = patch
     session.commit_msg = commit_msg
     await db.commit()
 
     return PatchResult(
-        patch=combined_diff,
+        patch=patch,
         commit_msg=commit_msg,
         filename=_patch_filename(session),
     )

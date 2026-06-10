@@ -111,16 +111,6 @@ async def save_credentials(
     await db.commit()
     await db.refresh(secret)
 
-    # Best-effort K8s sync
-    try:
-        from swarmer.agent_tools.registry import all_tools
-        from swarmer.routers.mcp_servers import get_enabled_mcp_servers
-        mcp_servers = await get_enabled_mcp_servers(ws_id, db, user_id=user)
-        for tool in all_tools():
-            k8s.apply_agent_config(ws.k8s_namespace, secret=secret, agent_tool=tool.name, mcp_servers=mcp_servers)
-    except Exception:
-        pass
-
     return secret
 
 

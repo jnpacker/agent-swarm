@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from swarmer import k8s, k8s_session as k8s_sess
+from swarmer import k8s
 from swarmer.agent_tools.registry import get as get_tool, all_tools
 from swarmer.config import settings
 from swarmer.database import get_db
@@ -50,6 +50,30 @@ def _is_valid_ref_name(name: str) -> bool:
     if not name or name.startswith("/") or name.endswith("/") or name.endswith("."):
         return False
     return _INVALID_REF_RE.search(name) is None
+
+
+def _build_repo_context(repos, base_path: str = "/sandbox") -> str:
+    """Build a markdown section listing workspace repositories.
+
+    Returns an empty string when *repos* is empty so callers can
+    unconditionally concatenate the result.
+    """
+    if not repos:
+        return ""
+    lines = [
+        "\n\n## Workspace Repositories\n",
+        "The following Git repositories are available in this workspace:\n",
+        "| Repository | Branch | Path |",
+        "|---|---|---|",
+    ]
+    for repo in repos:
+        org_repo = repo.repo_url.rstrip("/").removesuffix(".git")
+        org_repo = "/".join(org_repo.split("/")[-2:])
+        lines.append(
+            f"| `{org_repo}` | `{repo.branch}` "
+            f"| `{base_path}/{repo.local_path}` |"
+        )
+    return "\n".join(lines) + "\n"
 
 
 async def _get_model_options(
@@ -157,16 +181,7 @@ async def _list_sessions_data(ws_id: int, db: AsyncSession):
 
 
 async def _sync_session_phases(sessions, ws, db: AsyncSession):
-    dirty = False
-    for s in sessions:
-        # OpenShell sessions manage their own phase via _run_openshell_agent
-        if s.phase in ("pending", "running") and s.pod_name and not s.sandbox_name:
-            live_phase, _ = await asyncio.to_thread(k8s.get_pod_status, s.pod_name, ws.k8s_namespace)
-            if live_phase != s.phase:
-                s.phase = live_phase
-                dirty = True
-    if dirty:
-        await db.commit()
+    pass
 
 
 @router.get("/workspaces/{ws_id}/sessions", dependencies=[Depends(require_auth)])
@@ -288,7 +303,6 @@ async def session_create(
     github_pat_id: str = Form(""),
     prompt_id: str = Form(""),
     instruction_prompt: str = Form(""),
-    persist: bool = Form(False),
     mode: str = Form("prompt"),
     model: str = Form(""),
     agent_tool: str = Form("opencode"),
@@ -348,7 +362,6 @@ async def session_create(
         name=name.strip(),
         mode=mode,
         model=model.strip(),
-        persist=persist,
         instruction_prompt=instruction_prompt.strip(),
         agent_tool=agent_tool,
         working_branch=wb,
@@ -425,15 +438,9 @@ async def session_detail(
 
     pats = await _visible_pats(ws_id, db, user_id=_current_user(request))
 
-    # Fetch live K8s detail for the initial page render and sync phase
     status_detail = ""
-    if session.pod_name:
-        live_phase, status_detail = await asyncio.to_thread(k8s.get_pod_status, session.pod_name, ws.k8s_namespace)
-        if live_phase != session.phase:
-            session.phase = live_phase
-            await db.commit()
 
-    # Generate one-time TUI token after K8s sync so phase is current
+    # Generate one-time TUI token
     tui_token = None
     if session.mode == "tui" and session.phase == "running":
         tui_token = str(uuid.uuid4())
@@ -510,7 +517,6 @@ async def session_edit(
     github_pat_id: str = Form(""),
     prompt_id: str = Form(""),
     instruction_prompt: str = Form(""),
-    persist: bool = Form(False),
     mode: str = Form("prompt"),
     model: str = Form(""),
     agent_tool: str = Form("opencode"),
@@ -551,7 +557,6 @@ async def session_edit(
         session.prompt_id = None
 
     session.instruction_prompt = instruction_prompt.strip()
-    session.persist = persist
     if mode in ("tui", "server", "prompt"):
         session.mode = mode
     session.model = model.strip()
@@ -927,12 +932,15 @@ async def _do_launch_openshell(
     ]
     git_username = (session.github_pat.github_username or "") if session.github_pat else ""
     pat_token = (session.github_pat.pat or "") if session.github_pat else ""
-    agents_md = ""
-    if session.mode in ("tui", "server"):
-        repo_context = k8s_sess._build_repo_context(list(session.repos or []), base_path="/sandbox")
-        agents_md = (resolved_prompt or "") + repo_context
-    # main_cmd is used for tui/server modes. For prompt mode, _setup_openshell_sandbox
-    # builds the command from scratch to write the prompt via stdin (no newlines in args).
+    # Build AGENTS.md content for all modes: resolved prompt + repo context table.
+    # TUI/server: written to /sandbox/AGENTS.md, read automatically by the agent.
+    # Prompt mode: same content written to /sandbox/AGENTS.md, then piped as the
+    # CLI argument via "$(</sandbox/AGENTS.md)" shell expansion so the agent gets
+    # the full context (prompt + repo layout) identically to TUI mode.
+    repo_context = _build_repo_context(list(session.repos or []), base_path="/sandbox")
+    agents_md = (resolved_prompt or "") + repo_context
+    # main_cmd is used for tui/server modes only; prompt mode command is built
+    # in _setup_openshell_sandbox to read from /sandbox/AGENTS.md at runtime.
     main_cmd = tool.build_main_cmd(session, model, resolved_prompt=resolved_prompt)
     resolved_prompt_safe = resolved_prompt or ""
     model_setup_cmd = tool.build_model_setup_cmd(model).replace("/workspace/", "/sandbox/")
@@ -1076,7 +1084,10 @@ async def _setup_openshell_sandbox(
                 ref.name, ["sh", "-c", f"export HOME=/sandbox; {clean_cmd}"], client=None
             )
 
-        # AGENTS.md for tui/server modes
+        # Write AGENTS.md for all modes (prompt, tui, server).
+        # TUI/server: the agent reads it automatically as system-level instructions.
+        # Prompt mode: the agent command reads it via "$(</sandbox/AGENTS.md)" shell
+        # expansion, giving the full context (prompt + repo layout) identically to TUI.
         if agents_md:
             await openshell_client.write_agents_md(sandbox_name=ref.name, content=agents_md)
 
@@ -1119,26 +1130,24 @@ async def _setup_openshell_sandbox(
                     )
                     await openshell_client.exec_command(ref.name, ["sh", "-c", branch_cmd], client=None)
 
-        # For prompt mode, write the prompt to /sandbox/.prompt.txt via stdin
-        # so we avoid newline-in-arg gateway rejection. Build the agent command
-        # from scratch (not from pre-built main_cmd which may embed newlines).
-        if mode == "prompt" and resolved_prompt:
-            await openshell_client.exec_command(
-                ref.name, ["sh", "-c", "cat > /sandbox/.prompt.txt"],
-                client=None, stdin=resolved_prompt.encode(),
-            )
-            # Base command without any embedded prompt — shell reads from file.
-            # Crush validates --model against its built-in catalogue so we omit it;
-            # the model is set via crush.json written by build_model_setup_cmd.
+        # Build the agent command.
+        # Prompt mode: AGENTS.md was written above (prompt + repo context); read it at
+        # runtime via "$(</sandbox/AGENTS.md)" shell expansion — no newlines in args,
+        # full context identical to TUI mode.
+        # TUI/server: main_cmd is "sleep infinity" / "opencode serve …"; agent is
+        # started later by the WebSocket handler or start_agent().
+        if mode == "prompt":
             _tool_bin = {"opencode": "opencode run", "crush": "crush run"}.get(tool_name, "opencode run")
-            if tool_name == "crush":
-                agent_cmd = f"HOME=/sandbox {_tool_bin} \"$(</sandbox/.prompt.txt)\""
+            if agents_md:
+                # Read the full AGENTS.md (prompt + repo context) as the CLI argument.
+                if tool_name == "crush":
+                    agent_cmd = f"HOME=/sandbox {_tool_bin} \"$(</sandbox/AGENTS.md)\""
+                else:
+                    _model_arg = shlex.quote(model) if model else ""
+                    agent_cmd = f"HOME=/sandbox {_tool_bin} --model {_model_arg} \"$(</sandbox/AGENTS.md)\""
             else:
-                _model_arg = shlex.quote(model) if model else ""
-                agent_cmd = f"HOME=/sandbox {_tool_bin} --model {_model_arg} \"$(</sandbox/.prompt.txt)\""
-        elif mode == "prompt" and not resolved_prompt:
-            # No prompt at all — just launch without message
-            agent_cmd = f"HOME=/sandbox {main_cmd}"
+                # No prompt configured — launch without a message argument.
+                agent_cmd = f"HOME=/sandbox {main_cmd}"
         else:
             agent_cmd = f"HOME=/sandbox {main_cmd}"
 
@@ -1194,16 +1203,29 @@ async def _run_openshell_agent(
             await _update_db(phase="running")
 
         if mode == "prompt":
-            result = await openshell_client.exec_command(sandbox_name, cmd, client=None,
-                                                         timeout_seconds=300,
-                                                         env=env_vars or {})
+            # Stream exec with no timeout — agent runs to natural completion.
+            # on_output is called every 5 s with accumulated stdout/stderr so the
+            # HTMX UI updates incrementally without waiting for the run to finish.
+            # OpenCode writes minimal stdout (content lives in its SQLite DB), so
+            # the streaming output is most useful for Crush; for OpenCode we do a
+            # final read_opencode_response call after the exec completes.
+            async def _on_output(text: str) -> None:
+                await _update_db(last_output=text)
+
+            result = await openshell_client.exec_command_streaming(
+                sandbox_name, cmd,
+                on_output=_on_output,
+                poll_interval=5.0,
+                env=env_vars or {},
+            )
             exit_code = getattr(result, "exit_code", None)
             stdout = getattr(result, "stdout", "") or ""
             stderr = getattr(result, "stderr", "") or ""
             phase = "succeeded" if exit_code == 0 else "failed"
 
             # OpenCode stores the response in its SQLite DB, not stdout.
-            # Extract the last assistant message after the run completes.
+            # Extract the full assistant conversation after the run completes
+            # (up to 64 KB); fall back to streamed stdout/stderr for Crush.
             if agent_tool == "opencode":
                 output = await openshell_client.read_opencode_response(sandbox_name) or stdout or stderr
             else:
@@ -1295,7 +1317,6 @@ async def session_launch(
     github_pat_id: str = Form(""),
     prompt_id: str = Form(""),
     instruction_prompt: str = Form(""),
-    persist: bool = Form(False),
     mode: str = Form(""),
     model: str = Form(""),
     redirect_to: str = Form(""),
@@ -1338,7 +1359,6 @@ async def session_launch(
         else:
             session.prompt_id = None
         session.instruction_prompt = instruction_prompt.strip()
-        session.persist = persist
         if mode in ("tui", "server", "prompt"):
             session.mode = mode
         if model.strip():
@@ -1415,7 +1435,6 @@ async def session_stop(
 
     session.run_completed_at = datetime.utcnow()
     session.phase = "stopped"
-    session.pod_name = None
     await db.commit()
     return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}", status_code=302)
 
@@ -1485,13 +1504,6 @@ async def session_unschedule(
     session.cron_schedule = ""
     session.cron_next_run = None
 
-    # Clean up CronJob-persistent secrets when schedule is removed
-    if session.k8s_secret_names:
-        try:
-            k8s.cleanup_session_secrets(ws.k8s_namespace, session)
-        except Exception:
-            log.warning("Failed to clean up cron secrets for session %d", sid, exc_info=True)
-
     await db.commit()
 
     flash(request, "Schedule cancelled.", "success")
@@ -1518,23 +1530,11 @@ async def session_status(
     if ws is None or session is None:
         return HTMLResponse("")
 
-    # Sync live pod phase into the DB so the badge reflects actual K8s state.
-    # The log_poller handles this for prompt mode; for TUI/server we do it here
-    # on each poll so the JS handler can detect the running→Active transition.
     status_detail = session.status_detail
     queue_position = None
 
     if session.phase == "queued":
         queue_position = await _get_queue_position(session.id, db)
-    elif session.pod_name and session.phase in ("pending", "running"):
-        live_phase, live_detail = await asyncio.to_thread(
-            k8s.get_pod_status, session.pod_name, ws.k8s_namespace
-        )
-        if live_phase != session.phase or live_detail != session.status_detail:
-            session.phase = live_phase
-            session.status_detail = live_detail
-            await db.commit()
-        status_detail = live_detail
 
     return templates.TemplateResponse(
         request,
@@ -1852,7 +1852,7 @@ async def session_delete(
         return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}", status_code=302)
 
     if session.sandbox_name:
-        # OpenShell session — delete sandbox; skip K8s PVC/Secret cleanup
+        # OpenShell session — delete sandbox
         from swarmer import openshell_client
         if session.service_url:
             try:
@@ -1863,19 +1863,6 @@ async def session_delete(
             await openshell_client.delete_sandbox(session.sandbox_name)
         except Exception as exc:
             flash(request, f"Sandbox deletion failed: {exc}", "warning")
-    else:
-        # K8s session — clean up PVC and Secrets if present
-        if session.pvc_name:
-            try:
-                k8s_sess.delete_session_pvc(ws.k8s_namespace, session.pvc_name)
-            except Exception as exc:
-                flash(request, f"PVC deletion failed: {exc}", "warning")
-
-        if session.k8s_secret_names:
-            try:
-                k8s.cleanup_session_secrets(ws.k8s_namespace, session)
-            except Exception as exc:
-                flash(request, f"Secret cleanup failed: {exc}", "warning")
 
     await db.delete(session)
     await db.commit()
@@ -1966,15 +1953,7 @@ async def session_set_model(
     session.model = model.strip()
     await db.commit()
 
-    if session.is_active and session.pod_name:
-        try:
-            tool = get_tool(session.agent_tool)
-            tool.exec_model_update(session.pod_name, ws.k8s_namespace, session.model)
-            flash(request, "Model applied to running pod.", "success")
-        except Exception as exc:
-            flash(request, f"Model saved but could not apply to running pod: {exc}", "warning")
-    else:
-        flash(request, "Model saved; will apply on next launch.", "success")
+    flash(request, "Model saved; will apply on next launch.", "success")
 
     return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}", status_code=302)
 
@@ -2084,53 +2063,6 @@ def _prefix_diff_paths(diff: str, prefix: str) -> str:
     return "\n".join(out)
 
 
-def _exec_in_pod(
-    pod_name: str,
-    namespace: str,
-    workdir: str,
-    command: list[str],
-    container: str = "opencode",
-) -> str:
-    """Run a command in a running pod and return its stdout.
-
-    Raises RuntimeError if the command exits with a non-zero status.
-    """
-    from kubernetes import client
-    from kubernetes.stream import stream
-
-    v1 = client.CoreV1Api()
-    full_cmd = ["sh", "-c", f"cd {shlex.quote(workdir)} && {shlex.join(command)}"]
-    resp = stream(
-        v1.connect_get_namespaced_pod_exec,
-        pod_name,
-        namespace,
-        command=full_cmd,
-        container=container,
-        stderr=True,
-        stdin=False,
-        stdout=True,
-        tty=False,
-        _preload_content=False,
-    )
-    stdout_data = ""
-    stderr_data = ""
-    while resp.is_open():
-        resp.update(timeout=5)
-        if resp.peek_stdout():
-            stdout_data += resp.read_stdout()
-        if resp.peek_stderr():
-            stderr_data += resp.read_stderr()
-    resp.close()
-
-    rc = resp.returncode
-    if rc and rc != 0:
-        raise RuntimeError(
-            f"Command failed in pod {pod_name} ({namespace}) "
-            f"workdir={workdir} rc={rc}: {stderr_data.strip()}"
-        )
-    return stdout_data
-
-
 async def _build_commit_msg(patch: str, workspace_id: int, db: AsyncSession) -> str:
     """Use an LLM to generate a commit message from the diff."""
     truncated = patch[:8000] if len(patch) > 8000 else patch
@@ -2186,97 +2118,6 @@ def _fallback_commit_msg(patch: str) -> str:
     elif len(files) <= 3:
         return f"Update {', '.join(files)}"
     return f"Update {len(files)} files"
-
-
-@router.post(
-    "/workspaces/{ws_id}/sessions/{sid}/generate-patch",
-    dependencies=[Depends(require_auth)],
-)
-async def session_generate_patch(
-    ws_id: int,
-    sid: int,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-):
-    ws = await _get_workspace(ws_id, db)
-    session = await db.get(
-        Session,
-        sid,
-        options=[selectinload(Session.github_pat), selectinload(Session.repos), selectinload(Session.prompt)],
-    )
-
-    if ws is None or session is None or session.workspace_id != ws_id:
-        return RedirectResponse(url=f"/workspaces/{ws_id}/sessions", status_code=302)
-
-    if not session.repos:
-        flash(request, "No repos attached — nothing to diff.", "warning")
-        return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}", status_code=302)
-
-    if not session.pod_name or session.phase != "running":
-        flash(request, "Session must be running to generate a patch.", "warning")
-        return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}", status_code=302)
-
-    try:
-        tool = get_tool(session.agent_tool)
-        container_name = tool.get_container_name()
-    except ValueError:
-        container_name = "opencode"
-
-    diff_parts: list[str] = []
-    failures: list[str] = []
-    for repo in session.repos:
-        try:
-            if session.working_branch:
-                diff_cmd = ["git", "diff", f"origin/{repo.branch}"]
-            else:
-                diff_cmd = ["git", "diff"]
-            diff = await asyncio.to_thread(
-                _exec_in_pod,
-                session.pod_name,
-                ws.k8s_namespace,
-                f"/workspace/{repo.local_path}",
-                diff_cmd,
-                container_name,
-            )
-            if diff.strip():
-                diff_parts.append(diff)
-        except Exception as exc:
-            log.warning("git diff failed for repo %s: %s", repo.local_path, exc)
-            failures.append(f"{repo.local_path}: {exc}")
-
-    if failures:
-        flash(request, f"Diff failed for: {'; '.join(failures)}", "danger")
-        return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}#patch", status_code=302)
-
-    # Capture the base commit SHA so the "Apply locally" instructions pin the exact ref
-    base_ref = ""
-    if diff_parts and session.repos:
-        repo = session.repos[0]
-        try:
-            base_ref = await asyncio.to_thread(
-                _exec_in_pod,
-                session.pod_name,
-                ws.k8s_namespace,
-                f"/workspace/{repo.local_path}",
-                ["git", "rev-parse", f"origin/{repo.branch}"],
-                container_name,
-            )
-            base_ref = base_ref.strip()
-        except Exception:
-            base_ref = ""
-
-    raw_patch = "\n".join(diff_parts) if diff_parts else ""
-    session.patch_output = "\n".join(ln.rstrip() for ln in raw_patch.split("\n"))
-    session.patch_base_ref = base_ref
-    session.commit_msg = await _build_commit_msg(session.patch_output, ws_id, db) if session.patch_output.strip() else ""
-    await db.commit()
-
-    if not session.patch_output.strip():
-        flash(request, "No changes detected.", "info")
-    else:
-        flash(request, "Patch generated.", "success")
-
-    return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}#patch", status_code=302)
 
 
 @router.get(

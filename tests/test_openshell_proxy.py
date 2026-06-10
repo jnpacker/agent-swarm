@@ -307,11 +307,12 @@ class TestSessionOk:
         ws.id = ws_id
         return ws
 
-    def test_session_ok_accepts_pod_name(self):
+    def test_session_ok_rejects_pod_name_only(self):
+        """pod_name alone is no longer accepted — service_url is required."""
         from swarmer.routers.chat_proxy import _session_ok
         ws = self._make_ws()
         s = self._make_session(pod_name="session-1-pod")
-        assert _session_ok(ws, s, 1) is None
+        assert _session_ok(ws, s, 1) is not None
 
     def test_session_ok_accepts_service_url(self):
         from swarmer.routers.chat_proxy import _session_ok
@@ -411,7 +412,8 @@ class TestChatHttpProxy:
         assert call_kwargs.get("headers", {}).get("x-opencode-directory") == "/sandbox/"
 
     @pytest.mark.asyncio
-    async def test_proxy_sets_workspace_directory_for_k8s(self, client):
+    async def test_proxy_always_sets_sandbox_directory(self, client):
+        """All sessions use /sandbox/ — legacy /workspace header is no longer sent."""
         ws = await _create_workspace(client)
         s = await _create_session(client, ws["id"], mode="server", agent_tool="opencode")
 
@@ -419,18 +421,17 @@ class TestChatHttpProxy:
             from swarmer.models.session import Session as _Session
             session_obj = await db.get(_Session, s["id"])
             session_obj.phase = "running"
-            session_obj.pod_name = "session-1-pod"
-            # no sandbox_name → K8s session
+            session_obj.sandbox_name = "sandbox-test-abc"
+            session_obj.service_url = "http://agent.openshell.internal:4096"
             await db.commit()
 
         mock_cls, mock_instance = self._make_mock_client()
-        with patch("swarmer.routers.chat_proxy.httpx.AsyncClient", mock_cls), \
-             patch("swarmer.k8s.effective_namespace", return_value="test-ns"):
+        with patch("swarmer.routers.chat_proxy.httpx.AsyncClient", mock_cls):
             await client.get(f"/workspaces/{ws['id']}/sessions/{s['id']}/chat/api")
 
         mock_instance.request.assert_called_once()
         _, call_kwargs = mock_instance.request.call_args
-        assert call_kwargs.get("headers", {}).get("x-opencode-directory") == "/workspace"
+        assert call_kwargs.get("headers", {}).get("x-opencode-directory") == "/sandbox/"
 
 
 # ===========================================================================
