@@ -1349,6 +1349,199 @@ class TestSandboxGC:
 
         mock_delete.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_deletes_zombie_sandbox_for_failed_session(self, client):
+        """A sandbox whose session is phase=failed is treated as a zombie and deleted."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name='sandbox-zombie-fail', phase='failed' WHERE id=:id"),
+                {"id": s["id"]},
+            )
+            await db.commit()
+
+        async with _TestSession() as db:
+            with patch("swarmer.openshell_client.list_sandboxes", new=AsyncMock(return_value=["sandbox-zombie-fail"])):
+                with patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()) as mock_delete:
+                    from swarmer.scheduler import _collect_orphaned_sandboxes
+                    await _collect_orphaned_sandboxes(db)
+
+        mock_delete.assert_called_once_with("sandbox-zombie-fail")
+
+        # sandbox_name should be cleared on the session
+        async with _TestSession() as db:
+            from swarmer.models.session import Session as _S
+            session = await db.get(_S, s["id"])
+            assert session.sandbox_name is None
+
+    @pytest.mark.asyncio
+    async def test_deletes_zombie_sandbox_for_succeeded_session(self, client):
+        """A sandbox whose session is phase=succeeded (auto-delete failed) is cleaned up."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name='sandbox-zombie-ok', phase='succeeded' WHERE id=:id"),
+                {"id": s["id"]},
+            )
+            await db.commit()
+
+        async with _TestSession() as db:
+            with patch("swarmer.openshell_client.list_sandboxes", new=AsyncMock(return_value=["sandbox-zombie-ok"])):
+                with patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()) as mock_delete:
+                    from swarmer.scheduler import _collect_orphaned_sandboxes
+                    await _collect_orphaned_sandboxes(db)
+
+        mock_delete.assert_called_once_with("sandbox-zombie-ok")
+
+        async with _TestSession() as db:
+            from swarmer.models.session import Session as _S
+            session = await db.get(_S, s["id"])
+            assert session.sandbox_name is None
+
+    @pytest.mark.asyncio
+    async def test_deletes_zombie_sandbox_for_stopped_session(self, client):
+        """A sandbox whose session is phase=stopped is also cleaned up as a zombie."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name='sandbox-zombie-stopped', phase='stopped' WHERE id=:id"),
+                {"id": s["id"]},
+            )
+            await db.commit()
+
+        async with _TestSession() as db:
+            with patch("swarmer.openshell_client.list_sandboxes", new=AsyncMock(return_value=["sandbox-zombie-stopped"])):
+                with patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()) as mock_delete:
+                    from swarmer.scheduler import _collect_orphaned_sandboxes
+                    await _collect_orphaned_sandboxes(db)
+
+        mock_delete.assert_called_once_with("sandbox-zombie-stopped")
+
+        async with _TestSession() as db:
+            from swarmer.models.session import Session as _S
+            session = await db.get(_S, s["id"])
+            assert session.sandbox_name is None
+
+    @pytest.mark.asyncio
+    async def test_active_sandbox_not_deleted_as_zombie(self, client):
+        """A running session's sandbox is not deleted even if other zombies are present."""
+        ws = await _create_workspace(client)
+        s_running = await _create_session(client, ws["id"], name="running-sess")
+        s_failed = await _create_session(client, ws["id"], name="failed-sess")
+
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name='sandbox-active', phase='running' WHERE id=:id"),
+                {"id": s_running["id"]},
+            )
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name='sandbox-zombie', phase='failed' WHERE id=:id"),
+                {"id": s_failed["id"]},
+            )
+            await db.commit()
+
+        async with _TestSession() as db:
+            with patch(
+                "swarmer.openshell_client.list_sandboxes",
+                new=AsyncMock(return_value=["sandbox-active", "sandbox-zombie"]),
+            ):
+                with patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()) as mock_delete:
+                    from swarmer.scheduler import _collect_orphaned_sandboxes
+                    await _collect_orphaned_sandboxes(db)
+
+        # Only the zombie is deleted
+        mock_delete.assert_called_once_with("sandbox-zombie")
+
+    @pytest.mark.asyncio
+    async def test_deleted_externally_runs_without_orphans(self, client):
+        """The deleted_externally reconciliation runs even when there are no orphaned sandboxes.
+
+        Previously this was gated behind 'if not orphaned: return', so it never ran
+        unless there happened to also be an orphaned sandbox in the same GC cycle.
+
+        We need at least one live sandbox for the GC to proceed past the early-return
+        guard at 'if not live_names: return'. Use a second running session as the
+        live sandbox so the gateway list is non-empty but contains no orphans.
+        """
+        ws = await _create_workspace(client)
+        s_gone = await _create_session(client, ws["id"], name="gone-sess")
+        s_live = await _create_session(client, ws["id"], name="live-sess")
+
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name='sandbox-gone', phase='running' WHERE id=:id"),
+                {"id": s_gone["id"]},
+            )
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name='sandbox-live', phase='running' WHERE id=:id"),
+                {"id": s_live["id"]},
+            )
+            await db.commit()
+
+        # sandbox-gone was deleted externally; sandbox-live is still running.
+        # There are no orphans — sandbox-live is known. The only live sandbox is sandbox-live.
+        async with _TestSession() as db:
+            with patch("swarmer.openshell_client.list_sandboxes", new=AsyncMock(return_value=["sandbox-live"])):
+                with patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()) as mock_delete:
+                    from swarmer.scheduler import _collect_orphaned_sandboxes
+                    await _collect_orphaned_sandboxes(db)
+
+        # No delete call — sandbox-gone is already gone, sandbox-live is healthy
+        mock_delete.assert_not_called()
+
+        # The gone session should be moved to 'stopped' and sandbox_name cleared
+        async with _TestSession() as db:
+            from swarmer.models.session import Session as _S
+            session = await db.get(_S, s_gone["id"])
+            assert session.phase == "stopped"
+            assert session.sandbox_name is None
+
+    @pytest.mark.asyncio
+    async def test_deleted_externally_with_live_sandboxes_present(self, client):
+        """deleted_externally reconciliation works alongside live sandboxes (no orphans)."""
+        ws = await _create_workspace(client)
+        s_gone = await _create_session(client, ws["id"], name="gone-sess")
+        s_running = await _create_session(client, ws["id"], name="running-sess")
+
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name='sandbox-gone', phase='running' WHERE id=:id"),
+                {"id": s_gone["id"]},
+            )
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name='sandbox-live', phase='running' WHERE id=:id"),
+                {"id": s_running["id"]},
+            )
+            await db.commit()
+
+        # Only sandbox-live is still alive; sandbox-gone was deleted externally.
+        # No orphans — both live names are known.
+        async with _TestSession() as db:
+            with patch(
+                "swarmer.openshell_client.list_sandboxes",
+                new=AsyncMock(return_value=["sandbox-live"]),
+            ):
+                with patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()) as mock_delete:
+                    from swarmer.scheduler import _collect_orphaned_sandboxes
+                    await _collect_orphaned_sandboxes(db)
+
+        mock_delete.assert_not_called()
+
+        async with _TestSession() as db:
+            from swarmer.models.session import Session as _S
+            gone_session = await db.get(_S, s_gone["id"])
+            running_session = await db.get(_S, s_running["id"])
+            assert gone_session.phase == "stopped"
+            assert gone_session.sandbox_name is None
+            assert running_session.phase == "running"  # untouched
+            assert running_session.sandbox_name == "sandbox-live"
+
 
 # ===========================================================================
 # 8. Crush-specific setup steps in _setup_openshell_sandbox and _run_openshell_agent

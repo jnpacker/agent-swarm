@@ -73,11 +73,19 @@ async def _sandbox_gc_loop() -> None:
 async def _collect_orphaned_sandboxes(db) -> None:
     """Delete live sandboxes that have no matching active session in the DB.
 
-    Sandboxes are considered orphaned only if:
-    - No session has sandbox_name matching them (sandbox was never registered), AND
-    - No session is in 'pending' state (which might be mid-setup, sandbox_name not yet saved)
+    Three categories of sandboxes are cleaned up:
+    1. Orphans: no session has sandbox_name matching them at all.
+    2. Zombies: the matching session is in a terminal phase (failed/succeeded/stopped)
+       — the agent is done but sandbox cleanup was skipped or failed.
+    3. Deleted externally: the session has sandbox_name set but the sandbox no longer
+       exists in the gateway — session is moved to 'stopped'.
 
-    When a session's sandbox is deleted by GC, the session is moved to 'stopped'.
+    A 5-minute age grace period applies to orphans and zombies to avoid deleting
+    sandboxes that were just created but whose sandbox_name hasn't been committed
+    to the DB yet.
+
+    The GC is skipped entirely if any session is in 'pending' phase to avoid racing
+    with sandbox setup (sandbox exists but sandbox_name not yet saved to DB).
     """
     from swarmer import openshell_client
     from swarmer.models.session import Session
@@ -101,20 +109,28 @@ async def _collect_orphaned_sandboxes(db) -> None:
         log.debug("sandbox-gc: skipping — pending session in progress")
         return
 
-    # Collect known sandbox names from active and recently-active sessions
+    # Collect all sessions with a sandbox_name, split by whether they are active or
+    # terminal. Active sessions (pending/running/queued) own their sandbox legitimately.
+    # Terminal sessions (failed/succeeded/stopped) have leaked sandboxes — treat them
+    # as zombies eligible for GC.
+    _TERMINAL_PHASES = {"failed", "succeeded", "stopped"}
     result = await db.execute(
-        select(Session.id, Session.sandbox_name).where(Session.sandbox_name.is_not(None))
+        select(Session.id, Session.sandbox_name, Session.phase).where(
+            Session.sandbox_name.is_not(None)
+        )
     )
     rows = result.all()
-    known: dict[str, int] = {row[1]: row[0] for row in rows}  # sandbox_name → session_id
+    active: dict[str, int] = {}   # sandbox_name → session_id (session is running)
+    zombies: dict[str, int] = {}  # sandbox_name → session_id (session is terminal)
+    for sid, sname, sphase in rows:
+        if sphase in _TERMINAL_PHASES:
+            zombies[sname] = sid
+        else:
+            active[sname] = sid
+    known = {**active, **zombies}  # all sandbox_names tracked in DB
 
-    orphaned = [name for name in live_names if name not in known]
-    if not orphaned:
-        return
-
-    # Only delete sandboxes that have been orphaned long enough — newly created
-    # sandboxes may not yet have their sandbox_name committed to the DB (race window
-    # during _setup_openshell_sandbox). Grace period: 5 minutes from creation.
+    # Only delete sandboxes that have been around long enough — grace period covers
+    # the race window where sandbox_name isn't yet committed to DB after creation.
     import time as _time
     from openshell._proto import openshell_pb2 as _pb
     now_ms = int(_time.time() * 1000)
@@ -136,25 +152,52 @@ async def _collect_orphaned_sandboxes(db) -> None:
         except Exception:
             return True  # if we can't check, assume old enough
 
-    stale = [name for name in orphaned if await asyncio.to_thread(_sandbox_age_ok, name)]
-    young = [name for name in orphaned if name not in stale]
-    if young:
-        log.debug("sandbox-gc: skipping %d young sandbox(es) (< 5min): %s", len(young), young)
-    if not stale:
-        return
+    # --- Orphans: live sandboxes with no matching session at all ---
+    orphaned = [name for name in live_names if name not in known]
+    if orphaned:
+        stale_orphans = [name for name in orphaned if await asyncio.to_thread(_sandbox_age_ok, name)]
+        young_orphans = [name for name in orphaned if name not in stale_orphans]
+        if young_orphans:
+            log.debug("sandbox-gc: skipping %d young orphan(s) (< 5min): %s", len(young_orphans), young_orphans)
+        if stale_orphans:
+            log.warning("sandbox-gc: found %d orphaned sandbox(es): %s", len(stale_orphans), stale_orphans)
+            for name in stale_orphans:
+                try:
+                    await openshell_client.delete_sandbox(name)
+                    log.info("sandbox-gc: deleted orphaned sandbox %s", name)
+                except Exception:
+                    log.warning("sandbox-gc: failed to delete orphan %s", name, exc_info=True)
 
-    log.warning("sandbox-gc: found %d orphaned sandbox(es): %s", len(stale), stale)
-    for name in stale:
-        try:
-            await openshell_client.delete_sandbox(name)
-            log.info("sandbox-gc: deleted orphaned sandbox %s", name)
-        except Exception:
-            log.warning("sandbox-gc: failed to delete %s", name, exc_info=True)
+    # --- Zombies: live sandboxes whose session is in a terminal phase ---
+    live_zombies = [name for name in live_names if name in zombies]
+    if live_zombies:
+        stale_zombies = [name for name in live_zombies if await asyncio.to_thread(_sandbox_age_ok, name)]
+        young_zombies = [name for name in live_zombies if name not in stale_zombies]
+        if young_zombies:
+            log.debug("sandbox-gc: skipping %d young zombie(s) (< 5min): %s", len(young_zombies), young_zombies)
+        if stale_zombies:
+            log.warning("sandbox-gc: found %d zombie sandbox(es) from terminal sessions: %s", len(stale_zombies), stale_zombies)
+            db_dirty = False
+            for name in stale_zombies:
+                session_id = zombies[name]
+                try:
+                    await openshell_client.delete_sandbox(name)
+                    log.info("sandbox-gc: deleted zombie sandbox %s (session %d)", name, session_id)
+                    session = await db.get(Session, session_id)
+                    if session:
+                        session.sandbox_name = None
+                        db_dirty = True
+                except Exception:
+                    log.warning("sandbox-gc: failed to delete zombie %s", name, exc_info=True)
+            if db_dirty:
+                await db.commit()
 
-    # Update any session whose sandbox was deleted externally (sandbox_name set but
-    # sandbox no longer alive) — move them to 'stopped' so the dashboard reflects reality.
-    deleted_externally = [name for name in known if name not in live_names and name not in orphaned]
+    # --- Deleted externally: session has sandbox_name but sandbox no longer exists ---
+    # This runs unconditionally (not gated on orphans/zombies) so reconciliation always
+    # happens even when all live sandboxes are accounted for.
+    deleted_externally = [name for name in known if name not in live_names]
     if deleted_externally:
+        db_dirty = False
         for sandbox_name in deleted_externally:
             session_id = known[sandbox_name]
             session = await db.get(Session, session_id)
@@ -166,7 +209,9 @@ async def _collect_orphaned_sandboxes(db) -> None:
                 session.phase = "stopped"
                 session.sandbox_name = None
                 session.run_completed_at = datetime.utcnow()
-        await db.commit()
+                db_dirty = True
+        if db_dirty:
+            await db.commit()
 
 
 async def _scheduler_loop() -> None:
