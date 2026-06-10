@@ -849,7 +849,12 @@ async def exec_command_streaming(
     def _stream_reader():
         """Blocking thread: consume exec_stream() and accumulate output."""
         try:
-            for item in client.exec_stream(sid, cmd, env=env or {}):
+            # timeout_seconds=0 (the SDK default when omitted) lets the server use its
+            # own session limit (typically 5 min).  Pass a large value so the server
+            # allows the agent to run for a full task, and so the SDK computes
+            # grpc_deadline = timeout_seconds + 10 instead of the 30 s client default.
+            _NO_TIMEOUT = 7200  # 2 h — generous ceiling for complex agent runs
+            for item in client.exec_stream(sid, cmd, env=env or {}, timeout_seconds=_NO_TIMEOUT):
                 # ExecChunk has .stream ("stdout"/"stderr") and .data (bytes)
                 chunk_data = getattr(item, "data", None)
                 if chunk_data is not None:

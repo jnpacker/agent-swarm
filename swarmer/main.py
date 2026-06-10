@@ -112,11 +112,20 @@ async def _restart_prompt_pollers() -> None:
             )
         )
         for s in result.scalars().all():
+            import shlex as _shlex
             from swarmer.routers.sessions import _run_openshell_agent
             from swarmer.agent_tools.registry import get as _get_tool
             _tool = _get_tool(s.agent_tool)
             _model = s.model or _tool.get_default_model(False, False)
-            _main_cmd = _tool.build_main_cmd(s, _model)
+            # Reconstruct the same AGENTS.md-reading command used at initial launch
+            # (ACM-35060).  build_main_cmd would embed a CLI arg that is unavailable
+            # at restart time; AGENTS.md already exists in the sandbox from launch.
+            _tool_bin = {"opencode": "opencode run", "crush": "crush run"}.get(s.agent_tool, "opencode run")
+            if s.agent_tool == "crush":
+                _main_cmd = f"HOME=/sandbox {_tool_bin} \"$(</sandbox/AGENTS.md)\""
+            else:
+                _model_arg = _shlex.quote(_model) if _model else ""
+                _main_cmd = f"HOME=/sandbox {_tool_bin} --model {_model_arg} \"$(</sandbox/AGENTS.md)\""
             asyncio.create_task(
                 _run_openshell_agent(s.id, s.sandbox_name, ["sh", "-c", _main_cmd], s.mode, s.agent_tool),
                 name=f"openshell-agent-{s.id}",

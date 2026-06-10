@@ -1726,8 +1726,15 @@ class TestCrushOpenshellSetup:
             await db.commit()
 
         exec_result = MagicMock(exit_code=0, stdout="crush finished successfully", stderr="")
+
+        async def _fake_streaming(sandbox_name, cmd, on_output=None, poll_interval=5.0, env=None, client=None):
+            # Simulate the callback being called with the accumulated stdout.
+            if on_output:
+                await on_output("crush finished successfully")
+            return exec_result
+
         with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
-             patch("swarmer.openshell_client.exec_command_streaming", new=AsyncMock(return_value=exec_result)), \
+             patch("swarmer.openshell_client.exec_command_streaming", new=_fake_streaming), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()), \
              patch("swarmer.openshell_client.read_opencode_response", new=AsyncMock(return_value="WRONG")) as mock_db_read:
             from swarmer.routers.sessions import _run_openshell_agent

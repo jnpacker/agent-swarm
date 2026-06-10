@@ -214,7 +214,7 @@ Every data item Swarmer currently pushes into agent pods, its source model, the 
 | Agent Config | Tool-specific JSON + gitconfig | ConfigMap | Volume mount at `/tmp/agent-config-ro` | `write_agent_config()` into sandbox |
 | MCP Config | MCP server definitions in agent config JSON | `McpServer` | Startup script overwrites config | `write_file()` into sandbox |
 | Model Config | model.json (OpenCode) or crush.json (Crush) | `Session.model` | Startup script writes JSON file | `write_file()` into sandbox |
-| Prompt | instruction_prompt + base_prompt + repo_context | `Session` + `WorkspacePrompt` | CLI arg (prompt mode) or `SWARMER_AGENT_MD` env → AGENTS.md (TUI/server) | `write_file()` for AGENTS.md; CLI arg for prompt mode |
+| Prompt | instruction_prompt + base_prompt + repo_context | `Session` + `WorkspacePrompt` | CLI arg (prompt mode) or `SWARMER_AGENT_MD` env → AGENTS.md (TUI/server) | `write_agents_md()` to `/sandbox/AGENTS.md` for **all modes**; prompt mode reads it via `$(</sandbox/AGENTS.md)` shell expansion; TUI/server agent reads it automatically |
 | Env Vars | HOME, NODE_OPTIONS, GOOGLE_APPLICATION_CREDENTIALS | Hardcoded | Pod env spec | Sandbox env vars via Gateway |
 | Extra Env | Arbitrary workspace key-value pairs | External K8s Secret | `envFrom` (`swarmer-agent-extra-env`, optional) | Gateway env injection |
 | Volumes | PVC → /workspace, ConfigMap → /tmp/agent-config-ro, ADC → /app/gcloud | N/A | Pod volume spec | Sandbox filesystem (no separate volumes) |
