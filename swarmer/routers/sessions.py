@@ -1209,7 +1209,10 @@ async def _run_openshell_agent(
             # OpenCode writes minimal stdout (content lives in its SQLite DB), so
             # the streaming output is most useful for Crush; for OpenCode we do a
             # final read_opencode_response call after the exec completes.
+            _streamed: list[str] = []  # tracks last value passed to on_output
+
             async def _on_output(text: str) -> None:
+                _streamed[:] = [text]
                 await _update_db(last_output=text)
 
             result = await openshell_client.exec_command_streaming(
@@ -1219,17 +1222,24 @@ async def _run_openshell_agent(
                 env=env_vars or {},
             )
             exit_code = getattr(result, "exit_code", None)
-            stdout = getattr(result, "stdout", "") or ""
             stderr = getattr(result, "stderr", "") or ""
             phase = "succeeded" if exit_code == 0 else "failed"
 
             # OpenCode stores the response in its SQLite DB, not stdout.
-            # Extract the full assistant conversation after the run completes
-            # (up to 64 KB); fall back to streamed stdout/stderr for Crush.
+            # On success: prefer the SQLite response (full conversation).
+            # On failure: SQLite may be empty; prefer the accumulated streaming
+            # output over the sparse ExecResult.stdout (which is the same
+            # incremental stdout that on_output already captured, but only the
+            # last chunk — the accumulated buffer has everything).
+            _streamed_text = _streamed[0] if _streamed else ""
             if agent_tool == "opencode":
-                output = await openshell_client.read_opencode_response(sandbox_name) or stdout or stderr
+                output = (
+                    await openshell_client.read_opencode_response(sandbox_name)
+                    or _streamed_text
+                    or stderr
+                )
             else:
-                output = stdout or stderr
+                output = _streamed_text or stderr
 
             # Snapshot draft policy chunks before any sandbox deletion so the
             # Policy tab can show what was denied/proposed during this run.
