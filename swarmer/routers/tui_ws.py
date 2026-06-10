@@ -152,9 +152,20 @@ async def _run_openshell_tui(
     except Exception:
         pass
     try:
+        from sqlalchemy import select as _sa_select
         from swarmer.database import get_db as _get_db
+        from swarmer.models.sandbox_env_var import SandboxEnvVar
         from swarmer.routers.mcp_servers import get_enabled_mcp_servers
         async for db in _get_db():
+            # Workspace env vars from DB (encrypted at rest; decrypt here)
+            _ev_result = await db.execute(
+                _sa_select(SandboxEnvVar).where(
+                    SandboxEnvVar.workspace_id == session.workspace_id
+                )
+            )
+            for ev_row in _ev_result.scalars().all():
+                tui_env[ev_row.key] = ev_row.value
+            # Non-secret MCP config (URL, email; token goes via provider env above)
             mcp_servers = await get_enabled_mcp_servers(session.workspace_id, db)
             for mcp in mcp_servers:
                 if "jira" in getattr(mcp, "slug", ""):
@@ -164,7 +175,7 @@ async def _run_openshell_tui(
                         tui_env["JIRA_EMAIL"] = mcp.jira_email
             break
     except Exception:
-        pass
+        log.warning("TUI: failed to load workspace env vars for session %d", session.id, exc_info=True)
 
     command = ["sh", "-c", tui_shell]
 

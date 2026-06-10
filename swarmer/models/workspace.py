@@ -35,6 +35,9 @@ class Workspace(Base):
     prompt_sources: Mapped[list["WorkspacePromptSource"]] = relationship(  # noqa: F821
         "WorkspacePromptSource", back_populates="workspace", cascade="all, delete-orphan"
     )
+    env_vars: Mapped[list["SandboxEnvVar"]] = relationship(  # noqa: F821
+        "SandboxEnvVar", back_populates="workspace", cascade="all, delete-orphan"
+    )
 
     @property
     def k8s_namespace(self) -> str:

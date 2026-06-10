@@ -66,6 +66,7 @@ async def create_provider(
     workspace_secret,
     github_pat,
     mcp_servers: list,
+    extra_env: dict[str, str] | None = None,
     client=None,
 ) -> dict[str, str]:
     """Return workspace extra env vars to inject into the sandbox agent process.
@@ -74,23 +75,14 @@ async def create_provider(
     OpenShell gateway via the Provider API (ensure_provider /
     attach_sandbox_provider) — never as raw env vars here.
 
-    The only env vars returned here are the workspace extra env vars from the
-    swarmer-agent-extra-env K8s Secret (arbitrary key-value pairs set by the
-    user via the workspace settings UI). These are passed to exec_command(env=)
-    so they reach the agent process via ExecSandboxRequest.environment.
+    The only env vars returned here are the workspace extra env vars supplied
+    by the caller (arbitrary key-value pairs stored in the SQLite DB and
+    decrypted before this call). These are passed to exec_command(env=) so
+    they reach the agent process via ExecSandboxRequest.environment.
     """
-    import asyncio
     env_vars: dict[str, str] = {}
-    try:
-        from swarmer.k8s import get_extra_env_vars
-        namespace = getattr(session, "namespace", None) or getattr(
-            getattr(session, "workspace", None), "namespace", None
-        )
-        if namespace:
-            extra = await asyncio.to_thread(get_extra_env_vars, namespace)
-            env_vars.update(extra)
-    except Exception:
-        pass  # K8s not available (local dev / no namespace) — silently skip
+    if extra_env:
+        env_vars.update(extra_env)
     return env_vars
 
 
