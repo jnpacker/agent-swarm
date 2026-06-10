@@ -605,9 +605,18 @@ class TestDoLaunchOpenshell:
         assert len(github_calls) == 1, (
             f"Expected 1 github provider call when PAT is set, got {len(github_calls)}"
         )
+        # Provider name must be per-PAT, not per-workspace
+        provider_name = github_calls[0].args[0]
+        expected_name = f"swarmer-ws-{ws['id']}-github-pat-{pat['id']}"
+        assert provider_name == expected_name, (
+            f"Expected provider name '{expected_name}', got '{provider_name}'"
+        )
         creds = github_calls[0].kwargs.get("credentials", {})
-        assert "api_token" in creds and creds["api_token"], (
-            f"Expected non-empty api_token credential in github provider call, got: {creds}"
+        assert "GITHUB_TOKEN" in creds and creds["GITHUB_TOKEN"], (
+            f"Expected non-empty GITHUB_TOKEN credential in github provider call, got: {creds}"
+        )
+        assert creds.get("GH_TOKEN") == creds.get("GITHUB_TOKEN"), (
+            f"Expected GH_TOKEN to match GITHUB_TOKEN, got: {creds}"
         )
 
     @pytest.mark.asyncio
