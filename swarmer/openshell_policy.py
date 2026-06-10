@@ -52,18 +52,6 @@ _GO_DEVELOPMENT_BLOCK = {
     ],
 }
 
-_GOVULNCHECK_BLOCK = {
-    "name": "govulncheck",
-    "endpoints": [
-        {"host": "vuln.go.dev", "port": 443},
-        {"host": "storage.googleapis.com", "port": 443},
-    ],
-    "binaries": [
-        _bin("/usr/local/go/bin/govulncheck"),
-        _bin("/home/node/go/bin/govulncheck"),
-        _bin("/home/sandbox/go/bin/govulncheck"),  # sandbox user GOPATH variant
-    ],
-}
 
 _PYTHON_DEVELOPMENT_BLOCK = {
     "name": "pypi",
@@ -431,7 +419,8 @@ def build_session_network_policies(
     lang = getattr(session, "language", "golang")
     if lang == "golang":
         network_policies_dict["golang"] = _GO_DEVELOPMENT_BLOCK
-        network_policies_dict["govulncheck"] = _GOVULNCHECK_BLOCK
+        # govulncheck is not pre-installed in the sandbox image; if the agent installs it,
+        # OPA will emit a draft chunk for vuln.go.dev that the user can explicitly approve.
     elif lang == "python":
         network_policies_dict["pypi"] = _PYTHON_DEVELOPMENT_BLOCK
 

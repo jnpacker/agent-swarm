@@ -2182,3 +2182,132 @@ class TestPolicyRulesEndpoints:
         assert ep["access"] == "full"
         assert "rules" not in ep
 
+    @pytest.mark.asyncio
+    async def test_net_rules_persist_across_relaunch(self, client):
+        """custom_policies (Net Rules) survive a relaunch; policy_chunks are cleared.
+
+        Simulates the full cycle:
+          1. Add a chunk to Net Rules.
+          2. Relaunch the session (clears policy_chunks, keeps custom_policies).
+          3. The policy-chunks endpoint returns the chunk with promoted_binaries
+             populated from the surviving custom_policies, so the chunk renders
+             as 'added' — not pending — even in the new sandbox run.
+        """
+        import json as _j
+        from sqlalchemy import text
+
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="prompt")
+
+        chunk = {
+            "id": "chunk-persist",
+            "status": "pending",
+            "rule_name": "allow-vuln-go-dev-443",
+            "endpoints": [{"host": "vuln.go.dev", "port": 443, "protocol": "rest"}],
+            "binaries": [{"path": "/sandbox/.gopath/bin/govulncheck", "harness": True}],
+        }
+
+        # Step 1: promote the chunk to Net Rules.
+        resp = await client.post(
+            f"/workspaces/{ws['id']}/sessions/{s['id']}/policy-rules/add",
+            data={"chunk": _j.dumps(chunk)},
+        )
+        assert resp.status_code == 200
+        trigger = _j.loads(resp.headers.get("hx-trigger", "{}"))
+        assert trigger.get("policyChanged", {}).get("added") == 1
+
+        # Step 2: simulate a relaunch by clearing policy_chunks (as _do_launch does)
+        # but leaving custom_policies intact.
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET policy_chunks='' WHERE id=:id"),
+                {"id": s["id"]},
+            )
+            await db.commit()
+
+        # Verify custom_policies still has the rule after the simulated relaunch.
+        async with _TestSession() as db:
+            from swarmer.models.session import Session
+            from sqlalchemy import select
+            sess = (await db.execute(select(Session).where(Session.id == s["id"]))).scalar_one()
+
+        assert sess.custom_policies, "custom_policies must survive a relaunch"
+        rules = _j.loads(sess.custom_policies)
+        assert len(rules) == 1
+        assert rules[0]["name"] == "allow-vuln-go-dev-443"
+
+        # Step 3: the policy-chunks endpoint builds promoted_binaries from the
+        # surviving custom_policies.  Inject the chunk as a snapshot (policy_chunks
+        # is empty so we use the live-fetch path, but we mock get_draft_chunks).
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET policy_chunks=:chunks, sandbox_name='', phase='succeeded' WHERE id=:id"),
+                {"id": s["id"], "chunks": _j.dumps([chunk])},
+            )
+            await db.commit()
+
+        resp = await client.get(
+            f"/workspaces/{ws['id']}/sessions/{s['id']}/policy-chunks"
+        )
+        assert resp.status_code == 200
+        html = resp.text
+        # The chunk should be shown with an "added" badge — not a pending checkbox.
+        assert "added" in html
+        # No checkbox should be rendered for this chunk.
+        assert 'class="policy-chunk-cb"' not in html
+
+    @pytest.mark.asyncio
+    async def test_add_chunk_merge_different_binary_shows_pending(self, client):
+        """A chunk with the same rule_name but a different binary shows as pending.
+
+        OPA emits one chunk per (rule_name, binary) pair.  If the rule already
+        exists in Net Rules but the new chunk carries a binary not yet in that
+        rule, it must still appear as pending so the user can merge it in.
+        """
+        import json as _j
+
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        # Pre-populate Net Rules with the rule carrying one binary.
+        first_chunk = {
+            "id": "chunk-bin1",
+            "status": "pending",
+            "rule_name": "allow-vuln-go-dev-443",
+            "endpoints": [{"host": "vuln.go.dev", "port": 443, "protocol": "rest"}],
+            "binaries": [{"path": "/sandbox/.gopath/bin/govulncheck", "harness": True}],
+        }
+        resp = await client.post(
+            f"/workspaces/{ws['id']}/sessions/{s['id']}/policy-rules/add",
+            data={"chunk": _j.dumps(first_chunk)},
+        )
+        assert resp.status_code == 200
+
+        # A second chunk — same rule_name, different binary path.
+        second_chunk = {
+            "id": "chunk-bin2",
+            "status": "pending",
+            "rule_name": "allow-vuln-go-dev-443",
+            "endpoints": [{"host": "vuln.go.dev", "port": 443, "protocol": "rest"}],
+            "binaries": [{"path": "/usr/bin/curl", "harness": True}],
+        }
+
+        from sqlalchemy import text
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET policy_chunks=:chunks WHERE id=:id"),
+                {"id": s["id"], "chunks": _j.dumps([first_chunk, second_chunk])},
+            )
+            await db.commit()
+
+        resp = await client.get(
+            f"/workspaces/{ws['id']}/sessions/{s['id']}/policy-chunks"
+        )
+        assert resp.status_code == 200
+        html = resp.text
+
+        # first_chunk (govulncheck) is fully covered — shows "added".
+        # second_chunk (curl) is not yet in the rule — shows pending checkbox.
+        assert "added" in html
+        assert 'class="policy-chunk-cb"' in html
+

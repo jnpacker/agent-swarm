@@ -1081,7 +1081,7 @@ document.addEventListener('htmx:afterSwap', function () {
 
     // Refresh both panels: rules container (via policyChanged event that HTMX
     // dispatches from the HX-Trigger header) and chunks (force a reload so
-    // promoted rules are removed from the pending list immediately).
+    // promoted rules are reflected as "added" immediately).
     _refreshChunks();
   });
 
@@ -1101,7 +1101,7 @@ document.addEventListener('htmx:afterSwap', function () {
     if (deleted) {
       _showToast('Rule removed from Net Rules', 6);
       _markPolicyTabDirty();
-      _refreshChunks(); // chunks may now show the removed rule as pending again
+      _refreshChunks(); // refresh so "added" badge reverts to "pending" for removed rule
     }
   });
 
@@ -1110,13 +1110,22 @@ document.addEventListener('htmx:afterSwap', function () {
     var tab = document.getElementById('tab-policy');
     if (tab && tab.classList.contains('pf-m-current')) return;
     var textEl = document.getElementById('policy-tab-text');
-    if (textEl) textEl.textContent = 'Net Rules ●';
+    if (textEl) textEl.textContent = '● Net Rules';
   }
   // Fired by HTMX from HX-Trigger headers (bubbles up from the requesting element).
   document.body.addEventListener('policyChanged', _markPolicyTabDirty);
   // Also mark directly from our afterRequest handlers so the dot always
   // appears even if the HX-Trigger event doesn't reach body for any reason.
   window._markPolicyTabDirty = _markPolicyTabDirty;
+
+  // Mark dot when the chunk poll swap reveals pending chunks while on another tab.
+  document.addEventListener('htmx:afterSwap', function (e) {
+    var el = _chunkEl();
+    if (!el || e.detail.elt !== el) return;
+    // Check if any pending (non-added) chunks are now visible in the swapped content.
+    var hasPending = el.querySelector('.policy-chunk-cb') !== null;
+    if (hasPending) _markPolicyTabDirty();
+  });
 
 }());
 </script>

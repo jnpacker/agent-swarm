@@ -8,7 +8,6 @@ Validates that build_session_policy() returns a SandboxPolicy proto with:
   - Conditional Jira MCP block (present when Jira MCP enabled, absent otherwise)
   - Conditional Go development block (proxy.golang.org etc.)
   - Conditional Python development block (pypi.org etc.)
-  - govulncheck block for Go sessions
   - Agent API block adapted to agent tool (opencode vs crush) and model provider
   - No excess blocks for minimal sessions (single repo, no MCP)
 """
@@ -324,8 +323,9 @@ def test_python_development_block_included_for_python_session():
     assert "files.pythonhosted.org" in hosts
 
 
-def test_govulncheck_block_included_for_go_session():
-    assert "vuln.go.dev" in _bhosts(session=_make_session(language="golang"))
+def test_govulncheck_not_in_static_policy():
+    # govulncheck is not pre-installed; OPA generates a draft chunk when it runs
+    assert "vuln.go.dev" not in _bhosts(session=_make_session(language="golang"))
 
 
 def test_go_block_absent_for_python_session():

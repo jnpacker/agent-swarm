@@ -1602,20 +1602,27 @@ async def session_policy_chunks(
         except Exception:
             pass
 
-    # Filter out chunks that have already been promoted to custom_policies
-    # so they disappear from the pending list immediately after being added.
-    if chunks and session.custom_policies:
-        import json as _j2
+    # Build a mapping of rule_name → set-of-binary-paths for all rules already
+    # added this session.  The template uses this to determine per-chunk "added"
+    # status: a chunk is fully added only when its rule exists AND every binary
+    # it lists is already covered.  Same rule_name + different binary = still pending.
+    import json as _j2
+    promoted_binaries: dict[str, set[str]] = {}
+    if session.custom_policies:
         try:
-            promoted = {r.get("name") for r in _j2.loads(session.custom_policies)}
-            chunks = [c for c in chunks if c.get("rule_name") not in promoted]
+            for r in _j2.loads(session.custom_policies):
+                name = r.get("name")
+                if name:
+                    promoted_binaries[name] = {
+                        b.get("path", "") for b in r.get("binaries", [])
+                    }
         except Exception:
             pass
 
     return templates.TemplateResponse(
         request,
         "sessions/_policy_chunks.html",
-        {"ws_id": ws_id, "session": session, "chunks": chunks},
+        {"ws_id": ws_id, "session": session, "chunks": chunks, "promoted_binaries": promoted_binaries},
     )
 
 
