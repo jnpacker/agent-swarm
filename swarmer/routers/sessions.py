@@ -823,6 +823,14 @@ async def _do_launch_openshell(
         model = tool.get_default_model(has_adc, has_gemini)
     model = model.strip("\r\n")  # strip any stray line endings before embedding in shell commands
 
+    # Query workspace env vars from DB before releasing the connection.
+    from sqlalchemy import select as sa_select
+    from swarmer.models.sandbox_env_var import SandboxEnvVar
+    _ev_result = await db.execute(
+        sa_select(SandboxEnvVar).where(SandboxEnvVar.workspace_id == session.workspace_id)
+    )
+    extra_env: dict[str, str] = {row.key: row.value for row in _ev_result.scalars().all()}
+
     # Release the DB connection before long-running gRPC operations. The route
     # handler's session holds an autobegin transaction from earlier SELECTs in
     # _do_launch(); committing here ends that transaction and returns the
@@ -830,12 +838,13 @@ async def _do_launch_openshell(
     # session attributes remain valid because expire_on_commit=False.
     await db.commit()
 
-    # 1. Collect MCP env vars (non-credential; AI creds go through provider API)
+    # 1. Collect sandbox extra env vars (non-credential; AI creds go through provider API)
     env_vars = await openshell_client.create_provider(
         session=session,
         workspace_secret=oc_secret,
         github_pat=session.github_pat,
         mcp_servers=mcp_servers or [],
+        extra_env=extra_env,
     )
 
     # 1b. Create/update gateway providers for each available credential.

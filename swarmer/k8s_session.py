@@ -325,7 +325,7 @@ def build_session_pod(
     command = ["sh", "-c", config_setup + mcp_config_setup + safe_dir_setup + git_setup + share_setup + agent_md_setup + model_setup + branch_setup + main_cmd]
 
     # ---------- envFrom ----------
-    from swarmer.k8s import AGENT_EXTRA_ENV_SECRET_NAME, MCP_SECRET_NAME
+    from swarmer.k8s import MCP_SECRET_NAME
 
     env_from = tool.get_env_from_sources(secret_name=agent_secret_name)
 
@@ -338,15 +338,6 @@ def build_session_pod(
                 )
             )
         )
-
-    # Optional workspace Secret (keys → env vars); not managed by Swarmer
-    env_from.append(
-        client.V1EnvFromSource(
-            secret_ref=client.V1SecretEnvSource(
-                name=AGENT_EXTRA_ENV_SECRET_NAME, optional=True
-            )
-        )
-    )
 
     # ---------- container ----------
     # Non-privileged sessions omit runAsUser so OpenShift can assign a UID from
