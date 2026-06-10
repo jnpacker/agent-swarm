@@ -46,7 +46,6 @@ class SessionCreate(BaseModel):
     instruction_prompt: str = ""
     github_pat_id: int | None = None
     prompt_id: int | None = None
-    persist: bool = False
     working_branch: str = ""
     mcp_server_ids: list[int] = Field(default_factory=list)
 
@@ -59,7 +58,6 @@ class SessionUpdate(BaseModel):
     instruction_prompt: str | None = None
     github_pat_id: int | None = None
     prompt_id: int | None = None
-    persist: bool | None = None
     working_branch: str | None = None
     mcp_server_ids: list[int] | None = None
 
@@ -74,13 +72,9 @@ class SessionOut(BaseModel):
     instruction_prompt: str
     github_pat_id: int | None
     prompt_id: int | None
-    persist: bool
-    privileged: bool
     working_branch: str
     phase: str
     status_detail: str
-    pod_name: str | None
-    pvc_name: str | None
     sandbox_name: str | None = None
     service_url: str | None = None
     cron_schedule: str
@@ -113,12 +107,6 @@ class SetModeRequest(BaseModel):
 
 class SetModelRequest(BaseModel):
     model: str = ""
-
-
-class PatchResult(BaseModel):
-    patch: str
-    commit_msg: str
-    filename: str
 
 
 # ============================================================

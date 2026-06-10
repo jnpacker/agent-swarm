@@ -179,7 +179,6 @@ Best for active Python development. FastAPI runs locally with auto-reload; sessi
 make setup-secret          # generate SWARMER_SECRET_KEY → auth/secret.key
 make install               # pip install -r requirements.txt
 make kind-create           # create kind cluster (localhost:8080 → NodePort 30080)
-make kind-load-opencode    # load opencode agent image into kind
 make dev                   # uvicorn at http://localhost:8090, K8S_IN_CLUSTER=false
 ```
 
@@ -731,8 +730,6 @@ All targets can be listed with `make help`. Run `make lint` to check code style 
 |---|---|---|
 | `kind-create` | Create a kind cluster with host port `8080→30080` | `KIND_CLUSTER` |
 | `kind-load` | Load the swarmer image into kind | `IMAGE_REF`, `KIND_CLUSTER` |
-| `kind-load-opencode` | Load the OpenCode image into kind | `OPENCODE_IMAGE`, `KIND_CLUSTER` |
-| `kind-load-crush` | Load the Crush agent image into kind | `CRUSH_IMAGE`, `KIND_CLUSTER` |
 | `kind-deploy` | One-shot: create cluster + build + load + deploy | |
 | `kind-connect` | Port-forward to the kind-deployed dashboard | |
 | `kind-delete` | Delete the kind cluster and all data | `KIND_CLUSTER` |

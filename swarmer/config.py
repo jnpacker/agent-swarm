@@ -10,13 +10,10 @@ class Settings(BaseSettings):
     k8s_in_cluster: bool = False
     host: str = "0.0.0.0"
     port: int = 8080
-    agent_image: str = ""
     agent_image_opencode: str = ""
     agent_image_crush: str = ""
     default_agent_tool: str = "opencode"
     crush_server_port: int = 4096
-    agent_image_pull_secret: str = ""
-    agent_image_pull_policy: str = "IfNotPresent"
     k8s_namespace: str = ""
     max_concurrent_agents: int = 5
 

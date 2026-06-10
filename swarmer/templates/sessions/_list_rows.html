@@ -23,7 +23,6 @@
       <th class="pf-v6-c-table__th" role="columnheader">Last Run</th>
       <th class="pf-v6-c-table__th" role="columnheader">GitHub PAT</th>
       <th class="pf-v6-c-table__th" role="columnheader">Repos</th>
-      <th class="pf-v6-c-table__th" role="columnheader">Persist</th>
       <th class="pf-v6-c-table__th" role="columnheader">Schedule</th>
       <th class="pf-v6-c-table__th" role="columnheader">Next Run</th>
       <th class="pf-v6-c-table__th pf-m-fit-content" role="columnheader" style="text-align:right;">Actions</th>
@@ -83,13 +82,6 @@
       </td>
       <td class="pf-v6-c-table__td" role="cell" data-label="Repos" style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm);">
         {{ s.repos | length }}
-      </td>
-      <td class="pf-v6-c-table__td" role="cell" data-label="Persist">
-        {% if s.persist %}
-          <span class="pf-v6-c-label pf-m-cyan"><span class="pf-v6-c-label__content">Persist</span></span>
-        {% else %}
-          <span style="color:var(--pf-t--global--text--color--subtle);">—</span>
-        {% endif %}
       </td>
       <td class="pf-v6-c-table__td" role="cell" data-label="Schedule" style="font-size:var(--pf-t--global--font--size--sm);">
         {% if s.cron_schedule and s.mode == 'prompt' %}

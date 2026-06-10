@@ -48,7 +48,7 @@ AC_DEFAULTS ?= .push-defaults
         image-build image-push image-build-crush \
         k8s-deploy k8s-delete k8s-connect \
         openshift-deploy \
-        kind-create kind-load kind-load-opencode kind-load-crush kind-deploy kind-delete kind-connect \
+        kind-create kind-load kind-deploy kind-delete kind-connect \
         openshell-setup openshell-extract-tls openshell-gen-token openshell-status openshell-delete \
         sync-images help
 
@@ -333,38 +333,17 @@ kind-load:  ## Load the swarmer image into the kind cluster (no registry needed)
 	fi
 	@echo "✓ Image loaded."
 
-kind-load-opencode:  ## Load the opencode image into the kind cluster  (OPENCODE_IMAGE)
-	@echo "Tagging $(OPENCODE_IMAGE) → opencode:latest"
-	$(CONTAINER_CMD) tag $(OPENCODE_IMAGE) opencode:latest
-	@echo "Loading opencode:latest into kind cluster '$(KIND_CLUSTER)'..."
-	@if [ "$(CONTAINER_CMD)" = "podman" ]; then \
-	  podman save opencode:latest | kind load image-archive /dev/stdin --name $(KIND_CLUSTER); \
-	else \
-	  kind load docker-image opencode:latest --name $(KIND_CLUSTER); \
-	fi
-	@echo "✓ opencode image loaded as opencode:latest"
-
 image-build-crush:  ## Build the Crush agent container image
 	$(CONTAINER_CMD) build -f Containerfile.crush \
 	  --build-arg CRUSH_VERSION=$(CRUSH_VERSION) \
 	  -t $(CRUSH_IMAGE) .
 	@echo "Built: $(CRUSH_IMAGE)"
 
-kind-load-crush:  ## Load the Crush agent image into kind
-	@echo "Loading $(CRUSH_IMAGE) into kind cluster '$(KIND_CLUSTER)'..."
-	@if [ "$(CONTAINER_CMD)" = "podman" ]; then \
-	  podman save $(CRUSH_IMAGE) | kind load image-archive /dev/stdin --name $(KIND_CLUSTER); \
-	else \
-	  kind load docker-image $(CRUSH_IMAGE) --name $(KIND_CLUSTER); \
-	fi
-	@echo "✓ Crush image loaded."
-
 kind-deploy:  ## Create kind cluster + build image + deploy swarmer  (one-shot local dev)
 	@test -f auth/secret.key || (echo "Run 'make setup-secret' first." && exit 1)
 	$(MAKE) kind-create
 	$(MAKE) image-build
 	$(MAKE) kind-load
-	$(MAKE) kind-load-opencode
 	$(MAKE) k8s-deploy
 	@echo ""
 	@echo "╔══════════════════════════════════════════════════════╗"

@@ -460,12 +460,10 @@ class TestDoLaunchOpenshell:
              patches["write_agents_md"], patches["exec_command"], \
              patches["start_agent"], patches["delete_sandbox"], \
              patches["build_policy"], patches["run_agent"], patches["setup_sandbox"]:
-            with patch("swarmer.k8s_session.ensure_session_pvc") as mock_pvc:
-                await client.post(
-                    f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/launch"
-                )
-
-        mock_pvc.assert_not_called()
+            await client.post(
+                f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/launch"
+            )
+        # k8s_session.ensure_session_pvc has been removed — k8s_session no longer exists.
 
     @pytest.mark.asyncio
     async def test_no_k8s_secrets_created(self, client):
@@ -480,12 +478,11 @@ class TestDoLaunchOpenshell:
              patches["write_agents_md"], patches["exec_command"], \
              patches["start_agent"], patches["delete_sandbox"], \
              patches["build_policy"], patches["run_agent"], patches["setup_sandbox"]:
-            with patch("swarmer.k8s.create_session_agent_secret") as mock_secret:
-                await client.post(
-                    f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/launch"
-                )
-
-        mock_secret.assert_not_called()
+            await client.post(
+                f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/launch"
+            )
+        # K8s secret creation functions have been removed from k8s.py —
+        # they no longer exist, so they cannot be called.
 
     @pytest.mark.asyncio
     async def test_creates_background_task(self, client):
@@ -837,12 +834,10 @@ class TestSessionStopOpenshell:
             await db.commit()
 
         with patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
-            with patch("swarmer.k8s.delete_pod") as mock_pod_del:
-                resp = await client.post(
-                    f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/stop"
-                )
-
-        mock_pod_del.assert_not_called()
+            resp = await client.post(
+                f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/stop"
+            )
+        # k8s.delete_pod has been removed — it no longer exists and cannot be called.
 
     @pytest.mark.asyncio
     async def test_stop_handles_delete_sandbox_error_gracefully(self, client):
@@ -927,7 +922,7 @@ class TestRunOpenshellAgent:
 
         exec_result = MagicMock(exit_code=0, stdout="agent done", stderr="")
         with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
-             patch("swarmer.openshell_client.exec_command", new=AsyncMock(return_value=exec_result)), \
+             patch("swarmer.openshell_client.exec_command_streaming", new=AsyncMock(return_value=exec_result)), \
              patch("swarmer.openshell_client.read_opencode_response", new=AsyncMock(return_value="agent done")), \
              patch("swarmer.openshell_client.get_draft_chunks", new=AsyncMock(return_value=[])), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
@@ -956,7 +951,7 @@ class TestRunOpenshellAgent:
 
         exec_result = MagicMock(exit_code=1, stdout="", stderr="error: tool crashed")
         with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
-             patch("swarmer.openshell_client.exec_command", new=AsyncMock(return_value=exec_result)), \
+             patch("swarmer.openshell_client.exec_command_streaming", new=AsyncMock(return_value=exec_result)), \
              patch("swarmer.openshell_client.get_draft_chunks", new=AsyncMock(return_value=[])), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
             from swarmer.routers.sessions import _run_openshell_agent
@@ -983,7 +978,7 @@ class TestRunOpenshellAgent:
 
         exec_result = MagicMock(exit_code=0, stdout="done", stderr="")
         with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
-             patch("swarmer.openshell_client.exec_command", new=AsyncMock(return_value=exec_result)), \
+             patch("swarmer.openshell_client.exec_command_streaming", new=AsyncMock(return_value=exec_result)), \
              patch("swarmer.openshell_client.read_opencode_response", new=AsyncMock(return_value="done")), \
              patch("swarmer.openshell_client.get_draft_chunks", new=AsyncMock(return_value=[])), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()) as mock_del:
@@ -1012,7 +1007,7 @@ class TestRunOpenshellAgent:
 
         phases_seen = []
 
-        async def _fake_exec(sandbox_name, cmd, client=None, stdin=None, timeout_seconds=None, env=None):
+        async def _fake_exec_streaming(sandbox_name, cmd, on_output=None, poll_interval=5.0, env=None, client=None):
             async with _TestSession() as db:
                 from sqlalchemy import select
                 from swarmer.models.session import Session
@@ -1021,7 +1016,7 @@ class TestRunOpenshellAgent:
             return MagicMock(exit_code=0, stdout="", stderr="")
 
         with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
-             patch("swarmer.openshell_client.exec_command", new=_fake_exec), \
+             patch("swarmer.openshell_client.exec_command_streaming", new=_fake_exec_streaming), \
              patch("swarmer.openshell_client.read_opencode_response", new=AsyncMock(return_value="")), \
              patch("swarmer.openshell_client.get_draft_chunks", new=AsyncMock(return_value=[])), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
@@ -1044,7 +1039,7 @@ class TestRunOpenshellAgent:
 
         with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
              patch("swarmer.openshell_client.start_agent", new=AsyncMock()) as mock_start, \
-             patch("swarmer.openshell_client.exec_command", new=AsyncMock()) as mock_exec:
+             patch("swarmer.openshell_client.exec_command_streaming", new=AsyncMock()) as mock_exec:
             from swarmer.routers.sessions import _run_openshell_agent
             await _run_openshell_agent(
                 s["id"], "sandbox-server", ["sh", "-c", "opencode serve"], "server", "opencode"
@@ -1089,7 +1084,7 @@ class TestRunOpenshellAgent:
 
         with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
              patch(
-                "swarmer.openshell_client.exec_command",
+                "swarmer.openshell_client.exec_command_streaming",
                 new=AsyncMock(side_effect=ConnectionError("gateway down")),
              ):
             from swarmer.routers.sessions import _run_openshell_agent
@@ -1151,8 +1146,10 @@ class TestExecCommandTimeout:
 
 
 class TestBuildRepoContextBasePath:
-    def test_default_path_is_workspace(self):
-        from swarmer.k8s_session import _build_repo_context
+    def test_default_path_is_sandbox(self):
+        # _build_repo_context moved to swarmer.routers.sessions; default base_path
+        # is /sandbox (OpenShell runtime) rather than the old /workspace (K8s pods).
+        from swarmer.routers.sessions import _build_repo_context
 
         class FakeRepo:
             repo_url = "https://github.com/org/myrepo"
@@ -1160,11 +1157,11 @@ class TestBuildRepoContextBasePath:
             local_path = "myrepo"
 
         result = _build_repo_context([FakeRepo()])
-        assert "/workspace/myrepo" in result
-        assert "/sandbox/" not in result
+        assert "/sandbox/myrepo" in result
+        assert "/workspace/" not in result
 
     def test_sandbox_base_path(self):
-        from swarmer.k8s_session import _build_repo_context
+        from swarmer.routers.sessions import _build_repo_context
 
         class FakeRepo:
             repo_url = "https://github.com/org/myrepo"
@@ -1176,7 +1173,7 @@ class TestBuildRepoContextBasePath:
         assert "/workspace/" not in result
 
     def test_empty_repos_returns_empty(self):
-        from swarmer.k8s_session import _build_repo_context
+        from swarmer.routers.sessions import _build_repo_context
         assert _build_repo_context([]) == ""
         assert _build_repo_context([], base_path="/sandbox") == ""
 
@@ -1220,10 +1217,8 @@ class TestSessionDeleteOpenshell:
             await db.commit()
 
         with patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
-            with patch("swarmer.k8s_session.delete_session_pvc") as mock_pvc:
-                await client.delete(f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}")
-
-        mock_pvc.assert_not_called()
+            await client.delete(f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}")
+        # k8s_session.delete_session_pvc has been removed — k8s_session no longer exists.
 
     @pytest.mark.asyncio
     async def test_delete_skips_k8s_secrets_for_sandbox_session(self, client):
@@ -1238,10 +1233,8 @@ class TestSessionDeleteOpenshell:
             await db.commit()
 
         with patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
-            with patch("swarmer.k8s.cleanup_session_secrets") as mock_secrets:
-                await client.delete(f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}")
-
-        mock_secrets.assert_not_called()
+            await client.delete(f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}")
+        # k8s.cleanup_session_secrets has been removed — it no longer exists and cannot be called.
 
     @pytest.mark.asyncio
     async def test_delete_handles_sandbox_error_gracefully(self, client):
@@ -1265,23 +1258,20 @@ class TestSessionDeleteOpenshell:
         assert resp.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_delete_no_sandbox_skips_k8s_secrets_when_empty(self, client):
-        """K8s cleanup is skipped when k8s_secret_names is empty (typical for stopped sandbox sessions)."""
+    async def test_delete_no_sandbox_deletes_cleanly(self, client):
+        """Session with no sandbox_name can be deleted without errors."""
         ws = await _create_workspace(client)
         s = await _create_session(client, ws["id"])
 
         async with _TestSession() as db:
             await db.execute(
-                text("UPDATE sessions SET sandbox_name=NULL, phase='stopped', k8s_secret_names='' WHERE id=:id"),
+                text("UPDATE sessions SET sandbox_name=NULL, phase='stopped' WHERE id=:id"),
                 {"id": s["id"]},
             )
             await db.commit()
 
-        with patch("swarmer.k8s.cleanup_session_secrets") as mock_secrets:
-            resp = await client.delete(f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}")
-
+        resp = await client.delete(f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}")
         assert resp.status_code == 200
-        mock_secrets.assert_not_called()
 
 
 # ===========================================================================
@@ -1737,7 +1727,7 @@ class TestCrushOpenshellSetup:
 
         exec_result = MagicMock(exit_code=0, stdout="crush finished successfully", stderr="")
         with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
-             patch("swarmer.openshell_client.exec_command", new=AsyncMock(return_value=exec_result)), \
+             patch("swarmer.openshell_client.exec_command_streaming", new=AsyncMock(return_value=exec_result)), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()), \
              patch("swarmer.openshell_client.read_opencode_response", new=AsyncMock(return_value="WRONG")) as mock_db_read:
             from swarmer.routers.sessions import _run_openshell_agent
@@ -2066,7 +2056,7 @@ class TestPolicyRulesEndpoints:
         ]
         exec_result = MagicMock(exit_code=0, stdout="done", stderr="")
         with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
-             patch("swarmer.openshell_client.exec_command", new=AsyncMock(return_value=exec_result)), \
+             patch("swarmer.openshell_client.exec_command_streaming", new=AsyncMock(return_value=exec_result)), \
              patch("swarmer.openshell_client.read_opencode_response", new=AsyncMock(return_value="done")), \
              patch("swarmer.openshell_client.get_draft_chunks", new=AsyncMock(return_value=fake_chunks)), \
              patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):

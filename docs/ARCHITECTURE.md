@@ -34,22 +34,22 @@ agent-swarm/
     ├── crypto.py               # Fernet encrypt/decrypt from secret key file or env var
     ├── k8s_auth.py             # K8s TokenReview validation, namespace access check, RBAC probing
     ├── deps.py                 # FastAPI dependencies (require_auth, get_user_token)
-    ├── k8s.py                  # Kubernetes utility functions (namespace, secret, pod, configmap, route)
-    ├── k8s_session.py          # Session-specific K8s ops (PVC, pod spec, service)
+    ├── k8s.py                  # Kubernetes utility functions (namespace, pull secrets, image check, extra env vars)
     ├── mcp_catalog.py          # Registry of well-known MCP servers (Jira, etc.) with OAuth defaults
-    ├── scheduler.py            # Background asyncio cron scheduler for prompt-mode sessions
-    ├── log_poller.py           # Background pod log poller with auto-cleanup
+    ├── scheduler.py            # Background asyncio cron scheduler + queue processor + sandbox GC
     ├── openshell_client.py     # OpenShell sandbox SDK wrapper (async helpers, lazy SDK import)
+    ├── openshell_policy.py     # Network policy builder for OpenShell sandboxes
     ├── agent_tools/            # Strategy pattern for multi-agent support
-    │   ├── __init__.py         # AgentToolStrategy ABC (18 abstract methods)
+    │   ├── __init__.py         # AgentToolStrategy ABC
     │   ├── registry.py         # Global registry + aliases (_init() auto-registers all tools)
     │   ├── opencode.py         # OpenCode strategy (Vertex AI Anthropic/Gemini models)
     │   └── crush.py            # Crush strategy (Vertex AI, Anthropic, OpenAI, Gemini models)
     ├── models/                 # SQLAlchemy ORM models
     │   ├── __init__.py         # Imports all models (required for Base.metadata)
-    │   ├── workspace.py        # Workspace → 1:1 K8s namespace (or shared via settings.k8s_namespace)
-    │   ├── session.py          # Session (pod lifecycle, modes: tui/server/prompt, cron scheduling)
-    │   ├── session_repo.py     # Git repos attached to sessions (cloned by init container)
+    │   ├── workspace.py        # Workspace → K8s namespace (or shared via settings.k8s_namespace)
+    │   ├── session.py          # Session (sandbox lifecycle, modes: tui/server/prompt, cron scheduling)
+    │   ├── session_repo.py     # Git repos attached to sessions (cloned into sandbox at launch)
+    │   ├── sandbox_env_var.py  # Per-workspace env vars (encrypted at rest, injected into sandboxes)
     │   ├── opencode_secret.py  # Fernet-encrypted provider credentials (GCP/Anthropic/OpenAI/Gemini)
     │   ├── github_pat.py       # Fernet-encrypted GitHub PATs for HTTPS git auth
     │   └── mcp_server.py       # MCP server configs with Fernet-encrypted OAuth tokens
@@ -70,32 +70,39 @@ agent-swarm/
         └── mcp_servers/        # list (catalog + configured servers with OAuth status)
 ```
 
+## Design Principles
+
+**Favor encrypted database over Kubernetes objects** — Credentials, configuration, and application state are stored in the encrypted SQLite database (Fernet at rest) rather than K8s Secrets or ConfigMaps. This simplifies RBAC requirements, provides an audit trail via timestamps, and makes the application more portable. The only remaining K8s storage is `swarmer-agent-extra-env` (pending migration in ACM-35039) and image pull secrets (which require K8s to function).
+
+**OpenShell is the sole session runtime** — All agent session lifecycle (create, exec, stop, delete) goes through the OpenShell Gateway + Supervisor APIs. Swarmer does not create K8s pods, PVCs, Services, or Routes for agent sessions.
+
+**Minimal K8s surface** — Swarmer's K8s usage is limited to: authentication (TokenReview via `k8s_auth.py`), image pull secrets (for `check_image_reachable`), and workspace namespace scoping. All credential injection for agent sessions is handled by the OpenShell Gateway.
+
 ## Domain Model
 
-- **Workspace** maps to a Kubernetes namespace. All resources (sessions, secrets) are scoped to a workspace. When `settings.k8s_namespace` is set (namespace-scoped deployment), all workspaces share a single K8s namespace via `Workspace.k8s_namespace` property.
-- **Session** = an agent run. Each session creates a K8s Pod + PVC. Three modes:
-  - `prompt` — one-shot: runs the agent with a prompt, pod exits on completion (`restartPolicy: Never`), pod + PVC auto-deleted on success if `persist=False`
-  - `server` — persistent: runs the agent in server mode, creates a ClusterIP Service (+ OpenShift Route if available), dashboard proxies HTTP/WS/SSE to it
-  - `tui` — persistent: runs `sleep infinity`, user connects via xterm.js WebSocket → K8s exec PTY
+- **Workspace** maps to a Kubernetes namespace for scoping purposes. All resources (sessions, secrets) are scoped to a workspace. When `settings.k8s_namespace` is set (namespace-scoped deployment), all workspaces share a single K8s namespace via `Workspace.k8s_namespace` property.
+- **Session** = an agent run inside an OpenShell sandbox. Three modes:
+  - `prompt` — one-shot: runs the agent with a prompt, sandbox exits on completion, sandbox auto-deleted on success
+  - `server` — persistent: runs the agent in server mode, exposes a service via OpenShell `expose_service()`, dashboard proxies HTTP/WS/SSE to it
+  - `tui` — persistent: runs `sleep infinity`; user connects via xterm.js WebSocket → OpenShell `exec_interactive()` PTY
 - **Session phases**: `idle` → `pending` → `running` → `succeeded`/`failed`/`stopped`
 - **Cron scheduling** — prompt-mode sessions can have a cron schedule (`cron_schedule` field). A background asyncio loop (`scheduler.py`) checks every 30s, uses an atomic `UPDATE … RETURNING` to claim due rows (prevents duplicates), then calls the shared `_do_launch()` helper in `sessions.py`.
-- **OpencodeSecret** — per-workspace encrypted storage for GCP project, Vertex location, ADC JSON, Google API key, Anthropic API key, OpenAI API key. Despite the legacy name, used by both OpenCode and Crush.
-- **GitHubPAT** — per-workspace encrypted GitHub personal access tokens with optional org scope for HTTPS git auth
-- **McpServer** — per-workspace MCP server configurations with OAuth 2.1 tokens encrypted at rest. Supports dynamic client registration, PKCE, and token refresh. Enabled servers are injected into agent configs and mounted as K8s secret env vars (`MCP_TOKEN_<SLUG>`). Pre-configured catalog includes Atlassian Jira (Rovo).
-- **SessionRepo** — git repositories to clone into the session PVC via init containers
+- **OpencodeSecret** — per-workspace encrypted storage for GCP project, Vertex location, ADC JSON, Google API key, Anthropic API key, OpenAI API key. Stored in SQLite via Fernet encryption. Despite the legacy name, used by both OpenCode and Crush.
+- **GitHubPAT** — per-workspace encrypted GitHub personal access tokens with optional org scope for HTTPS git auth. Injected into OpenShell sandboxes via Gateway credential providers.
+- **McpServer** — per-workspace MCP server configurations with OAuth 2.1 tokens encrypted at rest. Enabled servers are configured in the agent config JSON and credentials injected via Gateway env vars.
+- **SandboxEnvVar** — per-workspace arbitrary key-value env vars stored encrypted in SQLite, injected into every OpenShell sandbox via `create_provider()`.
+- **SessionRepo** — git repositories to clone into the sandbox via OpenShell API at session launch.
 
 ## Agent Tool Strategy Pattern
 
-Multi-agent support uses the Strategy pattern (`agent_tools/`). Each tool (OpenCode, Crush) implements `AgentToolStrategy` with 18+ abstract methods covering:
-- Image selection, config map generation, K8s secret layout
-- Pod command construction for each session mode
-- Model options/validation/selection
-- Environment variables, volumes, volume mounts
-- Container naming, server ports
+Multi-agent support uses the Strategy pattern (`agent_tools/`). Each tool (OpenCode, Crush) implements `AgentToolStrategy` with abstract methods covering:
+- Image selection and container name
+- Config data generation (`build_config_data` → written to sandbox via `write_agent_config()`)
+- Mode-specific command construction (`build_main_cmd`, `build_model_setup_cmd`, `build_share_setup_cmd`)
+- Model options, validation, and defaults
+- TUI binary selection (`get_tui_binary`)
 
-The registry (`agent_tools/registry.py`) auto-initializes on import via `_init()`. Tool aliases map legacy names (e.g., `"opencode-golang"` → `"opencode"`).
-
-**To add a new agent tool**: Create `swarmer/agent_tools/new_tool.py` implementing `AgentToolStrategy`, register it in `registry.py:_init()`, add the tool name to `AGENT_TOOLS` in `models/session.py`, and add a corresponding `AGENT_IMAGE_*` setting in `config.py`.
+Tool instances are accessed via `agent_tools/registry.py`. No K8s-specific methods remain in the strategy interface.
 
 ## Authentication
 
@@ -130,26 +137,28 @@ All sensitive fields (PATs, API keys, ADC credentials) are Fernet-encrypted at r
 
 ## Kubernetes Integration
 
-- Uses the official `kubernetes` Python client, imported lazily inside functions (avoids import errors when K8s isn't configured)
-- `k8s.init_k8s()` loads either in-cluster or kubeconfig based on `K8S_IN_CLUSTER` setting
-- `effective_namespace()` in `k8s.py` returns `settings.k8s_namespace` if set, otherwise the workspace's own namespace — used in namespace-scoped deployments where all workspaces share one namespace
-- Workspace creation → `ensure_namespace()` + `apply_agent_config()` (ConfigMap for each tool)
-- Session launch → `ensure_session_pvc()` + `build_session_pod()` + pod creation
-- Pod naming: `session-{session_id}-{random_hex_suffix}`; PVC naming: `session-{session_id}-{suffix}`
-- Init container uses the agent's own image (not alpine/git) to clone configured repos
-- OpenShift compatibility: `_grant_anyuid_scc()` creates a RoleBinding for the anyuid SCC; silently skips on non-OpenShift (404/403)
-- OpenShift Routes: created automatically for server-mode sessions
+Swarmer uses the official `kubernetes` Python client for a limited set of infrastructure operations. All agent session lifecycle is handled by OpenShell — Swarmer does not create pods, PVCs, Services, or Routes for sessions.
+
+**Active K8s usage:**
+- `k8s_auth.py` — TokenReview for user authentication; namespace access validation
+- `k8s.init_k8s()` — loads in-cluster or kubeconfig at startup
+- `k8s.ensure_namespace()` / `delete_namespace()` — workspace namespace lifecycle
+- `k8s.effective_namespace()` — resolves the effective K8s namespace for a workspace
+- Pull secret management (`apply_pull_secret`, `get_pull_secret_info`, `delete_pull_secret`) — required for `check_image_reachable`
+- `get_extra_env_vars()` / `set_extra_env_var()` / `delete_extra_env_var()` — workspace env var storage via K8s Secret `swarmer-agent-extra-env` (**ACM-35039**: migrating to SQLite)
+
+All kubernetes client imports remain lazy (inside functions) to avoid import errors when K8s is not configured.
 
 ## OpenShell Integration
 
 [NVIDIA OpenShell](https://github.com/nvidia/openshift-ai-openShell) replaces direct K8s pod and Secret management with a Gateway + Supervisor model. Swarmer sends credentials to the Gateway (which injects them securely) and requests sandboxes from the Supervisor (which provides the isolated runtime). Swarmer never writes AI tokens or PATs into K8s Secrets again.
 
-- **Gateway** -- credential injection API; Swarmer sends AI tokens, PATs, and MCP tokens to the Gateway instead of writing K8s Secrets via `envFrom`
-- **Supervisor** -- sandboxed agent runtime; replaces `build_session_pod()` + `create_namespaced_pod()`
-- **Sandbox lifecycle** -- `create_sandbox()` replaces `build_session_pod()` + `create_namespaced_pod()`; `delete_sandbox()` replaces `delete_pod()` + PVC cleanup
-- **No PVCs** -- sandbox lifetime is managed by OpenShell; `session.persist` and PVC lifecycle are removed in the final cleanup sub-task
-- **No K8s Secrets** -- credentials are injected via Gateway env vars, not `envFrom` K8s Secrets; `session.k8s_secret_names` becomes unused
-- **`session.sandbox_name`** -- stores the OpenShell sandbox identifier; analogous to `session.pod_name` for the K8s path (nullable `VARCHAR(255)`, `NULL` when K8s path is active)
+- **Gateway** -- credential injection API; Swarmer sends AI tokens, PATs, and MCP tokens to the Gateway, which injects them as env vars into the sandbox. No K8s Secrets written for session credentials.
+- **Supervisor** -- sandboxed agent runtime; `create_sandbox()` provisions the sandbox, `delete_sandbox()` tears it down.
+- **Sandbox lifecycle** -- fully managed by OpenShell. No K8s pods, PVCs, or Services created for sessions.
+- **No PVCs** -- sandbox filesystem is ephemeral; repos are cloned fresh each launch via OpenShell API.
+- **No session K8s Secrets** -- all credential injection goes through the Gateway provider mechanism.
+- **`session.sandbox_name`** -- stores the OpenShell sandbox identifier (nullable `VARCHAR(255)`, `NULL` when session is idle).
 - **Network policy** -- `openshell_policy.py` builds per-sandbox YAML policies controlling outbound access (AI provider endpoints, per-repo GitHub, Jira MCP)
 - **Client module** -- `swarmer/openshell_client.py` wraps the OpenShell gRPC SDK with async helpers using `asyncio.to_thread`
 
@@ -192,21 +201,6 @@ All settings live in `swarmer/config.py` (`Settings` class) and are read from en
 | `openshell_bearer_token` | `OPENSHELL_BEARER_TOKEN` | `str` | `""` | Bearer token for Gateway/Supervisor authentication |
 | `sandbox_gc_interval` | `SANDBOX_GC_INTERVAL` | `int` | `300` | Seconds between sandbox garbage-collection sweeps |
 
-### OpenShell Config Settings
-
-All settings live in `swarmer/config.py` (`Settings` class) and are read from env vars:
-
-| Setting | Env Var | Type | Default | Purpose |
-|---|---|---|---|---|
-| `openshell_enabled` | `OPENSHELL_ENABLED` | `bool` | `False` | Feature flag — enables OpenShell path; K8s is the fallback |
-| `openshell_gateway_url` | `OPENSHELL_GATEWAY_URL` | `str` | `""` | Gateway API base URL for credential injection |
-| `openshell_supervisor_url` | `OPENSHELL_SUPERVISOR_URL` | `str` | `""` | Supervisor API base URL for sandbox lifecycle |
-| `openshell_tls_cert` | `OPENSHELL_TLS_CERT` | `str` | `""` | Path to client TLS certificate (mTLS) |
-| `openshell_tls_key` | `OPENSHELL_TLS_KEY` | `str` | `""` | Path to client TLS private key (mTLS) |
-| `openshell_tls_ca` | `OPENSHELL_TLS_CA` | `str` | `""` | Path to CA bundle for server cert verification |
-| `openshell_bearer_token` | `OPENSHELL_BEARER_TOKEN` | `str` | `""` | Bearer token for Gateway/Supervisor authentication |
-| `sandbox_gc_interval` | `SANDBOX_GC_INTERVAL` | `int` | `300` | Seconds between sandbox garbage-collection sweeps |
-
 ## Agent Container Data Interface
 
 Every data item Swarmer currently pushes into agent pods, its source model, the current K8s mechanism, and the target OpenShell API call. This table is the migration contract for ACM-34850.
@@ -234,32 +228,30 @@ Every data item Swarmer currently pushes into agent pods, its source model, the 
 
 ## Background Tasks
 
-Two background asyncio systems run during app lifespan:
+One background asyncio system runs during app lifespan:
 
-1. **Log Poller** (`log_poller.py`) — Per-session tasks that poll pod status and logs every 5s. Saves phase/detail/output to DB. Auto-cleans up completed prompt-mode pods (deletes pod + PVC if `persist=False`). Restarted for in-flight sessions on app restart via `_restart_prompt_pollers()`.
-
-2. **Cron Scheduler + Queue Processor** (`scheduler.py`) — Single global task that checks every 30s. Each cycle:
+**Cron Scheduler + Queue Processor** (`scheduler.py`) — Single global task that checks every 30s. Each cycle:
    - **Queue processor** (`_process_queue`): If the global concurrency cap is not reached, fetches sessions in `"queued"` phase ordered by `created_at` (FIFO) and launches them up to the available slot count. Applies a 2-minute in-memory cooldown when still at capacity to avoid tight retry loops.
    - **Cron launcher**: Claims prompt-mode sessions with a due `cron_next_run` via atomic `UPDATE … RETURNING`. Respects the concurrency cap — does not over-claim. On launch failure, resets phase to `idle` and advances `cron_next_run`.
 
+A **sandbox GC loop** also runs every `SANDBOX_GC_INTERVAL` seconds, collecting orphaned sandboxes whose sessions are no longer active in the DB.
+
 ### Concurrency Limiting
 
-`MAX_CONCURRENT_AGENTS` (default 5, configurable via env var) caps the number of simultaneously running agent pods (sessions in `pending` or `running` phase). When this limit is reached:
+`MAX_CONCURRENT_AGENTS` (default 5, configurable via env var) caps the number of simultaneously running agent sandboxes (sessions in `pending` or `running` phase). When this limit is reached:
 
-- All new launches (manual, API, or scheduled) set `phase="queued"` and return immediately without creating a pod.
+- All new launches (manual, API, or scheduled) set `phase="queued"` and return immediately without creating a sandbox.
 - The queue processor re-evaluates every 2 minutes and launches queued sessions as capacity frees up.
-- Stopping a queued session (no pod exists) returns it directly to `"idle"` without any K8s cleanup.
+- Stopping a queued session (no sandbox exists) returns it directly to `"idle"` without any sandbox cleanup.
 - Setting `MAX_CONCURRENT_AGENTS=0` disables the limit entirely.
 
 The sessions list shows a workspace-scoped capacity summary ("N active | N slots available | N queued") that refreshes every 3s via HTMX. Queued sessions show their global queue position ("Position N of M") on both the list and detail pages.
 
 ## Chat Proxy
 
-`chat_proxy.py` handles server-mode session access. The proxy backend is selected by `session.sandbox_name`:
+`chat_proxy.py` handles server-mode session access. All sessions use `session.service_url` set by `expose_service()` after the server agent starts:
 
-- **OpenShell sessions** (`session.sandbox_name` set): routes HTTP/SSE/WebSocket to `session.service_url` — set by `expose_service()` after the server agent starts. The URL is an OpenShell gateway domain URL (e.g. `https://<name>.openshell.localhost:<port>`). The proxy rewrites the port in `expose_service` to match `OPENSHELL_GATEWAY_URL` (the locally accessible port-forward port). The gateway requires **mutual TLS** — the proxy presents the client cert/key from `OPENSHELL_TLS_CERT`/`OPENSHELL_TLS_KEY` and skips server cert verification (`verify=False`) since the gateway uses a self-signed cert. Without the client cert the gateway returns `TLSV13_ALERT_CERTIFICATE_REQUIRED`.
-- **K8s sessions** (`session.pod_name` set, no `sandbox_name`): routes to the session's ClusterIP Service via `http://session-{id}-svc.{namespace}.svc.cluster.local:4096`
-- **OpenShift Route sessions**: redirects browser directly to the OpenShift Route hostname (bypasses proxy)
+- Routes HTTP/SSE/WebSocket to `session.service_url` — an OpenShell gateway domain URL (e.g. `https://<name>.openshell.localhost:<port>`). The proxy rewrites the port in `expose_service` to match `OPENSHELL_GATEWAY_URL` (the locally accessible port-forward port). The gateway requires **mutual TLS** — the proxy presents the client cert/key from `OPENSHELL_TLS_CERT`/`OPENSHELL_TLS_KEY` and skips server cert verification (`verify=False`) since the gateway uses a self-signed cert. Without the client cert the gateway returns `TLSV13_ALERT_CERTIFICATE_REQUIRED`.
 - **Crush sessions**: renders a custom `crush_chat.html` template; JS calls go through the same `/chat/{path}` proxy
 
 Server-mode lifecycle: session stays in `pending` until `expose_service` returns a URL, which is stored and the session transitions to `running` atomically — preventing the Chat tab from opening before the URL is set.
@@ -268,9 +260,9 @@ SSE streams proxied with no read timeout; WebSocket proxy via `websockets` libra
 
 ## TUI WebSocket Proxy
 
-`tui_ws.py` provides browser-to-agent terminal access. The backend is selected by `session.sandbox_name`:
+`tui_ws.py` provides browser-to-agent terminal access via OpenShell:
 
-**OpenShell path** (`session.sandbox_name` set):
+- One-time UUID auth tokens generated on session detail page, stored in HTTP session, consumed on connect
 - Resolves `sandbox_id` via `_sandbox_id()`
 - Opens an `ExecSandboxInteractive` gRPC stream via `exec_interactive()`
 - Background thread drains the gRPC response stream into an asyncio Queue
@@ -278,19 +270,14 @@ SSE streams proxied with no read timeout; WebSocket proxy via `websockets` libra
 - Resize events forwarded as `ExecSandboxWindowResize` messages
 - Agent is NOT started here — the TUI WebSocket handler starts it interactively; `_run_openshell_agent` skips `start_agent` for TUI mode
 - Network policy probe runs during `_setup_openshell_sandbox` so AI API endpoints are approved before the user connects
+- Workspace env vars and MCP credentials injected from `SandboxEnvVar` DB rows and provider environment
 
-**K8s path** (`session.pod_name` set, no `sandbox_name`):
-- One-time UUID auth tokens generated on session detail page, stored in HTTP session, consumed on connect
-- Uses `kubernetes.stream` exec API (not kubectl subprocess)
-- Background thread reads pod stdout/stderr into an asyncio Queue
-- Supports terminal resize via channel 4 JSON messages
-
-Both paths run the agent tool's TUI binary (`tool.get_tui_binary()`) with model and resume flags.
+Runs the agent tool's TUI binary (`tool.get_tui_binary()`) with model and resume flags.
 
 ## Patch Generation
 
-Sessions can generate git diffs from running pods:
-- Executes `git diff` (or `git diff origin/{branch}` if using a working branch) via `_exec_in_pod()`
+Sessions can generate git diffs from running sandboxes:
+- Executes `git diff` (or `git diff origin/{branch}` if using a working branch) via `openshell_client.exec_command()` in the sandbox
 - AI-generated commit messages via Vertex AI Claude, Anthropic API, or Gemini API (falls back to simple file-list summary)
 - Patches downloadable as `.patch` files
 
@@ -326,11 +313,11 @@ Sessions can generate git diffs from running pods:
 
 1. Store the encrypted value with `_enc` suffix
 2. Add `@property` getter calling `crypto.decrypt()` and `@setter` calling `crypto.encrypt()`
-3. Sync to K8s Secret via the agent tool's `build_k8s_secret_data()` method
+3. Credentials are injected at sandbox launch time via the OpenShell Gateway — no K8s Secret sync required
 
 ### Adding a new agent tool
 
-1. Create `swarmer/agent_tools/new_tool.py` implementing all `AgentToolStrategy` abstract methods
+1. Create `swarmer/agent_tools/new_tool.py` implementing the `AgentToolStrategy` abstract methods: `get_image`, `build_config_data`, `get_container_name`, `get_server_port`, `get_share_dir`, `build_share_setup_cmd`, `build_model_setup_cmd`, `build_main_cmd`, `get_model_options`, `get_default_model`
 2. Register in `agent_tools/registry.py:_init()`
 3. Add the tool name to `AGENT_TOOLS` tuple in `models/session.py`
 4. Add `agent_image_new_tool: str = ""` in `config.py:Settings`

@@ -1,7 +1,6 @@
 from datetime import datetime
 
 from sqlalchemy import (
-    Boolean,
     DateTime,
     ForeignKey,
     Integer,
@@ -29,9 +28,9 @@ CRON_PRESETS: dict[str, str] = {
 }
 
 # Valid mode values
-#   tui    — pod keeps alive (sleep infinity); browser connects via xterm.js and the K8s exec API
-#   server — pod runs opencode serve --hostname 0.0.0.0
-#   prompt — pod runs opencode run "<prompt>" once and exits
+#   tui    — sandbox keeps alive (sleep infinity); browser connects via xterm.js and OpenShell exec
+#   server — sandbox runs opencode serve --hostname 0.0.0.0
+#   prompt — sandbox runs, exits on completion; sandbox deleted on success
 MODES = ("tui", "server", "prompt")
 
 
@@ -55,8 +54,6 @@ class Session(Base):
     )
     model: Mapped[str] = mapped_column(String(128), nullable=False, default="", server_default="")
     language: Mapped[str] = mapped_column(String(32), nullable=False, default="golang", server_default="golang")
-    persist: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    privileged: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     agent_tool: Mapped[str] = mapped_column(String(32), nullable=False, default="opencode", server_default="opencode")
     instruction_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
     working_branch: Mapped[str] = mapped_column(String(255), nullable=False, default="", server_default="")
@@ -66,13 +63,9 @@ class Session(Base):
     cron_schedule: Mapped[str] = mapped_column(String(128), nullable=False, default="", server_default="")
     cron_next_run: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     mcp_server_ids: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
-    # Comma-separated list of K8s Secret names created for this session (for cleanup)
-    k8s_secret_names: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     # Runtime state — managed by dashboard
-    pod_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     sandbox_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     service_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    pvc_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     last_output: Mapped[str] = mapped_column(Text, nullable=False, default="")
     status_detail: Mapped[str] = mapped_column(String(255), nullable=False, default="", server_default="")
     # OpenShell draft policy chunks — JSON snapshot from last run (cleared on next launch)
@@ -123,7 +116,7 @@ class Session(Base):
 
     @property
     def interactive_mode(self) -> bool:
-        """True for modes that keep the pod running persistently."""
+        """True for modes that keep the sandbox running."""
         return self.mode in ("tui", "server")
 
     @property
