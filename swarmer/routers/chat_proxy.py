@@ -103,98 +103,18 @@ def _resolve_upstream(service_url: str) -> tuple[str, str]:
 
 # ── HTML rewriting ───────────────────────────────────────────────────────────
 
-def _proxy_intercept_script(prefix: str) -> str:
-    """Return a <script> that intercepts fetch/EventSource/WebSocket calls.
-
-    OpenCode's web UI calls kT() = location.origin as its API base URL, so all
-    fetch('/global/health') etc. resolve against the Swarmer origin rather than
-    going through the /chat/ proxy prefix.  This script intercepts those calls
-    at the browser level and rewrites API paths to go through the proxy.
-    """
-    return f"""<script>
-(function() {{
-  var _prefix = {prefix!r};
-
-  // Rewrite a URL string: if it's an absolute path starting with /
-  // but NOT already under our proxy prefix, prepend the prefix.
-  function rewrite(url) {{
-    if (!url) return url;
-    var s = String(url);
-    // Already proxied or a full URL to another origin → leave alone
-    if (s.startsWith(_prefix)) return s;
-    if (s.startsWith('http://') || s.startsWith('https://') || s.startsWith('ws://') || s.startsWith('wss://')) return s;
-    if (s.startsWith('/')) return _prefix + s;
-    return s;
-  }}
-
-  // Patch fetch
-  var _fetch = window.fetch.bind(window);
-  window.fetch = function(input, init) {{
-    if (typeof input === 'string') {{
-      input = rewrite(input);
-    }} else if (input instanceof Request) {{
-      var newUrl = rewrite(input.url);
-      if (newUrl !== input.url) input = new Request(newUrl, input);
-    }}
-    return _fetch(input, init);
-  }};
-
-  // Patch EventSource
-  var _EventSource = window.EventSource;
-  window.EventSource = function(url, init) {{
-    return new _EventSource(rewrite(url), init);
-  }};
-  window.EventSource.prototype = _EventSource.prototype;
-
-  // Patch WebSocket
-  var _WebSocket = window.WebSocket;
-  window.WebSocket = function(url, protocols) {{
-    // Convert http(s) proxy prefix to ws(s)
-    var wsPrefix = _prefix.replace(/^https:/, 'wss:').replace(/^http:/, 'ws:');
-    var s = String(url);
-    var rewritten = s;
-    if (s.startsWith('ws://') || s.startsWith('wss://')) {{
-      // Absolute WS URL to same origin: rewrite to go through proxy
-      try {{
-        var u = new URL(s);
-        if (u.origin === location.origin || u.hostname === location.hostname) {{
-          rewritten = wsPrefix + u.pathname + u.search;
-        }}
-      }} catch(e) {{}}
-    }} else if (s.startsWith('/')) {{
-      rewritten = wsPrefix + s;
-    }}
-    return protocols !== undefined ? new _WebSocket(rewritten, protocols) : new _WebSocket(rewritten);
-  }};
-  window.WebSocket.prototype = _WebSocket.prototype;
-  window.WebSocket.CONNECTING = _WebSocket.CONNECTING;
-  window.WebSocket.OPEN = _WebSocket.OPEN;
-  window.WebSocket.CLOSING = _WebSocket.CLOSING;
-  window.WebSocket.CLOSED = _WebSocket.CLOSED;
-}})();
-</script>"""
-
-
 def _rewrite_html(content: bytes, prefix: str) -> bytes:
-    """Rewrite absolute asset paths in HTML so they resolve through the proxy.
-
-    Also injects a fetch/EventSource/WebSocket intercept script so that
-    OpenCode's JS API calls (which use location.origin as base URL) are
-    redirected through the Swarmer proxy prefix.
-    """
+    """Rewrite absolute asset paths in HTML so they resolve through the proxy."""
     try:
         text = content.decode("utf-8", errors="replace")
     except Exception:
         return content
 
-    # Inject intercept script + base tag as the first things in <head>.
-    # The intercept script must come before any app JS so it patches
-    # fetch/EventSource/WebSocket before OpenCode's code runs.
-    inject = _proxy_intercept_script(prefix) + f'\n    <base href="{prefix}/">'
+    base_tag = f'<base href="{prefix}/">'
     if "<head>" in text:
-        text = text.replace("<head>", f"<head>{inject}", 1)
+        text = text.replace("<head>", f"<head>{base_tag}", 1)
     elif "<HEAD>" in text:
-        text = text.replace("<HEAD>", f"<HEAD>{inject}", 1)
+        text = text.replace("<HEAD>", f"<HEAD>{base_tag}", 1)
 
     for old, new in [
         ('src="/',    f'src="{prefix}/'),
