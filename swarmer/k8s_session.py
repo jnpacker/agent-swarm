@@ -120,6 +120,10 @@ def build_session_pod(
     env = [
         client.V1EnvVar(name="HOME", value="/workspace"),
         client.V1EnvVar(name="NODE_OPTIONS", value="--max-old-space-size=1536"),
+        # Writable Go caches — default image GOPATH (/home/node/go) is often RO.
+        client.V1EnvVar(name="GOMODCACHE", value="/tmp/gomodcache"),
+        client.V1EnvVar(name="GOCACHE", value="/tmp/gocache"),
+        client.V1EnvVar(name="GOPATH", value="/tmp/gopath"),
     ]
     env.extend(tool.get_extra_env(has_adc))
     _pat_k8s_name = pat_secret_name or (pat.k8s_secret_name if pat else "")
@@ -294,6 +298,7 @@ def build_session_pod(
         f'mkdir -p {config_path} && '
         f'cp -n /tmp/agent-config-ro/* {config_path}/ 2>/dev/null || true && '
     )
+    go_cache_setup = "mkdir -p /tmp/gomodcache /tmp/gocache /tmp/gopath/bin && "
     safe_dir_setup = ""
     if session.repos:
         safe_dir_setup = "git config --global --add safe.directory '*' && "
@@ -322,7 +327,7 @@ def build_session_pod(
     # mcp_servers=[...] means "these specific servers" (write config with them)
     mcp_config_setup = tool.build_mcp_config_cmd(mcp_servers) if mcp_servers is not None else ""
 
-    command = ["sh", "-c", config_setup + mcp_config_setup + safe_dir_setup + git_setup + share_setup + agent_md_setup + model_setup + branch_setup + main_cmd]
+    command = ["sh", "-c", config_setup + mcp_config_setup + go_cache_setup + safe_dir_setup + git_setup + share_setup + agent_md_setup + model_setup + branch_setup + main_cmd]
 
     # ---------- envFrom ----------
     from swarmer.k8s import AGENT_EXTRA_ENV_SECRET_NAME, MCP_SECRET_NAME
