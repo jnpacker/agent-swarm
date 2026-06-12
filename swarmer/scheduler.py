@@ -213,6 +213,29 @@ async def _collect_orphaned_sandboxes(db) -> None:
         if db_dirty:
             await db.commit()
 
+    # --- Stale running with no sandbox_name: sessions stuck in "running" with
+    # sandbox_name=NULL have no recoverable sandbox — move them to "stopped".
+    # Only "running" is caught here; "pending" sessions are mid-setup and may not
+    # yet have sandbox_name written — the pending guard above already skips GC
+    # entirely when any session is pending, so this path is only reached when
+    # there are no pending sessions.
+    stale_result = await db.execute(
+        select(Session).where(
+            Session.phase == "running",
+            Session.sandbox_name.is_(None),
+        )
+    )
+    stale_sessions = stale_result.scalars().all()
+    if stale_sessions:
+        for s in stale_sessions:
+            log.warning(
+                "sandbox-gc: session %d is '%s' but has no sandbox_name — moving to stopped",
+                s.id, s.phase,
+            )
+            s.phase = "stopped"
+            s.run_completed_at = datetime.utcnow()
+        await db.commit()
+
 
 async def _scheduler_loop() -> None:
     log.warning("scheduler: started, polling every %ds", int(_POLL_INTERVAL))

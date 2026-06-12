@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timezone
@@ -278,6 +279,14 @@ async def stop_session(
         await db.refresh(session)
         return session
 
+    # Cancel any background tasks for this session before touching the DB so
+    # the task cannot race and overwrite the "stopped" phase we're about to set.
+    _task_names = (f"openshell-setup-{sid}", f"openshell-agent-{sid}")
+    for _t in asyncio.all_tasks():
+        if _t.get_name() in _task_names:
+            _t.cancel()
+            log.info("stop_session: cancelled background task %s", _t.get_name())
+
     if session.sandbox_name:
         from swarmer import openshell_client
         if session.service_url:
@@ -294,6 +303,18 @@ async def stop_session(
 
     session.run_completed_at = datetime.now(timezone.utc)
     session.phase = "stopped"
+
+    # Advance cron_next_run so the scheduler doesn't immediately re-launch a
+    # cron-scheduled session that was manually stopped.
+    if session.cron_schedule and session.cron_next_run is not None:
+        try:
+            from croniter import croniter as _croniter
+            session.cron_next_run = _croniter(
+                session.cron_schedule, datetime.now(timezone.utc)
+            ).get_next(datetime)
+        except Exception:
+            log.warning("stop_session: failed to advance cron_next_run for session %d", sid, exc_info=True)
+
     await db.commit()
     await db.refresh(session)
     return session
