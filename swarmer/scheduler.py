@@ -140,7 +140,7 @@ async def _collect_orphaned_sandboxes(db) -> None:
     import time as _time
     from openshell._proto import openshell_pb2 as _pb
     now_ms = int(_time.time() * 1000)
-    _grace_ms = 2 * 60 * 1000  # 2 minutes — covers sandbox creation race window
+    _grace_ms = 5 * 60 * 1000  # 5 minutes — covers sandbox creation race window
 
     def _get_client_local():
         from swarmer import openshell_client as _oc
