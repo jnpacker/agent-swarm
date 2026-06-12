@@ -1406,6 +1406,10 @@ async def session_launch(
             session.mode = mode
         if model.strip():
             session.model = model.strip()
+    else:
+        # List-page launch: no explicit mode chosen — default to prompt so the
+        # session runs once and exits rather than starting a TUI or server.
+        session.mode = "prompt"
 
     if agent_tool:
         try:

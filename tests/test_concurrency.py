@@ -842,6 +842,97 @@ class TestCronModeCoercion:
 
 
 # ===========================================================================
+# List-page launch — mode coercion
+# The list-page "Launch" button sends no mode or save_config, so the endpoint
+# must default to prompt mode regardless of the session's configured mode.
+# ===========================================================================
+
+
+class TestListPageLaunchModeCoercion:
+    """The list-page Launch button sends no mode/save_config, so the endpoint
+    must default to prompt mode regardless of the session's configured mode."""
+
+    @pytest_asyncio.fixture(autouse=True)
+    async def _patch_auth(self):
+        """Override require_auth so the HTML launch endpoint is accessible."""
+        from swarmer.deps import require_auth
+        from swarmer.main import app
+
+        app.dependency_overrides[require_auth] = lambda: None
+        yield
+        app.dependency_overrides.pop(require_auth, None)
+
+    @pytest.mark.asyncio
+    async def test_list_launch_coerces_tui_to_prompt(self, client):
+        """List-page launch (no save_config) coerces a TUI-mode session to prompt."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], "tui-list-launch", mode="tui")
+
+        launched_modes = []
+
+        async def _fake_do_launch(session, workspace, db, user_id=""):
+            launched_modes.append(session.mode)
+
+        with patch("swarmer.routers.sessions._do_launch", new=_fake_do_launch):
+            resp = await client.post(
+                f"/workspaces/{ws['id']}/sessions/{s['id']}/launch",
+                data={"redirect_to": "list"},
+                follow_redirects=False,
+            )
+
+        assert resp.status_code in (302, 303)
+        assert launched_modes == ["prompt"], (
+            f"Expected list-page launch to coerce mode to 'prompt', got {launched_modes}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_list_launch_coerces_server_to_prompt(self, client):
+        """List-page launch (no save_config) coerces a server-mode session to prompt."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], "server-list-launch", mode="server")
+
+        launched_modes = []
+
+        async def _fake_do_launch(session, workspace, db, user_id=""):
+            launched_modes.append(session.mode)
+
+        with patch("swarmer.routers.sessions._do_launch", new=_fake_do_launch):
+            resp = await client.post(
+                f"/workspaces/{ws['id']}/sessions/{s['id']}/launch",
+                data={"redirect_to": "list"},
+                follow_redirects=False,
+            )
+
+        assert resp.status_code in (302, 303)
+        assert launched_modes == ["prompt"], (
+            f"Expected list-page launch to coerce mode to 'prompt', got {launched_modes}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_detail_launch_preserves_explicit_mode(self, client):
+        """Detail-page launch (with save_config + mode) preserves the chosen mode."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], "tui-detail-launch", mode="prompt")
+
+        launched_modes = []
+
+        async def _fake_do_launch(session, workspace, db, user_id=""):
+            launched_modes.append(session.mode)
+
+        with patch("swarmer.routers.sessions._do_launch", new=_fake_do_launch):
+            resp = await client.post(
+                f"/workspaces/{ws['id']}/sessions/{s['id']}/launch",
+                data={"save_config": "1", "mode": "tui", "redirect_to": "detail"},
+                follow_redirects=False,
+            )
+
+        assert resp.status_code in (302, 303)
+        assert launched_modes == ["tui"], (
+            f"Expected detail-page launch to preserve 'tui' mode, got {launched_modes}"
+        )
+
+
+# ===========================================================================
 # WAL mode — database.py must enable WAL so the scheduler can write
 # concurrently while a route handler holds an open read transaction.
 # ===========================================================================
