@@ -139,7 +139,7 @@ db-reset:  ## Delete the SQLite database (forces fresh schema on next start)
 # ──────────────────────────────────────────────────────────────
 
 image-build: sync-images  ## Build the swarmer container image  (REGISTRY, SILENT=1 to skip version prompt)
-	@set -e; \
+	set -e; \
 	CURRENT=$$(cat VERSION); \
 	if [ "$(SILENT)" != "1" ]; then \
 		printf "Image version [$$CURRENT]: "; \
@@ -159,8 +159,8 @@ image-build: sync-images  ## Build the swarmer container image  (REGISTRY, SILEN
 	echo "Built: $$IMAGE_REF"
 
 image-push:  ## Push image to registry  (requires REGISTRY=..., uses VERSION file)
-	@test -n "$(REGISTRY)" || (echo "Set REGISTRY=your.registry.example.com" && exit 1)
-	@TAG=$$(cat VERSION); \
+	test -n "$(REGISTRY)" || (echo "Set REGISTRY=your.registry.example.com" && exit 1)
+	TAG=$$(cat VERSION); \
 	IMAGE_REF="$(REGISTRY)/$(IMAGE):$$TAG"; \
 	echo "Pushing $$IMAGE_REF..."; \
 	$(CONTAINER_CMD) push "$$IMAGE_REF"; \
@@ -171,8 +171,8 @@ image-push:  ## Push image to registry  (requires REGISTRY=..., uses VERSION fil
 # ──────────────────────────────────────────────────────────────
 
 k8s-deploy:  ## Deploy swarmer to the current kubectl context  (IMAGE_REF, NAMESPACE)
-	@test -f auth/secret.key || (echo "Run 'make setup-secret' first." && exit 1)
-	@echo "Deploying $(IMAGE_REF) → namespace $(NAMESPACE)..."
+	test -f auth/secret.key || (echo "Run 'make setup-secret' first." && exit 1)
+	echo "Deploying $(IMAGE_REF) → namespace $(NAMESPACE)..."
 	# 1. Namespace + RBAC + PVC (order-independent, use || true for idempotency)
 	kubectl apply -f k8s/swarmer/namespace.yaml
 	kubectl apply -f k8s/swarmer/rbac.yaml
@@ -181,7 +181,8 @@ k8s-deploy:  ## Deploy swarmer to the current kubectl context  (IMAGE_REF, NAMES
 	# 2. Secret key (create or update from local key file)
 	$(MAKE) k8s-secret NAMESPACE=$(NAMESPACE)
 	# 3. Deployment — substitute image + OpenShift OAuth URL placeholders then apply
-	@OAUTH_URL="$(OPENSHIFT_OAUTH_URL)"; \
+	set -e; \
+	OAUTH_URL="$(OPENSHIFT_OAUTH_URL)"; \
 	if [ -z "$$OAUTH_URL" ]; then \
 	  DETECTED=$$(kubectl get route oauth-openshift -n openshift-authentication \
 	    -o jsonpath='{.spec.host}' 2>/dev/null); \
@@ -215,9 +216,9 @@ k8s-deploy:  ## Deploy swarmer to the current kubectl context  (IMAGE_REF, NAMES
 	  k8s/swarmer/deployment.yaml | kubectl apply -f -
 	# 4. Wait for rollout
 	kubectl rollout status deployment/swarmer -n $(NAMESPACE) --timeout=120s
-	@echo ""
-	@echo "✓ Swarmer deployed."
-	@ROUTE=$$(kubectl get route swarmer -n $(NAMESPACE) -o jsonpath='{.spec.host}' 2>/dev/null); \
+	echo ""
+	echo "✓ Swarmer deployed."
+	ROUTE=$$(kubectl get route swarmer -n $(NAMESPACE) -o jsonpath='{.spec.host}' 2>/dev/null); \
 	if [ -n "$$ROUTE" ]; then \
 	  echo "  Dashboard → https://$$ROUTE"; \
 	else \
@@ -237,20 +238,21 @@ k8s-connect:  ## Port-forward the swarmer dashboard to localhost:8080
 	kubectl port-forward -n $(NAMESPACE) service/swarmer 8080:8080
 
 openshift-deploy:  ## Deploy to OpenShift: Route + OAuthClient + app  (SWARMER_HOST=optional)
-	@test -f auth/secret.key || (echo "Run 'make setup-secret' first." && exit 1)
-	@echo "Deploying to OpenShift namespace $(NAMESPACE)..."
+	test -f auth/secret.key || (echo "Run 'make setup-secret' first." && exit 1)
+	echo "Deploying to OpenShift namespace $(NAMESPACE)..."
 	kubectl apply -f k8s/swarmer/namespace.yaml
 	kubectl apply -f k8s/swarmer/rbac.yaml
 	kubectl apply -f k8s/swarmer/pvc.yaml
 	kubectl apply -f k8s/openshift/service.yaml
 	kubectl apply -f k8s/openshift/route.yaml
-	@if [ -n "$(SWARMER_HOST)" ]; then \
+	if [ -n "$(SWARMER_HOST)" ]; then \
 	  kubectl patch route swarmer -n $(NAMESPACE) --type=merge \
 	    -p "{\"spec\":{\"host\":\"$(SWARMER_HOST)\"}}"; \
 	fi
 	$(MAKE) k8s-secret NAMESPACE=$(NAMESPACE)
-	@echo "Waiting for Route hostname..."
-	@ROUTE_HOST="$(SWARMER_HOST)"; \
+	echo "Waiting for Route hostname..."
+	set -e; \
+	ROUTE_HOST="$(SWARMER_HOST)"; \
 	if [ -z "$$ROUTE_HOST" ]; then \
 	  for i in $$(seq 1 15); do \
 	    ROUTE_HOST=$$(kubectl get route swarmer -n $(NAMESPACE) \
@@ -296,9 +298,9 @@ openshift-deploy:  ## Deploy to OpenShift: Route + OAuthClient + app  (SWARMER_H
 	     s|MAX_CONCURRENT_AGENTS_VALUE|$$MAX_VAL|g" \
 	  k8s/openshift/deployment.yaml | kubectl apply -f -
 	kubectl rollout status deployment/swarmer -n $(NAMESPACE) --timeout=120s
-	@echo ""
-	@echo "✓ OpenShift deployment complete."
-	@ROUTE=$$(kubectl get route swarmer -n $(NAMESPACE) \
+	echo ""
+	echo "✓ OpenShift deployment complete."
+	ROUTE=$$(kubectl get route swarmer -n $(NAMESPACE) \
 	  -o jsonpath='{.spec.host}' 2>/dev/null); \
 	[ -n "$$ROUTE" ] && echo "  Dashboard → https://$$ROUTE" || true
 
