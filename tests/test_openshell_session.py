@@ -916,6 +916,126 @@ class TestSessionStopOpenshell:
         assert resp.json()["phase"] == "idle"
         mock_delete.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_stop_with_no_sandbox_name_still_sets_stopped(self, client):
+        """STOP on a session with no sandbox_name (stale running) must set phase=stopped
+        and not attempt to delete a sandbox."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name=NULL, phase='running' WHERE id=:id"),
+                {"id": s["id"]},
+            )
+            await db.commit()
+
+        with patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()) as mock_delete:
+            resp = await client.post(
+                f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/stop"
+            )
+
+        assert resp.json()["phase"] == "stopped"
+        assert resp.json()["sandbox_name"] is None
+        mock_delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_background_task(self, client):
+        """STOP must cancel any running openshell-agent-{sid} or openshell-setup-{sid}
+        asyncio tasks so they cannot race and overwrite the stopped phase."""
+        import asyncio as _asyncio
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+        sid = s["id"]
+
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name='sandbox-cancel-test', phase='running' WHERE id=:id"),
+                {"id": sid},
+            )
+            await db.commit()
+
+        async def _long_running():
+            try:
+                await _asyncio.sleep(9999)
+            except _asyncio.CancelledError:
+                raise
+
+        task = _asyncio.create_task(_long_running(), name=f"openshell-agent-{sid}")
+        # Yield so the task is scheduled
+        await _asyncio.sleep(0)
+
+        with patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
+            resp = await client.post(
+                f"/api/v1/workspaces/{ws['id']}/sessions/{sid}/stop"
+            )
+
+        # Give the event loop a tick to propagate the cancellation
+        await _asyncio.sleep(0)
+
+        assert resp.json()["phase"] == "stopped"
+        # Task must have received a cancellation signal
+        assert task.cancelled() or task.cancelling() > 0 or task.done(), \
+            "Background task should have been cancelled by STOP"
+        task.cancel()  # clean up if not yet fully cancelled
+
+    @pytest.mark.asyncio
+    async def test_update_db_phase_guard_does_not_overwrite_stopped(self, client):
+        """_update_db in _run_openshell_agent must not overwrite phase=stopped
+        set by the STOP handler."""
+        from swarmer.routers.sessions import _run_openshell_agent
+
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        # Pre-set sandbox_name so _run_openshell_agent has something to exec against
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name='sandbox-race-test', phase='running' WHERE id=:id"),
+                {"id": s["id"]},
+            )
+            await db.commit()
+
+        # After exec finishes, simulate STOP having already set phase=stopped before
+        # the background task writes its final state.
+        async def _set_stopped_during_exec(sandbox_name, cmd, **kwargs):
+            # Simulate STOP winning the race: set stopped while exec is "running"
+            async with _TestSession() as db:
+                await db.execute(
+                    text("UPDATE sessions SET phase='stopped', sandbox_name=NULL WHERE id=:id"),
+                    {"id": s["id"]},
+                )
+                await db.commit()
+            m = MagicMock()
+            m.exit_code = 0
+            m.stderr = ""
+            return m
+
+        _test_get_db = _make_test_db_provider()
+
+        with patch("swarmer.openshell_client.exec_command_streaming", new=_set_stopped_during_exec), \
+             patch("swarmer.openshell_client.read_opencode_response", new=AsyncMock(return_value="")), \
+             patch("swarmer.openshell_client.get_draft_chunks", new=AsyncMock(return_value=[])), \
+             patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()), \
+             patch("swarmer.database.get_db", _test_get_db):
+            await _run_openshell_agent(
+                session_id=s["id"],
+                sandbox_name="sandbox-race-test",
+                cmd=["opencode", "run", "--prompt", "test"],
+                mode="prompt",
+                agent_tool="opencode",
+            )
+
+        async with _TestSession() as db:
+            from swarmer.models.session import Session as _S
+            updated = await db.get(_S, s["id"])
+            # Phase guard should have prevented the background task from
+            # overwriting stopped → succeeded
+            assert updated.phase == "stopped", (
+                f"Expected phase='stopped' but got '{updated.phase}' — "
+                "phase guard in _update_db is not working"
+            )
+
 
 # ===========================================================================
 # 4. _run_openshell_agent(): background task behavior
@@ -1574,6 +1694,74 @@ class TestSandboxGC:
             assert gone_session.sandbox_name is None
             assert running_session.phase == "running"  # untouched
             assert running_session.sandbox_name == "sandbox-live"
+
+    @pytest.mark.asyncio
+    async def test_stale_running_with_no_sandbox_name_moved_to_stopped(self, client):
+        """Sessions stuck in phase=running or phase=pending with sandbox_name=NULL
+        have no recoverable sandbox and must be moved to stopped by GC."""
+        ws = await _create_workspace(client)
+        s_stale = await _create_session(client, ws["id"])
+        s_ok = await _create_session(client, ws["id"], name="s2")
+
+        async with _TestSession() as db:
+            # s_stale: running but no sandbox_name (race condition victim)
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name=NULL, phase='running' WHERE id=:id"),
+                {"id": s_stale["id"]},
+            )
+            # s_ok: running with a live sandbox_name (should be untouched)
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name='sandbox-healthy', phase='running' WHERE id=:id"),
+                {"id": s_ok["id"]},
+            )
+            await db.commit()
+
+        async with _TestSession() as db:
+            with patch(
+                "swarmer.openshell_client.list_sandboxes",
+                new=AsyncMock(return_value=["sandbox-healthy"]),
+            ):
+                with patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
+                    from swarmer.scheduler import _collect_orphaned_sandboxes
+                    await _collect_orphaned_sandboxes(db)
+
+        async with _TestSession() as db:
+            from swarmer.models.session import Session as _S
+            stale = await db.get(_S, s_stale["id"])
+            ok = await db.get(_S, s_ok["id"])
+            assert stale.phase == "stopped", (
+                f"Expected stale session to be stopped, got '{stale.phase}'"
+            )
+            assert ok.phase == "running"  # healthy session untouched
+            assert ok.sandbox_name == "sandbox-healthy"
+
+    @pytest.mark.asyncio
+    async def test_stale_running_no_sandbox_does_not_affect_healthy_running(self, client):
+        """The stale-running GC only touches sessions with sandbox_name=NULL;
+        sessions with a live sandbox_name are left untouched."""
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"])
+
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET sandbox_name='sandbox-healthy-2', phase='running' WHERE id=:id"),
+                {"id": s["id"]},
+            )
+            await db.commit()
+
+        async with _TestSession() as db:
+            with patch(
+                "swarmer.openshell_client.list_sandboxes",
+                new=AsyncMock(return_value=["sandbox-healthy-2"]),
+            ):
+                with patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
+                    from swarmer.scheduler import _collect_orphaned_sandboxes
+                    await _collect_orphaned_sandboxes(db)
+
+        async with _TestSession() as db:
+            from swarmer.models.session import Session as _S
+            updated = await db.get(_S, s["id"])
+            assert updated.phase == "running"  # untouched — has a live sandbox
 
 
 # ===========================================================================

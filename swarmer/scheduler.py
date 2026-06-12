@@ -59,13 +59,14 @@ async def _sandbox_gc_loop() -> None:
     log.info("sandbox-gc: started, interval=%ds", interval)
     try:
         while True:
-            await asyncio.sleep(interval)
+            # Run immediately on first iteration, then sleep between subsequent runs.
             try:
                 async for _db in get_db():
                     await _collect_orphaned_sandboxes(_db)
                     break
             except Exception:
                 log.exception("sandbox-gc: error in collect cycle")
+            await asyncio.sleep(interval)
     except asyncio.CancelledError:
         raise
 
@@ -100,13 +101,18 @@ async def _collect_orphaned_sandboxes(db) -> None:
     if not live_names:
         return
 
-    # Skip GC entirely if any session is pending (mid-setup: sandbox may exist but
-    # sandbox_name not yet committed to DB — deleting it would corrupt the setup).
+    # Skip GC entirely if any session is pending AND has a sandbox_name already set
+    # (mid-setup: sandbox exists but sandbox_name not yet committed to DB — deleting
+    # it would corrupt the setup). Sessions pending with sandbox_name=NULL are stale
+    # and are handled by the stale-running pass below; they must not block GC.
     pending_result = await db.execute(
-        select(Session.id).where(Session.phase == "pending").limit(1)
+        select(Session.id).where(
+            Session.phase == "pending",
+            Session.sandbox_name.is_not(None),
+        ).limit(1)
     )
     if pending_result.scalar_one_or_none() is not None:
-        log.debug("sandbox-gc: skipping — pending session in progress")
+        log.debug("sandbox-gc: skipping — pending session with sandbox in progress")
         return
 
     # Collect all sessions with a sandbox_name, split by whether they are active or
@@ -134,7 +140,7 @@ async def _collect_orphaned_sandboxes(db) -> None:
     import time as _time
     from openshell._proto import openshell_pb2 as _pb
     now_ms = int(_time.time() * 1000)
-    _grace_ms = 5 * 60 * 1000  # 5 minutes
+    _grace_ms = 5 * 60 * 1000  # 5 minutes — covers sandbox creation race window
 
     def _get_client_local():
         from swarmer import openshell_client as _oc
@@ -212,6 +218,27 @@ async def _collect_orphaned_sandboxes(db) -> None:
                 db_dirty = True
         if db_dirty:
             await db.commit()
+
+    # --- Stale running/pending with no sandbox_name: sessions stuck in "running" or
+    # "pending" with sandbox_name=NULL have no recoverable sandbox — move to "stopped".
+    # The pending guard above only skips GC when a pending session *has* a sandbox_name
+    # (genuinely mid-setup), so pending+NULL sessions reach this path safely.
+    stale_result = await db.execute(
+        select(Session).where(
+            Session.phase.in_(("running", "pending")),
+            Session.sandbox_name.is_(None),
+        )
+    )
+    stale_sessions = stale_result.scalars().all()
+    if stale_sessions:
+        for s in stale_sessions:
+            log.warning(
+                "sandbox-gc: session %d is '%s' but has no sandbox_name — moving to stopped",
+                s.id, s.phase,
+            )
+            s.phase = "stopped"
+            s.run_completed_at = datetime.utcnow()
+        await db.commit()
 
 
 async def _scheduler_loop() -> None:

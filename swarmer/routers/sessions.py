@@ -1014,6 +1014,15 @@ async def _setup_openshell_sandbox(
         async for _db in _get_db():
             _s = await _db.get(_Session, session_id)
             if _s:
+                # Do not overwrite a "stopped" state set by the STOP handler —
+                # this task may have been cancelled or lost the race with STOP.
+                # "idle" is the initial launch state so we must not block it.
+                if _s.phase == "stopped" and "phase" in fields:
+                    log.info(
+                        "_update_db: session %d is already 'stopped'; skipping task write (would set phase=%s)",
+                        session_id, fields["phase"],
+                    )
+                    break
                 for k, v in fields.items():
                     setattr(_s, k, v)
                 await _db.commit()
@@ -1204,6 +1213,15 @@ async def _run_openshell_agent(
         async for _db in _get_db():
             _s = await _db.get(_Session, session_id)
             if _s:
+                # Do not overwrite a "stopped" state set by the STOP handler —
+                # this task may have been cancelled or lost the race with STOP.
+                # "idle" is the initial launch state so we must not block it.
+                if _s.phase == "stopped" and "phase" in fields:
+                    log.info(
+                        "_update_db: session %d is already 'stopped'; skipping task write (would set phase=%s)",
+                        session_id, fields["phase"],
+                    )
+                    break
                 for k, v in fields.items():
                     setattr(_s, k, v)
                 await _db.commit()
@@ -1435,6 +1453,14 @@ async def session_stop(
         await db.commit()
         return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}", status_code=302)
 
+    # Cancel any background tasks for this session before touching the DB so
+    # the task cannot race and overwrite the "stopped" phase we're about to set.
+    _task_names = (f"openshell-setup-{sid}", f"openshell-agent-{sid}")
+    for _t in asyncio.all_tasks():
+        if _t.get_name() in _task_names:
+            _t.cancel()
+            log.info("session_stop: cancelled background task %s", _t.get_name())
+
     if session.sandbox_name:
         from swarmer import openshell_client
         # Snapshot draft policy chunks before deleting the sandbox so the
@@ -1460,6 +1486,23 @@ async def session_stop(
 
     session.run_completed_at = datetime.utcnow()
     session.phase = "stopped"
+
+    # Advance cron_next_run so the scheduler doesn't immediately re-launch a
+    # cron-scheduled session that was manually stopped — it would re-queue it
+    # within the next 30-second poll if cron_next_run is already in the past.
+    if session.cron_schedule and session.cron_next_run is not None:
+        try:
+            from croniter import croniter as _croniter
+            session.cron_next_run = _croniter(
+                session.cron_schedule, datetime.utcnow()
+            ).get_next(datetime)
+            log.info(
+                "session_stop: advanced cron_next_run for session %d to %s",
+                sid, session.cron_next_run,
+            )
+        except Exception:
+            log.warning("session_stop: failed to advance cron_next_run for session %d", sid, exc_info=True)
+
     await db.commit()
     return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}", status_code=302)
 
