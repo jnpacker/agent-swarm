@@ -751,7 +751,7 @@ class TestCronModeCoercion:
         ws = await _create_workspace(client)
         cron_s = await _create_session(client, ws["id"], "tui-cron-session")
 
-        # Set mode to TUI and make the cron overdue
+        # Set mode to TUI and insert an overdue session_schedules entry.
         async with _TestSession() as db:
             await db.execute(
                 text(
@@ -760,6 +760,14 @@ class TestCronModeCoercion:
                     "WHERE id=:id"
                 ),
                 {"id": cron_s["id"]},
+            )
+            await db.execute(
+                text(
+                    "INSERT INTO session_schedules "
+                    "(session_id, cron_schedule, cron_next_run, label, enabled) "
+                    "VALUES (:sid, '*/30 * * * *', datetime('now','-1 minute'), '', 1)"
+                ),
+                {"sid": cron_s["id"]},
             )
             await db.commit()
 
@@ -793,6 +801,14 @@ class TestCronModeCoercion:
                 ),
                 {"id": cron_s["id"]},
             )
+            await db.execute(
+                text(
+                    "INSERT INTO session_schedules "
+                    "(session_id, cron_schedule, cron_next_run, label, enabled) "
+                    "VALUES (:sid, '*/30 * * * *', datetime('now','-1 minute'), '', 1)"
+                ),
+                {"sid": cron_s["id"]},
+            )
             await db.commit()
 
         launched = []
@@ -824,6 +840,14 @@ class TestCronModeCoercion:
                     "WHERE id=:id"
                 ),
                 {"id": cron_s["id"]},
+            )
+            await db.execute(
+                text(
+                    "INSERT INTO session_schedules "
+                    "(session_id, cron_schedule, cron_next_run, label, enabled) "
+                    "VALUES (:sid, '*/30 * * * *', datetime('now','-1 minute'), '', 1)"
+                ),
+                {"sid": cron_s["id"]},
             )
             await db.commit()
 

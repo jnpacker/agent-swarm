@@ -31,6 +31,18 @@ def _normalize_repo_url(url: str) -> str:
     return f"{host}{path}"
 
 
+def _fmt_schedule(sc: dict) -> dict:
+    return {
+        "id": sc.get("id"),
+        "cron_schedule": sc.get("cron_schedule"),
+        "cron_next_run": sc.get("cron_next_run"),
+        "label": sc.get("label", ""),
+        "prompt_id": sc.get("prompt_id"),
+        "instruction_prompt": sc.get("instruction_prompt", ""),
+        "enabled": sc.get("enabled", True),
+    }
+
+
 def _fmt_session(s: dict, repos: list[dict] | None = None) -> dict:
     result = {
         "id": s.get("id"),
@@ -49,6 +61,7 @@ def _fmt_session(s: dict, repos: list[dict] | None = None) -> dict:
         "run_completed_at": s.get("run_completed_at"),
         "is_active": s.get("is_active"),
         "workspace_id": s.get("workspace_id"),
+        "schedules": [_fmt_schedule(sc) for sc in s.get("schedules", [])],
     }
     if repos is not None:
         result["repos"] = [
@@ -320,6 +333,43 @@ class AgentSwarmMCPServer:
             }
             for p in pats
         ]
+
+    async def _list_session_schedules(self, workspace_id: int, session_id: int) -> list[dict]:
+        schedules = await self.client.list_session_schedules(workspace_id, session_id)
+        return [_fmt_schedule(sc) for sc in schedules]
+
+    async def _add_session_schedule(
+        self,
+        workspace_id: int,
+        session_id: int,
+        cron_schedule: str,
+        *,
+        label: str = "",
+        prompt_id: int | None = None,
+        instruction_prompt: str = "",
+        enabled: bool = True,
+    ) -> dict:
+        sc = await self.client.create_session_schedule(
+            workspace_id, session_id, cron_schedule,
+            label=label, prompt_id=prompt_id,
+            instruction_prompt=instruction_prompt, enabled=enabled,
+        )
+        return _fmt_schedule(sc)
+
+    async def _update_session_schedule(
+        self,
+        workspace_id: int,
+        session_id: int,
+        schedule_id: int,
+        **fields: Any,
+    ) -> dict:
+        sc = await self.client.update_session_schedule(workspace_id, session_id, schedule_id, **fields)
+        return _fmt_schedule(sc)
+
+    async def _delete_session_schedule(
+        self, workspace_id: int, session_id: int, schedule_id: int
+    ) -> None:
+        await self.client.delete_session_schedule(workspace_id, session_id, schedule_id)
 
     # ==================================================================
     # Tool registration
@@ -604,6 +654,95 @@ class AgentSwarmMCPServer:
                 workspace_id: The workspace id.
             """
             return await self._list_github_pats(workspace_id)
+
+        @mcp.tool()
+        async def list_session_schedules(workspace_id: int, session_id: int) -> list[dict]:
+            """List all schedules configured for a session.
+
+            Args:
+                workspace_id: The workspace id.
+                session_id: The session id.
+            """
+            return await self._list_session_schedules(workspace_id, session_id)
+
+        @mcp.tool()
+        async def add_session_schedule(
+            workspace_id: int,
+            session_id: int,
+            cron_schedule: str,
+            label: str = "",
+            prompt_id: Optional[int] = None,
+            instruction_prompt: str = "",
+            enabled: bool = True,
+        ) -> dict:
+            """Add a new schedule to a session.
+
+            Args:
+                workspace_id: The workspace id.
+                session_id: The session id.
+                cron_schedule: Cron expression (e.g. '0 9 * * 1-5').
+                label: Human-readable name for this schedule.
+                prompt_id: ID of a workspace prompt to use instead of the session default.
+                instruction_prompt: Additional instructions; overrides session default when set.
+                enabled: Whether the schedule is active. Default: True.
+            """
+            return await self._add_session_schedule(
+                workspace_id, session_id, cron_schedule,
+                label=label, prompt_id=prompt_id,
+                instruction_prompt=instruction_prompt, enabled=enabled,
+            )
+
+        @mcp.tool()
+        async def update_session_schedule(
+            workspace_id: int,
+            session_id: int,
+            schedule_id: int,
+            cron_schedule: Optional[str] = None,
+            label: Optional[str] = None,
+            prompt_id: Optional[int] = None,
+            instruction_prompt: Optional[str] = None,
+            enabled: Optional[bool] = None,
+        ) -> dict:
+            """Update an existing session schedule.
+
+            Args:
+                workspace_id: The workspace id.
+                session_id: The session id.
+                schedule_id: The schedule id to update.
+                cron_schedule: New cron expression.
+                label: New label.
+                prompt_id: New prompt id (None clears the override).
+                instruction_prompt: New additional instructions.
+                enabled: Enable or disable the schedule.
+            """
+            fields: dict[str, Any] = {}
+            if cron_schedule is not None:
+                fields["cron_schedule"] = cron_schedule
+            if label is not None:
+                fields["label"] = label
+            if prompt_id is not None:
+                fields["prompt_id"] = prompt_id
+            if instruction_prompt is not None:
+                fields["instruction_prompt"] = instruction_prompt
+            if enabled is not None:
+                fields["enabled"] = enabled
+            return await self._update_session_schedule(workspace_id, session_id, schedule_id, **fields)
+
+        @mcp.tool()
+        async def delete_session_schedule(
+            workspace_id: int,
+            session_id: int,
+            schedule_id: int,
+        ) -> dict:
+            """Delete a session schedule.
+
+            Args:
+                workspace_id: The workspace id.
+                session_id: The session id.
+                schedule_id: The schedule id to delete.
+            """
+            await self._delete_session_schedule(workspace_id, session_id, schedule_id)
+            return {"detail": "deleted"}
 
     def run(self, transport: str = "stdio", host: str = "127.0.0.1", port: int = 8080) -> None:
         if transport == "sse":

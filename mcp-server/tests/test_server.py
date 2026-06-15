@@ -33,6 +33,11 @@ EXPECTED_TOOLS = {
     "get_session_output",
     "wait_for_session",
     "list_github_pats",
+    # ACM-35377: schedule management tools
+    "list_session_schedules",
+    "add_session_schedule",
+    "update_session_schedule",
+    "delete_session_schedule",
 }
 
 

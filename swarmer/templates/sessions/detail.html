@@ -401,57 +401,10 @@
       {# Schedule card — left column, below Configuration #}
       <div class="pf-v6-c-card" id="schedule">
         <div class="pf-v6-c-card__header">
-          <h3 class="pf-v6-c-card__header-main" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">Schedule</h3>
+          <h3 class="pf-v6-c-card__header-main" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">Schedules</h3>
         </div>
         <div class="pf-v6-c-card__body">
-          {% if session.cron_schedule %}
-          <div style="margin-bottom:var(--pf-t--global--spacer--md); padding:var(--pf-t--global--spacer--sm) var(--pf-t--global--spacer--md); background:var(--pf-t--global--background--color--secondary--default); border-radius:var(--pf-t--global--border--radius--small);">
-            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:var(--pf-t--global--spacer--xs);">
-              <div>
-                <span style="font-weight:var(--pf-t--global--font--weight--heading--bold);">Active:</span>
-                <span class="pf-v6-c-label pf-m-purple" style="margin-left:var(--pf-t--global--spacer--xs);"><span class="pf-v6-c-label__content">{{ session.cron_label }}</span></span>
-                <span style="margin-left:var(--pf-t--global--spacer--xs); color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--xs); font-family:monospace;">{{ session.cron_schedule }}</span>
-              </div>
-              <form method="post" action="/workspaces/{{ ws.id }}/sessions/{{ session.id }}/unschedule" style="display:inline;">
-                <button type="submit" class="pf-v6-c-button pf-m-danger pf-m-small">Cancel</button>
-              </form>
-            </div>
-            {% if session.cron_next_run %}
-            <div style="margin-top:var(--pf-t--global--spacer--xs); color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--xs);">
-              {% if session.is_active %}Currently running. Next run scheduled after completion.
-              {% else %}Next: <strong>{{ session.cron_next_run.strftime('%b %d, %Y %H:%M') }} UTC</strong>{% endif %}
-            </div>
-            {% endif %}
-          </div>
-          {% endif %}
-
-          <form method="post" action="/workspaces/{{ ws.id }}/sessions/{{ session.id }}/schedule">
-            <div style="margin-bottom:var(--pf-t--global--spacer--sm);">
-              <label style="font-size:var(--pf-t--global--font--size--sm); color:var(--pf-t--global--text--color--subtle); display:block; margin-bottom:var(--pf-t--global--spacer--xs);">Quick presets</label>
-              <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:var(--pf-t--global--spacer--xs);">
-                {% for expr, label in cron_presets.items() %}
-                <button type="button" class="pf-v6-c-button pf-m-secondary pf-m-small" onclick="setCron('{{ expr }}')" style="width:100%;">{{ label }}</button>
-                {% endfor %}
-              </div>
-            </div>
-            <div style="margin-bottom:var(--pf-t--global--spacer--xs);">
-              <div style="display:flex; gap:var(--pf-t--global--spacer--xs); align-items:center; flex-wrap:wrap;">
-                <input type="text" id="cron_expr" name="cron_expr" class="pf-v6-c-form-control"
-                       placeholder="*/30 * * * *" value="{{ session.cron_schedule }}"
-                       required aria-required="true"
-                       style="flex:1; min-width:0; font-family:monospace; font-size:var(--pf-t--global--font--size--sm);">
-                <button type="submit" class="pf-v6-c-button pf-m-primary pf-m-small">Save</button>
-              </div>
-              <div style="margin-top:var(--pf-t--global--spacer--xs); color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--xs);">
-                min hour dom month dow (UTC) · <a href="https://crontab.guru/" target="_blank" rel="noopener">crontab.guru</a>
-              </div>
-            </div>
-          </form>
-          <p style="margin-top:var(--pf-t--global--spacer--sm);
-                    color:var(--pf-t--global--text--color--subtle);
-                    font-size:var(--pf-t--global--font--size--xs); margin-bottom:0;">
-            Scheduled runs always execute in Prompt mode.
-          </p>
+          {% include "sessions/_schedule_list.html" with context %}
         </div>
       </div>
 

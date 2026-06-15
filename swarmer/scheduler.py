@@ -285,23 +285,45 @@ async def _check_and_launch(db=None) -> None:
         else:
             available = None  # unlimited
 
-        # Build the subquery for sessions to claim (respect capacity if limited)
-        due_sub = (
-            select(Session.id)
+        from swarmer.models.session_schedule import SessionSchedule
+
+        # Fetch all due (sched_id, session_id) rows ordered by cron_next_run.
+        # SQLite-compatible: avoid correlated aggregates in subqueries.
+        due_rows_result = await db.execute(
+            select(
+                SessionSchedule.id.label("sched_id"),
+                SessionSchedule.session_id,
+                SessionSchedule.cron_next_run,
+            )
+            .join(Session, Session.id == SessionSchedule.session_id)
             .where(
-                Session.cron_schedule != "",
-                Session.cron_next_run <= now,
+                SessionSchedule.enabled == True,  # noqa: E712
+                SessionSchedule.cron_next_run <= now,
                 Session.phase.notin_(["pending", "running", "queued"]),
             )
-            .order_by(Session.cron_next_run)
+            .order_by(SessionSchedule.cron_next_run)
         )
-        if available is not None:
-            due_sub = due_sub.limit(available)
+        all_due_rows = due_rows_result.fetchall()
+
+        # Pick the earliest due schedule per session (first occurrence wins since
+        # rows are ordered by cron_next_run ascending).
+        session_to_sched: dict[int, int] = {}
+        for row in all_due_rows:
+            sid = row.session_id
+            if sid not in session_to_sched:
+                session_to_sched[sid] = row.sched_id
+
+        # Respect capacity: trim to `available` sessions if limited.
+        if available is not None and len(session_to_sched) > available:
+            session_to_sched = dict(list(session_to_sched.items())[:available])
+
+        if not session_to_sched:
+            return
 
         # Atomically claim due sessions by setting phase='pending'.
         claim_result = await db.execute(
             update(Session)
-            .where(Session.id.in_(due_sub.scalar_subquery()))
+            .where(Session.id.in_(list(session_to_sched.keys())))
             .values(phase="pending")
             .returning(Session.id)
         )
@@ -309,6 +331,9 @@ async def _check_and_launch(db=None) -> None:
         if not claimed_ids:
             return
         await db.commit()
+
+        # Filter session_to_sched to only actually-claimed sessions (race safety).
+        session_to_sched = {sid: session_to_sched[sid] for sid in claimed_ids if sid in session_to_sched}
 
         # Load the claimed sessions with relationships for processing.
         result = await db.execute(
@@ -327,32 +352,43 @@ async def _check_and_launch(db=None) -> None:
             if ws is None:
                 continue
 
+            sched_id = session_to_sched.get(session.id)
             log.warning(
-                "scheduler: launching session %d (%s), was due at %s",
-                session.id, session.name, session.cron_next_run,
+                "scheduler: launching session %d (%s) via schedule %s",
+                session.id, session.name, sched_id,
             )
             try:
                 from swarmer.routers.sessions import _do_launch
                 session.mode = "prompt"
+                session.active_schedule_id = sched_id
                 await db.commit()
                 await _do_launch(session, ws, db)
 
-                session.cron_next_run = croniter(
-                    session.cron_schedule, datetime.utcnow()
-                ).get_next(datetime)
+                # Advance the fired schedule's next run time.
+                if sched_id:
+                    sched = await db.get(SessionSchedule, sched_id)
+                    if sched:
+                        sched.cron_next_run = croniter(
+                            sched.cron_schedule, datetime.utcnow()
+                        ).get_next(datetime)
                 await db.commit()
 
                 log.warning(
-                    "scheduler: session %d launched (phase=%s), next run at %s",
-                    session.id, session.phase, session.cron_next_run,
+                    "scheduler: session %d launched (phase=%s)",
+                    session.id, session.phase,
                 )
             except Exception:
                 log.exception("scheduler: failed to launch session %d", session.id)
                 await db.rollback()
                 session.phase = "idle"
-                session.cron_next_run = croniter(
-                    session.cron_schedule, datetime.utcnow()
-                ).get_next(datetime)
+                session.active_schedule_id = None
+                # Still advance the schedule so it doesn't retry immediately.
+                if sched_id:
+                    sched = await db.get(SessionSchedule, sched_id)
+                    if sched:
+                        sched.cron_next_run = croniter(
+                            sched.cron_schedule, datetime.utcnow()
+                        ).get_next(datetime)
                 await db.commit()
 
     if db is not None:

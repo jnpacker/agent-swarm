@@ -500,6 +500,7 @@ async def session_detail(
                 or session.policy_chunks
                 or session.custom_policies
             ),
+            "schedules": session.schedules or [],
         },
     )
 
@@ -716,6 +717,36 @@ def _build_expected_hosts(model: str, repos_data: list[dict], tool_name: str, mo
     return hosts
 
 
+async def _resolve_schedule_prompt(schedule_id: int, session: Session, db: AsyncSession) -> str:
+    """Resolve a per-schedule prompt, falling back to session defaults for empty fields."""
+    from swarmer.models.session_schedule import SessionSchedule
+    sched = await db.get(SessionSchedule, schedule_id)
+    if sched is None:
+        return await _resolve_session_prompt(session, db)
+
+    # Effective prompt_id: schedule overrides session, empty means use session default.
+    effective_prompt_id = sched.prompt_id if sched.prompt_id is not None else session.prompt_id
+    base_prompt = ""
+    if effective_prompt_id:
+        p = await db.get(WorkspacePrompt, effective_prompt_id)
+        if p:
+            base_prompt = p.content
+
+    # Effective instruction: schedule overrides session, empty means use session default.
+    effective_instruction = (
+        sched.instruction_prompt.strip()
+        if sched.instruction_prompt and sched.instruction_prompt.strip()
+        else (session.instruction_prompt.strip() if session.instruction_prompt else "")
+    )
+
+    if effective_instruction and base_prompt:
+        return effective_instruction + "\n\n" + base_prompt
+    elif effective_instruction:
+        return effective_instruction
+    else:
+        return base_prompt
+
+
 async def _do_launch(session: Session, ws: Workspace, db: AsyncSession, user_id: str = "") -> None:
     """Core launch logic shared by the HTTP endpoint and the background scheduler."""
     if user_id == "unknown":
@@ -783,8 +814,12 @@ async def _do_launch(session: Session, ws: Workspace, db: AsyncSession, user_id:
         # No MCP selection stored — default to all workspace-enabled servers
         mcp_servers = ws_mcp_servers
 
-    # Resolve prompt using layered composition
-    resolved_prompt = await _resolve_session_prompt(session, db)
+    # Resolve prompt: if a schedule triggered this run, use its prompt config
+    # (falling back to session defaults for empty fields).
+    if session.active_schedule_id:
+        resolved_prompt = await _resolve_schedule_prompt(session.active_schedule_id, session, db)
+    else:
+        resolved_prompt = await _resolve_session_prompt(session, db)
 
     # Fetch workspace prompt sources for network policy scoping.
     # Agents inside the sandbox may curl raw.githubusercontent.com to fetch
@@ -1311,6 +1346,7 @@ async def _run_openshell_agent(
                 policy_chunks=chunks_json,
                 run_completed_at=datetime.utcnow(),
                 sandbox_name=new_sandbox_name,
+                active_schedule_id=None,
             )
         else:
             if mode == "server":
@@ -1503,6 +1539,7 @@ async def session_stop(
 
     session.run_completed_at = datetime.utcnow()
     session.phase = "stopped"
+    session.active_schedule_id = None
 
     # Advance cron_next_run so the scheduler doesn't immediately re-launch a
     # cron-scheduled session that was manually stopped — it would re-queue it
@@ -1589,6 +1626,180 @@ async def session_unschedule(
 
     flash(request, "Schedule cancelled.", "success")
     return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}#schedule", status_code=302)
+
+
+# ============================================================
+# Session Schedules (HTMX sub-resource)
+# ============================================================
+
+
+async def _get_schedule_items_context(ws_id: int, sid: int, db: AsyncSession) -> dict:
+    """Return context dict for the _schedule_items.html partial."""
+    from swarmer.models.session_schedule import SessionSchedule
+    result = await db.execute(
+        select(SessionSchedule)
+        .where(SessionSchedule.session_id == sid)
+        .order_by(SessionSchedule.created_at)
+    )
+    schedules = result.scalars().all()
+    prompt_sources = await _get_prompt_sources(ws_id, db)
+    return {
+        "schedules": schedules,
+        "prompt_sources": prompt_sources,
+        "cron_presets": CRON_PRESETS,
+    }
+
+
+@router.get(
+    "/workspaces/{ws_id}/sessions/{sid}/schedules/items",
+    dependencies=[Depends(require_auth)],
+    response_class=HTMLResponse,
+)
+async def schedule_items(
+    ws_id: int,
+    sid: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    ws = await _get_workspace(ws_id, db)
+    session = await db.get(Session, sid)
+    if ws is None or session is None or session.workspace_id != ws_id:
+        return HTMLResponse("")
+    ctx = await _get_schedule_items_context(ws_id, sid, db)
+    return templates.TemplateResponse(
+        request,
+        "sessions/_schedule_items.html",
+        {"ws": ws, "session": session, **ctx},
+    )
+
+
+@router.post(
+    "/workspaces/{ws_id}/sessions/{sid}/schedules",
+    dependencies=[Depends(require_auth)],
+)
+async def schedule_create(
+    ws_id: int,
+    sid: int,
+    request: Request,
+    cron_expr: str = Form(""),
+    label: str = Form(""),
+    prompt_id: str = Form(""),
+    instruction_prompt: str = Form(""),
+    enabled: str = Form("on"),
+    db: AsyncSession = Depends(get_db),
+):
+    from croniter import croniter as _croniter
+    from swarmer.models.session_schedule import SessionSchedule
+
+    ws = await _get_workspace(ws_id, db)
+    session = await db.get(Session, sid)
+    if ws is None or session is None or session.workspace_id != ws_id:
+        return HTMLResponse("", status_code=404)
+
+    cron_expr = cron_expr.strip()
+    if not cron_expr or not _croniter.is_valid(cron_expr):
+        return HTMLResponse("", status_code=422, headers={"HX-Trigger": "scheduleFormError"})
+
+    pid = int(prompt_id) if prompt_id.strip().isdigit() else None
+    sched = SessionSchedule(
+        session_id=sid,
+        cron_schedule=cron_expr,
+        cron_next_run=_croniter(cron_expr, datetime.utcnow()).get_next(datetime),
+        label=label.strip(),
+        prompt_id=pid,
+        instruction_prompt=instruction_prompt,
+        enabled=(enabled == "on"),
+    )
+    db.add(sched)
+    await db.commit()
+    return HTMLResponse("", headers={"HX-Trigger": "scheduleListChanged"})
+
+
+@router.post(
+    "/workspaces/{ws_id}/sessions/{sid}/schedules/{sched_id}/edit",
+    dependencies=[Depends(require_auth)],
+)
+async def schedule_edit(
+    ws_id: int,
+    sid: int,
+    sched_id: int,
+    request: Request,
+    cron_expr: str = Form(""),
+    label: str = Form(""),
+    prompt_id: str = Form(""),
+    instruction_prompt: str = Form(""),
+    enabled: str = Form(""),
+    db: AsyncSession = Depends(get_db),
+):
+    from croniter import croniter as _croniter
+    from swarmer.models.session_schedule import SessionSchedule
+
+    ws = await _get_workspace(ws_id, db)
+    session = await db.get(Session, sid)
+    sched = await db.get(SessionSchedule, sched_id)
+    if ws is None or session is None or session.workspace_id != ws_id or sched is None or sched.session_id != sid:
+        return HTMLResponse("", status_code=404)
+
+    cron_expr = cron_expr.strip()
+    if not cron_expr or not _croniter.is_valid(cron_expr):
+        return HTMLResponse("", status_code=422, headers={"HX-Trigger": "scheduleFormError"})
+
+    sched.cron_schedule = cron_expr
+    sched.cron_next_run = _croniter(cron_expr, datetime.utcnow()).get_next(datetime)
+    sched.label = label.strip()
+    sched.prompt_id = int(prompt_id) if prompt_id.strip().isdigit() else None
+    sched.instruction_prompt = instruction_prompt
+    sched.enabled = (enabled == "on")
+    await db.commit()
+    return HTMLResponse("", headers={"HX-Trigger": "scheduleListChanged"})
+
+
+@router.post(
+    "/workspaces/{ws_id}/sessions/{sid}/schedules/{sched_id}/delete",
+    dependencies=[Depends(require_auth)],
+)
+async def schedule_delete(
+    ws_id: int,
+    sid: int,
+    sched_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    from swarmer.models.session_schedule import SessionSchedule
+
+    ws = await _get_workspace(ws_id, db)
+    session = await db.get(Session, sid)
+    sched = await db.get(SessionSchedule, sched_id)
+    if ws is None or session is None or session.workspace_id != ws_id or sched is None or sched.session_id != sid:
+        return HTMLResponse("", status_code=404)
+
+    await db.delete(sched)
+    await db.commit()
+    return HTMLResponse("", headers={"HX-Trigger": "scheduleListChanged"})
+
+
+@router.post(
+    "/workspaces/{ws_id}/sessions/{sid}/schedules/{sched_id}/toggle",
+    dependencies=[Depends(require_auth)],
+)
+async def schedule_toggle(
+    ws_id: int,
+    sid: int,
+    sched_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    from swarmer.models.session_schedule import SessionSchedule
+
+    ws = await _get_workspace(ws_id, db)
+    session = await db.get(Session, sid)
+    sched = await db.get(SessionSchedule, sched_id)
+    if ws is None or session is None or session.workspace_id != ws_id or sched is None or sched.session_id != sid:
+        return HTMLResponse("", status_code=404)
+
+    sched.enabled = not sched.enabled
+    await db.commit()
+    return HTMLResponse("", headers={"HX-Trigger": "scheduleListChanged"})
 
 
 # ============================================================
