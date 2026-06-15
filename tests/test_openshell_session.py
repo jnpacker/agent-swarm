@@ -617,6 +617,142 @@ class TestDoLaunchOpenshell:
         )
 
     @pytest.mark.asyncio
+    async def test_gh_auth_setup_git_called_when_pat_present(self, client):
+        """gh auth setup-git must run before repo cloning when a PAT is configured.
+
+        This registers gh as git's credential helper so that git clone/push/fetch
+        can authenticate via GH_TOKEN injected by the OpenShell provider.  Without
+        this call, git falls back to an interactive credential prompt that fails
+        because exec_command has no TTY — causing private repo clones to error with
+        'fatal: could not read Username for https://github.com: Permission denied'.
+
+        Calls _setup_openshell_sandbox directly (bypassing the background task path)
+        to inspect exec_command calls — same pattern as the Crush tests.
+        """
+        from swarmer.routers.sessions import _setup_openshell_sandbox
+
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="prompt")
+
+        # _setup_openshell_sandbox checks session.phase == "pending" after creating the
+        # sandbox and returns early if it's not — set it before calling the function.
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET phase='pending' WHERE id=:id"), {"id": s["id"]}
+            )
+            await db.commit()
+
+        exec_calls: list[list[str]] = []
+
+        async def _capture_exec(sandbox_name, cmd, client=None, stdin=None, timeout_seconds=None, env=None):
+            exec_calls.append(list(cmd))
+            return MagicMock(exit_code=0, stdout="", stderr="")
+
+        ref = _fake_sandbox_ref("sandbox-pat-test")
+        with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
+             patch("swarmer.openshell_client.create_sandbox", new=AsyncMock(return_value=ref)), \
+             patch("swarmer.openshell_client.write_agent_config", new=AsyncMock()), \
+             patch("swarmer.openshell_client.write_agents_md", new=AsyncMock()), \
+             patch("swarmer.openshell_client.approve_draft_policy_chunks", new=AsyncMock(return_value=[])), \
+             patch("swarmer.routers.sessions._run_openshell_agent", new=AsyncMock()), \
+             patch("swarmer.openshell_client.exec_command", new=_capture_exec):
+            await _setup_openshell_sandbox(
+                session_id=s["id"],
+                provider_names=[],
+                env_vars={},
+                policy=None,
+                image="quay.io/opencode:latest",
+                tool_name="opencode",
+                model="google-vertex-anthropic/claude-sonnet-4-6@default",
+                model_setup_cmd="",
+                share_cmd="",
+                mcp_patch={},
+                repos_data=[],
+                git_username="octocat",
+                pat_token="ghp_testtoken123",
+                working_branch="",
+                agents_md="",
+                mode="prompt",
+                main_cmd="opencode run",
+                resolved_prompt="",
+            )
+
+        all_cmds = [" ".join(c) for c in exec_calls]
+        setup_git_calls = [c for c in all_cmds if "gh auth setup-git" in c]
+        assert len(setup_git_calls) == 1, (
+            f"Expected exactly 1 'gh auth setup-git' exec_command call when PAT is set, "
+            f"got {len(setup_git_calls)}. All exec calls:\n" + "\n".join(all_cmds)
+        )
+        # setup-git must appear before any git clone calls
+        setup_git_idx = next(i for i, c in enumerate(all_cmds) if "gh auth setup-git" in c)
+        clone_idxs = [i for i, c in enumerate(all_cmds) if "git clone" in c]
+        for ci in clone_idxs:
+            assert setup_git_idx < ci, (
+                "gh auth setup-git must be called before git clone, "
+                f"but setup-git was at index {setup_git_idx} and clone at {ci}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_gh_auth_setup_git_not_called_without_pat(self, client):
+        """gh auth setup-git must NOT run when no PAT is configured.
+
+        Sessions without a PAT cannot have GitHub repos (enforced at launch time),
+        so calling gh auth setup-git would be a no-op at best and an error at worst.
+        """
+        from swarmer.routers.sessions import _setup_openshell_sandbox
+
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="prompt")
+
+        async with _TestSession() as db:
+            await db.execute(
+                text("UPDATE sessions SET phase='pending' WHERE id=:id"), {"id": s["id"]}
+            )
+            await db.commit()
+
+        exec_calls: list[list[str]] = []
+
+        async def _capture_exec(sandbox_name, cmd, client=None, stdin=None, timeout_seconds=None, env=None):
+            exec_calls.append(list(cmd))
+            return MagicMock(exit_code=0, stdout="", stderr="")
+
+        ref = _fake_sandbox_ref("sandbox-nopat-test")
+        with patch("swarmer.database.get_db", new=_make_test_db_provider()), \
+             patch("swarmer.openshell_client.create_sandbox", new=AsyncMock(return_value=ref)), \
+             patch("swarmer.openshell_client.write_agent_config", new=AsyncMock()), \
+             patch("swarmer.openshell_client.write_agents_md", new=AsyncMock()), \
+             patch("swarmer.openshell_client.approve_draft_policy_chunks", new=AsyncMock(return_value=[])), \
+             patch("swarmer.routers.sessions._run_openshell_agent", new=AsyncMock()), \
+             patch("swarmer.openshell_client.exec_command", new=_capture_exec):
+            await _setup_openshell_sandbox(
+                session_id=s["id"],
+                provider_names=[],
+                env_vars={},
+                policy=None,
+                image="quay.io/opencode:latest",
+                tool_name="opencode",
+                model="google-vertex-anthropic/claude-sonnet-4-6@default",
+                model_setup_cmd="",
+                share_cmd="",
+                mcp_patch={},
+                repos_data=[],
+                git_username="",
+                pat_token="",  # no PAT
+                working_branch="",
+                agents_md="",
+                mode="prompt",
+                main_cmd="opencode run",
+                resolved_prompt="",
+            )
+
+        all_cmds = [" ".join(c) for c in exec_calls]
+        setup_git_calls = [c for c in all_cmds if "gh auth setup-git" in c]
+        assert setup_git_calls == [], (
+            f"Expected no 'gh auth setup-git' call when no PAT is set, "
+            f"got {len(setup_git_calls)}. All exec calls:\n" + "\n".join(all_cmds)
+        )
+
+    @pytest.mark.asyncio
     async def test_jira_provider_registered_when_mcp_configured(self, client):
         """When a Jira MCP server is configured and valid, ensure_provider is called with all three credentials."""
         from unittest.mock import patch as _patch, AsyncMock as _AsyncMock
