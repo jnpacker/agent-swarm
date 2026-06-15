@@ -34,6 +34,42 @@ class WorkspaceOut(BaseModel):
 
 
 # ============================================================
+# Session Schedules (defined before SessionOut to avoid forward reference)
+# ============================================================
+
+
+class ScheduleEntryCreate(BaseModel):
+    cron_schedule: str = Field(..., min_length=1, max_length=128)
+    label: str = ""
+    prompt_id: int | None = None
+    instruction_prompt: str = ""
+    enabled: bool = True
+
+
+class ScheduleEntryUpdate(BaseModel):
+    cron_schedule: str | None = Field(None, min_length=1, max_length=128)
+    label: str | None = None
+    prompt_id: int | None = None
+    instruction_prompt: str | None = None
+    enabled: bool | None = None
+
+
+class ScheduleEntryOut(BaseModel):
+    id: int
+    session_id: int
+    cron_schedule: str
+    cron_next_run: datetime | None
+    label: str
+    prompt_id: int | None
+    instruction_prompt: str
+    enabled: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ============================================================
 # Sessions
 # ============================================================
 
@@ -77,6 +113,7 @@ class SessionOut(BaseModel):
     status_detail: str
     sandbox_name: str | None = None
     service_url: str | None = None
+    # Deprecated schedule fields — kept for backward compatibility; no new writes.
     cron_schedule: str
     cron_label: str
     run_started_at: datetime | None
@@ -85,6 +122,7 @@ class SessionOut(BaseModel):
     is_active: bool
     created_at: datetime
     updated_at: datetime
+    schedules: list["ScheduleEntryOut"] = Field(default_factory=list)
 
     model_config = {"from_attributes": True}
 

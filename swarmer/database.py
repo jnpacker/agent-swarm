@@ -99,6 +99,29 @@ async def migrate_db() -> None:
         "ALTER TABLE sessions DROP COLUMN pod_name",
         "ALTER TABLE sessions DROP COLUMN pvc_name",
         "ALTER TABLE sessions DROP COLUMN k8s_secret_names",
+        # ACM-35377: multi-schedule support
+        "ALTER TABLE sessions ADD COLUMN active_schedule_id INTEGER",
+        """CREATE TABLE IF NOT EXISTS session_schedules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            prompt_id INTEGER REFERENCES workspace_prompts(id) ON DELETE SET NULL,
+            cron_schedule VARCHAR(128) NOT NULL,
+            cron_next_run DATETIME,
+            label VARCHAR(128) NOT NULL DEFAULT '',
+            instruction_prompt TEXT NOT NULL DEFAULT '',
+            enabled BOOLEAN NOT NULL DEFAULT 1,
+            created_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+            updated_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+        )""",
+        # Migrate existing per-session schedules into the new table.
+        # Runs on every startup — the INSERT ... WHERE NOT EXISTS makes it idempotent.
+        """INSERT INTO session_schedules (session_id, cron_schedule, cron_next_run, label, enabled)
+           SELECT id, cron_schedule, cron_next_run, '', 1
+           FROM sessions
+           WHERE cron_schedule != ''
+             AND NOT EXISTS (
+               SELECT 1 FROM session_schedules ss WHERE ss.session_id = sessions.id
+             )""",
     ]
     async with _engine.begin() as conn:
         for stmt in migrations:

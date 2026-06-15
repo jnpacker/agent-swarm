@@ -20,6 +20,9 @@ from swarmer.database import get_db
 from swarmer.api.deps import get_current_user, get_workspace_or_404, require_api_auth
 from swarmer.api.schemas import (
     MessageOut,
+    ScheduleEntryCreate,
+    ScheduleEntryOut,
+    ScheduleEntryUpdate,
     ScheduleRequest,
     SessionCreate,
     SessionOut,
@@ -392,14 +395,38 @@ async def schedule_session(
     ws: Workspace = Depends(get_workspace_or_404),
     db: AsyncSession = Depends(get_db),
 ):
+    """Backward-compat: create or replace a single schedule entry on the session."""
     from croniter import croniter
+    from swarmer.models.session_schedule import SessionSchedule
 
     session = await _get_session_or_404(ws_id, sid, db)
     if not croniter.is_valid(body.cron_expr):
         raise HTTPException(status_code=422, detail=f"Invalid cron expression: {body.cron_expr}")
 
+    # Write to the deprecated session fields for backward compat (cron_schedule / cron_next_run).
     session.cron_schedule = body.cron_expr
     session.cron_next_run = croniter(body.cron_expr, datetime.now(timezone.utc)).get_next(datetime)
+
+    # Delegate to the new model: upsert a schedule entry with an empty label.
+    result = await db.execute(
+        select(SessionSchedule)
+        .where(SessionSchedule.session_id == sid, SessionSchedule.label == "")
+        .limit(1)
+    )
+    sched = result.scalars().first()
+    next_run = croniter(body.cron_expr, datetime.now(timezone.utc)).get_next(datetime)
+    if sched is None:
+        sched = SessionSchedule(
+            session_id=sid,
+            cron_schedule=body.cron_expr,
+            cron_next_run=next_run,
+        )
+        db.add(sched)
+    else:
+        sched.cron_schedule = body.cron_expr
+        sched.cron_next_run = next_run
+        sched.enabled = True
+
     await db.commit()
     await db.refresh(session)
     return session
@@ -412,13 +439,122 @@ async def unschedule_session(
     ws: Workspace = Depends(get_workspace_or_404),
     db: AsyncSession = Depends(get_db),
 ):
+    """Backward-compat: disable all schedules on the session and clear deprecated fields."""
+    from swarmer.models.session_schedule import SessionSchedule
+
     session = await _get_session_or_404(ws_id, sid, db)
+
+    # Clear deprecated session-level fields.
     session.cron_schedule = ""
     session.cron_next_run = None
+
+    result = await db.execute(
+        select(SessionSchedule).where(SessionSchedule.session_id == sid)
+    )
+    for sched in result.scalars().all():
+        sched.enabled = False
 
     await db.commit()
     await db.refresh(session)
     return session
+
+
+# ---------- Schedule sub-resource ----------
+
+
+@router.get("/{sid}/schedules", response_model=list[ScheduleEntryOut])
+async def list_schedules(
+    ws_id: int,
+    sid: int,
+    ws: Workspace = Depends(get_workspace_or_404),
+    db: AsyncSession = Depends(get_db),
+):
+    from swarmer.models.session_schedule import SessionSchedule
+    await _get_session_or_404(ws_id, sid, db)
+    result = await db.execute(
+        select(SessionSchedule)
+        .where(SessionSchedule.session_id == sid)
+        .order_by(SessionSchedule.created_at)
+    )
+    return result.scalars().all()
+
+
+@router.post("/{sid}/schedules", response_model=ScheduleEntryOut, status_code=201)
+async def create_schedule(
+    ws_id: int,
+    sid: int,
+    body: ScheduleEntryCreate,
+    ws: Workspace = Depends(get_workspace_or_404),
+    db: AsyncSession = Depends(get_db),
+):
+    from croniter import croniter
+    from swarmer.models.session_schedule import SessionSchedule
+    await _get_session_or_404(ws_id, sid, db)
+    if not croniter.is_valid(body.cron_schedule):
+        raise HTTPException(status_code=422, detail=f"Invalid cron expression: {body.cron_schedule}")
+    sched = SessionSchedule(
+        session_id=sid,
+        cron_schedule=body.cron_schedule,
+        cron_next_run=croniter(body.cron_schedule, datetime.now(timezone.utc)).get_next(datetime),
+        label=body.label,
+        prompt_id=body.prompt_id,
+        instruction_prompt=body.instruction_prompt,
+        enabled=body.enabled,
+    )
+    db.add(sched)
+    await db.commit()
+    await db.refresh(sched)
+    return sched
+
+
+@router.put("/{sid}/schedules/{sched_id}", response_model=ScheduleEntryOut)
+async def update_schedule(
+    ws_id: int,
+    sid: int,
+    sched_id: int,
+    body: ScheduleEntryUpdate,
+    ws: Workspace = Depends(get_workspace_or_404),
+    db: AsyncSession = Depends(get_db),
+):
+    from croniter import croniter
+    from swarmer.models.session_schedule import SessionSchedule
+    await _get_session_or_404(ws_id, sid, db)
+    sched = await db.get(SessionSchedule, sched_id)
+    if sched is None or sched.session_id != sid:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    if body.cron_schedule is not None:
+        if not croniter.is_valid(body.cron_schedule):
+            raise HTTPException(status_code=422, detail=f"Invalid cron expression: {body.cron_schedule}")
+        sched.cron_schedule = body.cron_schedule
+        sched.cron_next_run = croniter(body.cron_schedule, datetime.now(timezone.utc)).get_next(datetime)
+    if body.label is not None:
+        sched.label = body.label
+    if body.prompt_id is not None:
+        sched.prompt_id = body.prompt_id
+    if body.instruction_prompt is not None:
+        sched.instruction_prompt = body.instruction_prompt
+    if body.enabled is not None:
+        sched.enabled = body.enabled
+    await db.commit()
+    await db.refresh(sched)
+    return sched
+
+
+@router.delete("/{sid}/schedules/{sched_id}", status_code=204)
+async def delete_schedule(
+    ws_id: int,
+    sid: int,
+    sched_id: int,
+    ws: Workspace = Depends(get_workspace_or_404),
+    db: AsyncSession = Depends(get_db),
+):
+    from swarmer.models.session_schedule import SessionSchedule
+    await _get_session_or_404(ws_id, sid, db)
+    sched = await db.get(SessionSchedule, sched_id)
+    if sched is None or sched.session_id != sid:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    await db.delete(sched)
+    await db.commit()
 
 
 # ---------- Output & Patches ----------

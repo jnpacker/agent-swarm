@@ -22,7 +22,6 @@
     <tr class="pf-v6-c-table__tr" role="row">
       <th class="pf-v6-c-table__th" role="columnheader">Name</th>
       <th class="pf-v6-c-table__th" role="columnheader">Tool</th>
-      <th class="pf-v6-c-table__th" role="columnheader">Mode</th>
       <th class="pf-v6-c-table__th" role="columnheader">Status</th>
       <th class="pf-v6-c-table__th" role="columnheader">Last Run</th>
       <th class="pf-v6-c-table__th" role="columnheader">GitHub PAT</th>
@@ -41,9 +40,6 @@
       </td>
       <td class="pf-v6-c-table__td" role="cell" data-label="Tool">
         <span class="pf-v6-c-label pf-m-outline"><span class="pf-v6-c-label__content">{{ s.agent_tool | capitalize }}</span></span>
-      </td>
-      <td class="pf-v6-c-table__td" role="cell" data-label="Mode">
-        <span class="pf-v6-c-label pf-m-{{ mode_badge(s) }}"><span class="pf-v6-c-label__content">{{ mode_label(s) }}</span></span>
       </td>
       <td class="pf-v6-c-table__td" role="cell" data-label="Status">
         {% if s.phase == 'queued' %}
@@ -88,21 +84,26 @@
         {{ s.repos | length }}
       </td>
       <td class="pf-v6-c-table__td" role="cell" data-label="Schedule" style="font-size:var(--pf-t--global--font--size--sm);">
-        {% if s.cron_schedule %}
-          <a href="/workspaces/{{ ws.id }}/sessions/{{ s.id }}#schedule"
-             style="text-decoration:none;">
-            <span class="pf-v6-c-label pf-m-purple"><span class="pf-v6-c-label__content">{{ s.cron_label }}</span></span>
+        {% set _enabled_scheds = s.schedules | selectattr('enabled') | list %}
+        {% if _enabled_scheds | length == 0 %}
+          <span style="color:var(--pf-t--global--text--color--subtle);">—</span>
+        {% elif _enabled_scheds | length == 1 %}
+          <a href="/workspaces/{{ ws.id }}/sessions/{{ s.id }}#schedule" style="text-decoration:none;">
+            <span class="pf-v6-c-label pf-m-purple"><span class="pf-v6-c-label__content">{{ _enabled_scheds[0].label or _enabled_scheds[0].cron_schedule }}</span></span>
           </a>
         {% else %}
-          <span style="color:var(--pf-t--global--text--color--subtle);">—</span>
+          <a href="/workspaces/{{ ws.id }}/sessions/{{ s.id }}#schedule" style="text-decoration:none;">
+            <span class="pf-v6-c-label pf-m-purple"><span class="pf-v6-c-label__content">{{ _enabled_scheds | length }} schedules</span></span>
+          </a>
         {% endif %}
       </td>
       <td class="pf-v6-c-table__td" role="cell" data-label="Next Run" style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm); white-space:nowrap;">
-        {% if s.cron_schedule %}
+        {% set _earliest = s.earliest_next_run %}
+        {% if _enabled_scheds %}
           {% if s.is_active %}
             <span class="pf-v6-c-label pf-m-green"><span class="pf-v6-c-label__content">Running...</span></span>
-          {% elif s.cron_next_run %}
-            {{ s.cron_next_run.strftime('%b %d %H:%M') }} UTC
+          {% elif _earliest %}
+            {{ _earliest.strftime('%b %d %H:%M') }} UTC
           {% else %}
             —
           {% endif %}

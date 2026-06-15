@@ -62,6 +62,8 @@ class Session(Base):
     patch_base_ref: Mapped[str] = mapped_column(String(255), nullable=False, default="", server_default="")
     cron_schedule: Mapped[str] = mapped_column(String(128), nullable=False, default="", server_default="")
     cron_next_run: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Which SessionSchedule triggered the current run; cleared on stop/completion.
+    active_schedule_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     mcp_server_ids: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     # Runtime state — managed by dashboard
     sandbox_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -93,6 +95,9 @@ class Session(Base):
     )
     prompt: Mapped["WorkspacePrompt | None"] = relationship(  # noqa: F821
         back_populates="sessions"
+    )
+    schedules: Mapped[list["SessionSchedule"]] = relationship(  # noqa: F821
+        back_populates="session", cascade="all, delete-orphan", lazy="selectin"
     )
 
     @property
@@ -127,6 +132,14 @@ class Session(Base):
     def cron_label(self) -> str:
         """Human-readable label for common cron expressions."""
         return CRON_PRESETS.get(self.cron_schedule, self.cron_schedule) if self.cron_schedule else ""
+
+    @property
+    def earliest_next_run(self) -> "datetime | None":
+        """Earliest cron_next_run across all enabled schedules, or None."""
+        enabled = [s for s in (self.schedules or []) if s.enabled and s.cron_next_run is not None]
+        if not enabled:
+            return None
+        return min(s.cron_next_run for s in enabled)
 
     @property
     def phase_badge_class(self) -> str:
