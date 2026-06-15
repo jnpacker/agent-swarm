@@ -1115,19 +1115,27 @@ async def _setup_openshell_sandbox(
 
         await _update_db(status_detail="")
 
+        # Register gh as the git credential helper so that git clone/push/fetch
+        # can authenticate via GH_TOKEN injected by the OpenShell provider.
+        # Must run before any git clone calls.  Guarded by pat_token: sessions
+        # without a PAT cannot have GitHub repos (enforced at launch time).
+        if pat_token:
+            await openshell_client.exec_command(
+                ref.name,
+                ["sh", "-c", "export HOME=/sandbox; gh auth setup-git"],
+                client=None,
+            )
+
         # Clone repos — network policies are pre-applied via SandboxSpec.policy so the
         # git binary has Landlock network access to github.com immediately at sandbox
         # creation time.  No probe-deny-approve cycle needed (ACM-34909).
-        # PAT embedded as x-access-token — works for all GitHub PAT types, avoids username-mismatch 403s.
         if repos_data:
             for rd in repos_data:
                 local_path = rd["local_path"]
                 repo_url = rd["url"]
-                # The OpenShell gateway injects GITHUB_TOKEN and GH_TOKEN via the
-                # registered github provider. The gh credential helper in the container
-                # reads these and supplies them to git automatically. No URL embedding
-                # needed — just clone the plain URL and let the helper do its job.
-                clone_cmd = f"cd /sandbox && git clone {shlex.quote(repo_url)} {shlex.quote(local_path)}"
+                # HOME=/sandbox must match the gh auth setup-git call above so git
+                # reads /sandbox/.gitconfig where the credential helper was registered.
+                clone_cmd = f"cd /sandbox && HOME=/sandbox git clone {shlex.quote(repo_url)} {shlex.quote(local_path)}"
                 result = await openshell_client.exec_command(
                     ref.name, ["sh", "-c", clone_cmd], client=None
                 )
