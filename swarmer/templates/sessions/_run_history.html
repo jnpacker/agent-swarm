@@ -74,25 +74,30 @@
     <td class="pf-v6-c-table__td pf-v6-c-table__toggle" style="padding:0; border-bottom:none;"></td>
     <td class="pf-v6-c-table__td" colspan="4" style="padding:0;">
       {# Header bar: completed timestamp left, log-pills right #}
-      <div style="display:flex; justify-content:space-between; align-items:center;
+      <div style="display:flex; align-items:center; gap:var(--pf-t--global--spacer--sm);
                   width:100%; box-sizing:border-box;
                   padding:var(--pf-t--global--spacer--sm) var(--pf-t--global--spacer--md);
                   border-bottom:1px solid var(--pf-t--global--border--color--default);
                   background:var(--pf-t--global--background--color--secondary--default);">
-        <span style="font-size:var(--pf-t--global--font--size--xs);
-                     color:var(--pf-t--global--text--color--subtle);
-                     font-family:monospace;">
-          Completed: {{ run.completed_at.strftime('%b %d %Y %H:%M') }} UTC
-        </span>
         {% if _has_raw %}
-        <div style="display:flex; gap:var(--pf-t--global--spacer--sm);">
           <button id="hist-btn-processed-{{ run.id }}"
                   class="log-pill selected"
                   onclick="switchHistoryOutput({{ run.id }}, 'processed')">Output</button>
           <button id="hist-btn-raw-{{ run.id }}"
                   class="log-pill"
                   onclick="switchHistoryOutput({{ run.id }}, 'raw')">Raw Log</button>
-        </div>
+          <span style="margin-left:var(--pf-t--global--spacer--sm);
+                       font-size:var(--pf-t--global--font--size--xs);
+                       color:var(--pf-t--global--text--color--subtle);
+                       font-family:monospace;">
+            Completed: {{ run.completed_at.strftime('%b %d %Y %H:%M') }} UTC
+          </span>
+        {% else %}
+          <span style="font-size:var(--pf-t--global--font--size--xs);
+                       color:var(--pf-t--global--text--color--subtle);
+                       font-family:monospace;">
+            Completed: {{ run.completed_at.strftime('%b %d %Y %H:%M') }} UTC
+          </span>
         {% endif %}
       </div>
       {# Output content #}
