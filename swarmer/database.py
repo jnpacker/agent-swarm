@@ -122,6 +122,17 @@ async def migrate_db() -> None:
              AND NOT EXISTS (
                SELECT 1 FROM session_schedules ss WHERE ss.session_id = sessions.id
              )""",
+        # ACM-35068: session run history table (prompt-mode execution records)
+        """CREATE TABLE IF NOT EXISTS session_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            phase VARCHAR(32) NOT NULL,
+            status_detail VARCHAR(255) NOT NULL DEFAULT '',
+            started_at DATETIME NOT NULL,
+            completed_at DATETIME NOT NULL,
+            last_output TEXT NOT NULL DEFAULT '',
+            created_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+        )""",
     ]
     async with _engine.begin() as conn:
         for stmt in migrations:

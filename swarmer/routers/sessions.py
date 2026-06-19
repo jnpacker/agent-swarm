@@ -4,7 +4,7 @@ import logging
 import re
 import shlex
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 
@@ -470,6 +470,18 @@ async def session_detail(
     if session.phase == "queued":
         queue_position = await _get_queue_position(session.id, db)
     capacity = await _get_capacity_summary(ws_id, db)
+    session_runs: list = []
+    if session.mode == "prompt":
+        from swarmer.models.session_run import SessionRun
+        from sqlalchemy import desc
+
+        runs_result = await db.execute(
+            select(SessionRun)
+            .where(SessionRun.session_id == sid)
+            .order_by(desc(SessionRun.completed_at))
+            .limit(100)
+        )
+        session_runs = list(runs_result.scalars().all())
     return templates.TemplateResponse(
         request,
         "sessions/detail.html",
@@ -477,6 +489,7 @@ async def session_detail(
             "ws": ws,
             "ws_id": ws_id,
             "session": session,
+            "session_runs": session_runs,
             "canonical_agent_tool": canonical_agent_tool,
             "pats": pats,
             "tui_token": tui_token,
@@ -1257,7 +1270,11 @@ async def _run_openshell_agent(
     from swarmer.database import get_db as _get_db
     from swarmer.models.session import Session as _Session
 
+    _TERMINAL_PHASES = frozenset(("succeeded", "failed", "stopped"))
+
     async def _update_db(**fields) -> None:
+        from swarmer.session_runs import record_session_run as _record_run
+
         async for _db in _get_db():
             _s = await _db.get(_Session, session_id)
             if _s:
@@ -1270,6 +1287,17 @@ async def _run_openshell_agent(
                         session_id, fields["phase"],
                     )
                     break
+                new_phase = fields.get("phase")
+                if new_phase in _TERMINAL_PHASES and _s.phase not in _TERMINAL_PHASES:
+                    completed_at = fields.get("run_completed_at") or datetime.now(timezone.utc)
+                    await _record_run(
+                        _db,
+                        _s,
+                        phase=new_phase,
+                        status_detail=fields.get("status_detail", ""),
+                        last_output=fields.get("last_output", _s.last_output or ""),
+                        completed_at=completed_at,
+                    )
                 for k, v in fields.items():
                     setattr(_s, k, v)
                 await _db.commit()
@@ -1537,8 +1565,21 @@ async def session_stop(
         session.sandbox_name = None
         session.service_url = None
 
-    session.run_completed_at = datetime.utcnow()
+    from swarmer.session_runs import STOPPED_BY_USER_DETAIL, record_session_run
+
+    completed_at = datetime.now(timezone.utc)
+    if session.run_started_at and session.phase in ("pending", "running"):
+        await record_session_run(
+            db,
+            session,
+            phase="stopped",
+            status_detail=STOPPED_BY_USER_DETAIL,
+            last_output=session.last_output,
+            completed_at=completed_at,
+        )
+    session.run_completed_at = completed_at
     session.phase = "stopped"
+    session.status_detail = STOPPED_BY_USER_DETAIL
     session.active_schedule_id = None
 
     # Advance cron_next_run so the scheduler doesn't immediately re-launch a
@@ -1548,7 +1589,7 @@ async def session_stop(
         try:
             from croniter import croniter as _croniter
             session.cron_next_run = _croniter(
-                session.cron_schedule, datetime.utcnow()
+                session.cron_schedule, datetime.now(timezone.utc)
             ).get_next(datetime)
             log.info(
                 "session_stop: advanced cron_next_run for session %d to %s",

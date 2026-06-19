@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
@@ -105,8 +107,16 @@ async def save_credentials(
         secret.anthropic_api_key = body.anthropic_api_key.strip()
     if body.openai_api_key.strip():
         secret.openai_api_key = body.openai_api_key.strip()
-    if body.application_default_credentials.strip():
-        secret.application_default_credentials = body.application_default_credentials.strip()
+    adc = body.application_default_credentials.strip()
+    if adc:
+        try:
+            json.loads(adc)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="application_default_credentials must be valid JSON",
+            ) from exc
+        secret.application_default_credentials = adc
 
     await db.commit()
     await db.refresh(secret)

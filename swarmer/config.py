@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     crush_server_port: int = 4096
     k8s_namespace: str = ""
     max_concurrent_agents: int = 5
+    # Completed prompt-mode runs kept per session (includes logs). 0 = unlimited.
+    session_run_history_limit: int = 20
 
     # OpenShell integration — replaces K8s pod/Secret management (ACM-34850)
     openshell_gateway_url: str = ""
