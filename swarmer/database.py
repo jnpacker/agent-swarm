@@ -133,6 +133,9 @@ async def migrate_db() -> None:
             last_output TEXT NOT NULL DEFAULT '',
             created_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
         )""",
+        # ACM-35750: raw streaming console output preserved alongside processed last_output
+        "ALTER TABLE sessions ADD COLUMN raw_output TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE session_runs ADD COLUMN raw_output TEXT NOT NULL DEFAULT ''",
     ]
     async with _engine.begin() as conn:
         for stmt in migrations:

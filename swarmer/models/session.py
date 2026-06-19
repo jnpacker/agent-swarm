@@ -69,6 +69,7 @@ class Session(Base):
     sandbox_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     service_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     last_output: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    raw_output: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     status_detail: Mapped[str] = mapped_column(String(255), nullable=False, default="", server_default="")
     # OpenShell draft policy chunks — JSON snapshot from last run (cleared on next launch)
     policy_chunks: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")

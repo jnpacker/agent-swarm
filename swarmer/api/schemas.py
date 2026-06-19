@@ -129,6 +129,7 @@ class SessionOut(BaseModel):
 
 class SessionOutput(BaseModel):
     output: str
+    raw_output: str = ""
 
 
 class SessionRunOut(BaseModel):
@@ -140,6 +141,7 @@ class SessionRunOut(BaseModel):
     completed_at: datetime
     run_duration: str
     last_output: str
+    raw_output: str = ""
 
     model_config = {"from_attributes": True}
 

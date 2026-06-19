@@ -250,9 +250,16 @@ The sessions list shows a workspace-scoped capacity summary ("N active | N slots
 
 ### Session Run History
 
-Prompt-mode sessions record each completed execution (phase, timing, status detail, and pod logs) in the `session_runs` table. The History tab on the session detail page and `GET /api/v1/workspaces/{ws_id}/sessions/{sid}/runs` expose this data.
+Prompt-mode sessions record each completed execution (phase, timing, status detail, and output) in the `session_runs` table. The History tab on the session detail page and `GET /api/v1/workspaces/{ws_id}/sessions/{sid}/runs` expose this data.
 
 `SESSION_RUN_HISTORY_LIMIT` (default 20) caps how many completed runs are retained per session. When a new run is recorded, the oldest entries beyond the limit are deleted. Set to `0` to disable pruning (unlimited history; may grow SQLite storage quickly on scheduled sessions).
+
+**Dual output fields** — each run record stores two output fields:
+
+- `last_output` — the processed agent response. For OpenCode: the clean assistant conversation extracted from OpenCode's SQLite DB (`/sandbox/.opencode/opencode.db`) via `read_opencode_response()`. For Crush: same as `raw_output`.
+- `raw_output` — the raw stdout+stderr streamed from the sandbox process (ANSI escape codes, tool call traces, progress output). Always preserved regardless of agent tool.
+
+The live Output tab in the session detail page shows both via a toggle (Output / Raw Log) when the fields differ. The History tab shows a second "View raw log" `<details>` expandable alongside "View output" when they differ. For Crush sessions the fields are identical and no toggle appears.
 
 ## Chat Proxy
 
