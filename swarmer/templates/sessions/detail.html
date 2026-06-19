@@ -286,7 +286,7 @@
     {% if session.repos %}
     <li class="pf-v6-c-tabs__item" id="tab-patch">
       <button class="pf-v6-c-tabs__link" role="tab" aria-selected="false" aria-controls="panel-patch" tabindex="-1" onclick="switchTab('patch')">
-        <span class="pf-v6-c-tabs__item-text" id="patch-tab-text"><span id="patch-tab-dot" style="display:none;">● </span>Patch</span>
+        <span class="pf-v6-c-tabs__item-text" id="patch-tab-text">Patch</span>
       </button>
     </li>
     {% endif %}
@@ -501,7 +501,7 @@
 <div id="panel-output" class="pf-v6-c-tab-content" role="tabpanel" aria-labelledby="tab-output" hidden style="margin-top:var(--pf-t--global--spacer--lg);">
   <div class="pf-v6-c-card">
     <div class="pf-v6-c-card__header" style="display:flex; justify-content:space-between; align-items:center;">
-      <h3 class="pf-v6-c-card__header-main" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">Last Output</h3>
+      <h3 class="pf-v6-c-card__header-main" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">Last Session</h3>
     </div>
     <div class="pf-v6-c-card__body" style="padding:0;">
       {% include "sessions/_last_output.html" with context %}
@@ -743,10 +743,6 @@ function switchTab(name) {
     const dot = document.getElementById('history-tab-dot');
     if (dot) dot.style.display = 'none';
   }
-  if (name === 'patch') {
-    const dot = document.getElementById('patch-tab-dot');
-    if (dot) dot.style.display = 'none';
-  }
   if (name === 'policy') {
     const textEl = document.getElementById('policy-tab-text');
     if (textEl) textEl.textContent = 'Net Rules';
@@ -773,12 +769,6 @@ function switchTab(name) {
     const histTab = document.getElementById('tab-history');
     if (histTab && !histTab.classList.contains('pf-m-current')) {
       const dot = document.getElementById('history-tab-dot');
-      if (dot) dot.style.display = '';
-    }
-    // Patch dot — completed run may have changed the diff
-    const patchTab = document.getElementById('tab-patch');
-    if (patchTab && !patchTab.classList.contains('pf-m-current')) {
-      const dot = document.getElementById('patch-tab-dot');
       if (dot) dot.style.display = '';
     }
   });
@@ -969,13 +959,13 @@ function switchHistoryOutput(runId, type) {
   if (type === 'processed') {
     processed.style.display = 'block';
     raw.style.display = 'none';
-    if (btnP) { btnP.classList.add('selected'); }
-    if (btnR) { btnR.classList.remove('selected'); }
+    if (btnP) btnP.className = 'pf-v6-c-button pf-m-small pf-m-primary';
+    if (btnR) btnR.className = 'pf-v6-c-button pf-m-small pf-m-secondary';
   } else {
     raw.style.display = 'block';
     processed.style.display = 'none';
-    if (btnR) { btnR.classList.add('selected'); }
-    if (btnP) { btnP.classList.remove('selected'); }
+    if (btnR) btnR.className = 'pf-v6-c-button pf-m-small pf-m-primary';
+    if (btnP) btnP.className = 'pf-v6-c-button pf-m-small pf-m-secondary';
   }
 }
 
