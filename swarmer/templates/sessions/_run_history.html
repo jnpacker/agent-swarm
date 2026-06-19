@@ -1,8 +1,15 @@
 {# PF6 expandable data table — each row expands to show run output #}
-<table class="pf-v6-c-table pf-m-grid-md" role="grid">
+<table class="pf-v6-c-table pf-m-grid-md" role="grid" style="table-layout:fixed; width:100%;">
+  <colgroup>
+    <col style="width:2.5rem;">
+    <col>
+    <col style="width:7rem;">
+    <col style="width:9rem;">
+    <col>
+  </colgroup>
   <thead class="pf-v6-c-table__thead">
     <tr class="pf-v6-c-table__tr" role="row">
-      <td class="pf-v6-c-table__td pf-v6-c-table__toggle" style="width:2rem;"></td>
+      <td class="pf-v6-c-table__td pf-v6-c-table__toggle"></td>
       <th class="pf-v6-c-table__th" role="columnheader">Started</th>
       <th class="pf-v6-c-table__th" role="columnheader">Duration</th>
       <th class="pf-v6-c-table__th" role="columnheader">Status</th>
@@ -15,7 +22,7 @@
   {# ── Main data row ── #}
   <tr class="pf-v6-c-table__tr" role="row">
     <td class="pf-v6-c-table__td pf-v6-c-table__toggle" id="hist-toggle-{{ run.id }}"
-        role="cell" {% if not run.last_output %}style="visibility:hidden;"{% endif %}>
+        role="cell" style="{% if not run.last_output %}visibility:hidden;{% endif %}">
       {% if run.last_output %}
       <button type="button"
               aria-expanded="false"
@@ -64,7 +71,7 @@
   {% if run.last_output %}
   <tr class="pf-v6-c-table__tr" id="hist-expand-{{ run.id }}"
       role="row" style="display:none;">
-    <td class="pf-v6-c-table__td" style="padding:0; border:none;"></td>
+    <td class="pf-v6-c-table__td pf-v6-c-table__toggle" style="padding:0; border-bottom:none;"></td>
     <td class="pf-v6-c-table__td" colspan="4" style="padding:0;">
       {# Header bar: completed timestamp left, log-pills right #}
       <div style="display:flex; justify-content:space-between; align-items:center;
