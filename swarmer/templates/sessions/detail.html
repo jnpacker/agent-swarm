@@ -750,9 +750,11 @@ function switchTab(name) {
   }
 }
 
-// Show ● on Output / History / Patch tabs when new output arrives while not viewing them
+// Show ● on Output / History tabs when new output arrives while not viewing them
+// Seed from current DOM so a page load/refresh never fires spurious dots.
 (function() {
-  let lastOutputText = '';
+  const _initEl = document.getElementById('last-output-pre');
+  let lastOutputText = _initEl ? _initEl.textContent : '';
   document.addEventListener('htmx:afterSwap', function() {
     const newEl = document.getElementById('last-output-pre');
     if (!newEl) return;
