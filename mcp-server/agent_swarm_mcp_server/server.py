@@ -275,9 +275,14 @@ class AgentSwarmMCPServer:
             "run_completed_at": s.get("run_completed_at"),
         }
 
-    async def _get_session_output(self, workspace_id: int, session_id: int) -> str:
+    async def _get_session_output(self, workspace_id: int, session_id: int) -> dict:
         result = await self.client.get_session_output(workspace_id, session_id)
-        return result.get("output", "") if result else ""
+        if not result:
+            return {"output": "", "raw_output": ""}
+        return {
+            "output": result.get("output", ""),
+            "raw_output": result.get("raw_output", ""),
+        }
 
     async def _wait_for_session(
         self,
@@ -303,11 +308,13 @@ class AgentSwarmMCPServer:
             if phase in _TERMINAL_PHASES:
                 output_result = await self.client.get_session_output(workspace_id, session_id)
                 output = output_result.get("output", "") if output_result else ""
+                raw_output = output_result.get("raw_output", "") if output_result else ""
                 return {
                     "phase": phase,
                     "status_detail": s.get("status_detail"),
                     "run_duration": s.get("run_duration"),
                     "output": output,
+                    "raw_output": raw_output,
                 }
 
             await asyncio.sleep(poll)
@@ -318,6 +325,7 @@ class AgentSwarmMCPServer:
             "status_detail": f"Timed out after {timeout}s",
             "run_duration": f"{timeout}s",
             "output": "",
+            "raw_output": "",
         }
 
     async def _list_github_pats(self, workspace_id: int) -> list[dict]:
@@ -611,11 +619,14 @@ class AgentSwarmMCPServer:
             return await self._get_session_status(workspace_id, session_id)
 
         @mcp.tool()
-        async def get_session_output(workspace_id: int, session_id: int) -> str:
+        async def get_session_output(workspace_id: int, session_id: int) -> dict:
             """Retrieve the captured output from the last session run.
 
-            For prompt-mode sessions this is the full agent output.
-            For TUI/server-mode sessions this is recent pod logs.
+            For prompt-mode sessions returns both the processed agent output
+            (output) and the raw console log (raw_output). For OpenCode sessions
+            these differ: output contains the clean assistant conversation from
+            OpenCode's SQLite DB; raw_output contains the raw stdout/stderr stream.
+            For Crush sessions and TUI/server-mode sessions they are identical.
 
             Args:
                 workspace_id: The workspace id.

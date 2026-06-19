@@ -42,9 +42,15 @@
       <td class="pf-v6-c-table__td" role="cell" data-label="Output">
         {% if run.last_output %}
         <details>
-          <summary style="cursor:pointer; font-size:var(--pf-t--global--font--size--sm);">View logs</summary>
+          <summary style="cursor:pointer; font-size:var(--pf-t--global--font--size--sm);">View output</summary>
           <pre class="last-output" style="margin-top:var(--pf-t--global--spacer--sm); padding:var(--pf-t--global--spacer--sm); max-height:300px; overflow:auto;">{{ run.last_output | ansi_to_html }}</pre>
         </details>
+        {% if run.raw_output and run.raw_output != run.last_output %}
+        <details style="margin-top:var(--pf-t--global--spacer--xs);">
+          <summary style="cursor:pointer; font-size:var(--pf-t--global--font--size--sm); color:var(--pf-t--global--text--color--subtle);">View raw log</summary>
+          <pre class="last-output" style="margin-top:var(--pf-t--global--spacer--sm); padding:var(--pf-t--global--spacer--sm); max-height:300px; overflow:auto;">{{ run.raw_output | ansi_to_html }}</pre>
+        </details>
+        {% endif %}
         {% else %}
           <span style="color:var(--pf-t--global--text--color--subtle);">—</span>
         {% endif %}

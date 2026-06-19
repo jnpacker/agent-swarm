@@ -1006,6 +1006,7 @@ async def _do_launch_openshell(
     # Mark pending and commit — HTTP handler returns immediately; browser unblocks.
     session.phase = "pending"
     session.last_output = ""
+    session.raw_output = ""
     session.status_detail = ""   # clear stale status from any previous run
     session.policy_chunks = ""   # clear stale chunks; fresh snapshot at completion
     session.run_started_at = datetime.utcnow()
@@ -1296,6 +1297,7 @@ async def _run_openshell_agent(
                         phase=new_phase,
                         status_detail=fields.get("status_detail", ""),
                         last_output=fields.get("last_output", _s.last_output or ""),
+                        raw_output=fields.get("raw_output", _s.raw_output or ""),
                         completed_at=completed_at,
                     )
                 for k, v in fields.items():
@@ -1320,7 +1322,7 @@ async def _run_openshell_agent(
 
             async def _on_output(text: str) -> None:
                 _streamed[:] = [text]
-                await _update_db(last_output=text)
+                await _update_db(last_output=text, raw_output=text)
 
             result = await openshell_client.exec_command_streaming(
                 sandbox_name, cmd,
@@ -1370,6 +1372,7 @@ async def _run_openshell_agent(
             await _update_db(
                 phase=phase,
                 last_output=output,
+                raw_output=_streamed_text,  # preserve raw console log regardless of agent tool
                 status_detail="",  # clear any stale status from previous runs
                 policy_chunks=chunks_json,
                 run_completed_at=datetime.utcnow(),
@@ -1575,6 +1578,7 @@ async def session_stop(
             phase="stopped",
             status_detail=STOPPED_BY_USER_DETAIL,
             last_output=session.last_output,
+            raw_output=session.raw_output,
             completed_at=completed_at,
         )
     session.run_completed_at = completed_at
@@ -2220,6 +2224,7 @@ async def session_clear_output(
         return RedirectResponse(url=f"/workspaces/{ws_id}/sessions", status_code=302)
 
     session.last_output = ""
+    session.raw_output = ""
     await db.commit()
     return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}", status_code=302)
 

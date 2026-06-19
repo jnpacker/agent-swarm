@@ -7,14 +7,15 @@ A FastAPI + HTMX dashboard for managing AI coding agent workloads on Kubernetes.
 ## Capabilities
 
 - **Workspaces** — each workspace maps 1:1 to a Kubernetes namespace; create, rename, and delete workspaces from the UI
-- **Secrets** — Fernet-encrypted storage for provider credentials (GCP/Vertex AI, Gemini, Anthropic, OpenAI), GitHub PATs for HTTPS git auth, and OCI registry pull secrets; all auto-synced to Kubernetes Secrets
-- **Session lifecycle** — create → launch → monitor → stop → delete sessions backed by Kubernetes Pods and PVCs
+- **Secrets** — Fernet-encrypted storage for provider credentials (GCP/Vertex AI, Gemini, Anthropic, OpenAI), GitHub PATs for HTTPS git auth, and OCI registry pull secrets
+- **Session lifecycle** — create → launch → monitor → stop → delete sessions backed by OpenShell sandboxes
 - **Three session modes:**
-  - **Prompt** — one-shot: run a prompt, stream output, pod exits when done
+  - **Prompt** — one-shot: run a prompt, stream output, sandbox exits when done
   - **Server** — persistent agent web API with in-dashboard chat link
-  - **TUI** — full xterm.js browser terminal connected via WebSocket + `kubectl exec` PTY
-- **Git cloning** — init containers clone configured repos into the PVC-backed workspace before the agent starts
+  - **TUI** — full xterm.js browser terminal connected via WebSocket + OpenShell PTY
+- **Git cloning** — repos cloned into the sandbox via OpenShell API at session launch
 - **Live UI** — HTMX polling for session status and output; no page reloads needed
+- **Dual output capture** — prompt-mode sessions preserve both the processed agent response (`last_output`) and the raw console log (`raw_output`); an Output / Raw Log toggle appears in the UI when they differ
 - **Multi-agent support** — OpenCode (Go) and Crush (Rust) coding agents
 - **MCP server integration** — Model Context Protocol servers per workspace (e.g., Atlassian Jira)
 - **Prompt library** — workspace-level prompt library with git-backed folders and per-session picker

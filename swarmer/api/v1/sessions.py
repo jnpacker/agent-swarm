@@ -316,6 +316,7 @@ async def stop_session(
             phase="stopped",
             status_detail=STOPPED_BY_USER_DETAIL,
             last_output=session.last_output,
+            raw_output=session.raw_output,
             completed_at=completed_at,
         )
     session.run_completed_at = completed_at
@@ -603,7 +604,7 @@ async def get_output(
     db: AsyncSession = Depends(get_db),
 ):
     session = await _get_session_or_404(ws_id, sid, db)
-    return SessionOutput(output=session.last_output)
+    return SessionOutput(output=session.last_output, raw_output=session.raw_output)
 
 
 @router.post("/{sid}/clear-output", response_model=SessionOut)
@@ -615,6 +616,7 @@ async def clear_output(
 ):
     session = await _get_session_or_404(ws_id, sid, db)
     session.last_output = ""
+    session.raw_output = ""
     await db.commit()
     await db.refresh(session)
     return session
