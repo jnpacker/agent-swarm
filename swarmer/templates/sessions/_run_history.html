@@ -63,7 +63,7 @@
   {# ── Expandable detail row ── #}
   {% if run.last_output %}
   <tr class="pf-v6-c-table__tr pf-v6-c-table__expandable-row" id="hist-expand-{{ run.id }}"
-      role="row" hidden>
+      role="row" style="display:none;">
     <td class="pf-v6-c-table__td" colspan="5" style="padding:0;">
       {# Header bar: completed timestamp left, log-pills right #}
       <div style="display:flex; justify-content:space-between; align-items:center;
