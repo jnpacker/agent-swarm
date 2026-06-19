@@ -272,7 +272,7 @@
     {% if session.mode in ('prompt', 'server') %}
     <li class="pf-v6-c-tabs__item" id="tab-output">
       <button class="pf-v6-c-tabs__link" role="tab" aria-selected="false" aria-controls="panel-output" tabindex="-1" onclick="switchTab('output')">
-        <span class="pf-v6-c-tabs__item-text" id="output-tab-text">Output</span>
+        <span class="pf-v6-c-tabs__item-text" id="output-tab-text">Logs</span>
       </button>
     </li>
     {% endif %}
@@ -737,7 +737,7 @@ function switchTab(name) {
   // Clear tab new-content markers when visiting the tab
   if (name === 'output') {
     const textEl = document.getElementById('output-tab-text');
-    if (textEl) textEl.textContent = 'Output';
+    if (textEl) textEl.textContent = 'Logs';
   }
   if (name === 'history') {
     const dot = document.getElementById('history-tab-dot');
@@ -763,7 +763,7 @@ function switchTab(name) {
     const outputTab = document.getElementById('tab-output');
     if (outputTab && !outputTab.classList.contains('pf-m-current')) {
       const textEl = document.getElementById('output-tab-text');
-      if (textEl) textEl.textContent = '● Output';
+      if (textEl) textEl.textContent = '● Logs';
     }
     // History dot — new output means a run just completed
     const histTab = document.getElementById('tab-history');
@@ -959,13 +959,13 @@ function switchHistoryOutput(runId, type) {
   if (type === 'processed') {
     processed.style.display = 'block';
     raw.style.display = 'none';
-    if (btnP) btnP.className = 'pf-v6-c-button pf-m-small pf-m-primary';
-    if (btnR) btnR.className = 'pf-v6-c-button pf-m-small pf-m-secondary';
+    if (btnP) { btnP.classList.add('selected'); }
+    if (btnR) { btnR.classList.remove('selected'); }
   } else {
     raw.style.display = 'block';
     processed.style.display = 'none';
-    if (btnR) btnR.className = 'pf-v6-c-button pf-m-small pf-m-primary';
-    if (btnP) btnP.className = 'pf-v6-c-button pf-m-small pf-m-secondary';
+    if (btnR) { btnR.classList.add('selected'); }
+    if (btnP) { btnP.classList.remove('selected'); }
   }
 }
 
