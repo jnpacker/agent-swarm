@@ -77,6 +77,8 @@ For system architecture, data flows, module layout, and guidance on adding new f
 
 Use placeholder patterns instead: `<YOUR_PROJECT>`, `example.com`, `your-registry.example.com`, generic variable references (`settings.foo`), or environment variable lookups. Encrypted values must always go through the `crypto.encrypt()`/`crypto.decrypt()` pattern — never store or log plaintext secrets.
 
+**GitHub App private keys** (RSA PEM) are stored encrypted via `GitHubApp.private_key_enc` and accessed only through the `private_key` property. The raw PEM is never logged, never included in API responses (`has_private_key: bool` is returned instead), and never passed to the OpenShell sandbox — only short-lived Installation Access Tokens (IATs) minted by `github_auth.mint_installation_token()` are injected.
+
 ## Code Conventions
 
 ### Python Style
@@ -167,6 +169,8 @@ Use placeholder patterns instead: `<YOUR_PROJECT>`, `example.com`, `your-registr
 16. **Container image runs as non-root**: The Containerfile uses UBI10 `python-312-minimal` with UID 1001. Directories `/data` and `/auth` are created as root then ownership dropped. PVCs must be group-0 writable for the non-root user.
 
 17. **Concurrency limit queues, not rejects**: When `MAX_CONCURRENT_AGENTS` is reached, `_do_launch()` sets `phase="queued"` and returns without creating a sandbox — it does NOT raise an exception. The queue processor in `scheduler.py` re-evaluates every 2 minutes (with a 2-minute in-memory cooldown). Stopping a queued session (no sandbox exists) returns it to `"idle"` not `"stopped"`, and skips all sandbox cleanup. The `"queued"` phase is included in `is_active`, so the session is protected from re-launch and editing while waiting.
+
+18. **GitHub App IAT refresh loop**: For TUI and server-mode sessions using a GitHub App, `_setup_openshell_sandbox` starts a background `asyncio.create_task` called `iat-refresh-{session_id}`. This task calls `github_auth.start_token_refresh_loop()`, which sleeps `IAT_REFRESH_INTERVAL` (3000 s) then re-mints an IAT and calls `openshell_client.ensure_provider()` to update the Gateway. The task is cancelled when the event loop session is torn down. The raw PEM private key is serialised into the task as a plain string (not an ORM object) to survive the DB session expiry.
 
 ## Personal configuration
 

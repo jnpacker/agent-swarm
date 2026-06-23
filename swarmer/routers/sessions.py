@@ -767,9 +767,13 @@ async def _do_launch(session: Session, ws: Workspace, db: AsyncSession, user_id:
 
     _github_repos = [r for r in (session.repos or []) if "github.com" in (r.repo_url or "")]
     if _github_repos and not session.github_pat:
-        raise ValueError(
-            "A GitHub PAT is required for repos on github.com — add one in AI Tokens."
-        )
+        # Allow launch if the workspace has a GitHub App configured — it will mint an IAT.
+        from swarmer.github_app import get_workspace_github_app
+        _ws_github_app = await get_workspace_github_app(session.workspace_id, db, user_id=user_id)
+        if not _ws_github_app:
+            raise ValueError(
+                "A GitHub PAT is required for repos on github.com — add one in AI Tokens."
+            )
 
     if settings.max_concurrent_agents > 0:
         running = await _count_running_sessions(db)
@@ -851,6 +855,7 @@ async def _do_launch(session: Session, ws: Workspace, db: AsyncSession, user_id:
         mcp_servers=mcp_servers,
         resolved_prompt=resolved_prompt,
         prompt_sources=prompt_sources,
+        user_id=user_id,
     )
 
 
@@ -865,6 +870,7 @@ async def _do_launch_openshell(
     mcp_servers: list | None,
     resolved_prompt: str,
     prompt_sources: list | None = None,
+    user_id: str = "",
 ) -> None:
     """Launch a session via the OpenShell sandbox API."""
     from swarmer import openshell_client
@@ -920,7 +926,38 @@ async def _do_launch_openshell(
                 "GOOGLE_GENERATIVE_AI_API_KEY": oc_secret.google_api_key,
             })
         provider_names.append(pname)
-    if session.github_pat:
+    # Resolve GitHub credentials: GitHub App (IAT) takes priority over PAT.
+    # Option A: Swarmer mints the IAT server-side; the raw PEM never enters the sandbox.
+    # For TUI/server mode, a refresh loop re-mints before the 1-hour expiry.
+    _github_app = None
+    _github_app_provider_name: str | None = None
+    try:
+        from swarmer.github_app import get_workspace_github_app
+        _github_app = await get_workspace_github_app(session.workspace_id, db, user_id=user_id)
+    except Exception:
+        log.warning("_do_launch_openshell: failed to resolve GitHub App for session %d", session.id, exc_info=True)
+
+    if _github_app:
+        try:
+            from swarmer.github_auth import mint_installation_token
+            iat = await mint_installation_token(_github_app)
+            pname = f"swarmer-ws-{ws_id}-github-app"
+            await openshell_client.ensure_provider(pname, "github", {}, credentials={
+                "GITHUB_TOKEN": iat,
+                "GH_TOKEN": iat,
+            })
+            provider_names.append(pname)
+            _github_app_provider_name = pname
+            log.info("_do_launch_openshell: using GitHub App IAT for session %d", session.id)
+        except Exception:
+            log.warning(
+                "_do_launch_openshell: GitHub App IAT minting failed for session %d — "
+                "falling back to PAT if available",
+                session.id, exc_info=True,
+            )
+            _github_app = None  # signal fallback below
+
+    if not _github_app and session.github_pat:
         pname = f"swarmer-ws-{ws_id}-github-pat-{session.github_pat.id}"
         pat_token = session.github_pat.pat or ""
         await openshell_client.ensure_provider(pname, "github", {}, credentials={
@@ -988,7 +1025,24 @@ async def _do_launch_openshell(
         for r in (session.repos or [])
     ]
     git_username = (session.github_pat.github_username or "") if session.github_pat else ""
-    pat_token = (session.github_pat.pat or "") if session.github_pat else ""
+    # Serialise GitHub App credentials before ORM object detaches after commit.
+    # These are passed to _setup_openshell_sandbox so the refresh loop can re-mint
+    # without holding an ORM session.
+    if _github_app and _github_app_provider_name:
+        _iat_app_id = _github_app.app_id
+        _iat_installation_id = _github_app.installation_id
+        _iat_private_key = _github_app.private_key  # decrypts here; stored as plain str
+    else:
+        _iat_app_id = ""
+        _iat_installation_id = ""
+        _iat_private_key = ""
+    # pat_token drives `gh auth setup-git` and git clone in the background task.
+    # When an App IAT is active the sandbox gets GH_TOKEN from the OpenShell provider,
+    # so gh/git will use it automatically — we set pat_token="" to skip the redundant
+    # credential-helper setup that would overwrite the provider-injected token.
+    pat_token = (session.github_pat.pat or "") if (not _github_app and session.github_pat) else ""
+    # has_git_token signals that a git credential is available (App IAT or PAT).
+    has_git_token = bool(_github_app_provider_name or pat_token)
     # Build AGENTS.md content for all modes: resolved prompt + repo context table.
     # TUI/server: written to /sandbox/AGENTS.md, read automatically by the agent.
     # Prompt mode: same content written to /sandbox/AGENTS.md, then piped as the
@@ -1029,11 +1083,16 @@ async def _do_launch_openshell(
             repos_data=repos_data,
             git_username=git_username,
             pat_token=pat_token,
+            has_git_token=has_git_token,
             working_branch=session.working_branch or "",
             agents_md=agents_md,
             mode=session.mode,
             main_cmd=main_cmd,
             resolved_prompt=resolved_prompt_safe,
+            iat_app_id=_iat_app_id,
+            iat_installation_id=_iat_installation_id,
+            iat_private_key=_iat_private_key,
+            iat_provider_name=_github_app_provider_name or "",
         ),
         name=f"openshell-setup-{session.id}",
     )
@@ -1058,6 +1117,12 @@ async def _setup_openshell_sandbox(
     mode: str,
     main_cmd: str,
     resolved_prompt: str = "",
+    has_git_token: bool = False,
+    # GitHub App IAT refresh loop params (all empty when using PAT fallback)
+    iat_app_id: str = "",
+    iat_installation_id: str = "",
+    iat_private_key: str = "",
+    iat_provider_name: str = "",
 ) -> None:
     """Background task: create sandbox and run all setup steps, then launch agent."""
     from swarmer import openshell_client
@@ -1166,9 +1231,9 @@ async def _setup_openshell_sandbox(
 
         # Register gh as the git credential helper so that git clone/push/fetch
         # can authenticate via GH_TOKEN injected by the OpenShell provider.
-        # Must run before any git clone calls.  Guarded by pat_token: sessions
-        # without a PAT cannot have GitHub repos (enforced at launch time).
-        if pat_token:
+        # Must run before any git clone calls.  Guarded by has_git_token: sessions
+        # without any git credential cannot have GitHub repos (enforced at launch time).
+        if has_git_token:
             await openshell_client.exec_command(
                 ref.name,
                 ["sh", "-c", "export HOME=/sandbox; gh auth setup-git"],
@@ -1250,6 +1315,29 @@ async def _setup_openshell_sandbox(
             ),
             name=f"openshell-agent-{session_id}",
         )
+
+        # GitHub App IAT refresh loop: for TUI and server sessions that may run
+        # longer than 1 hour, re-mint the IAT before it expires and update the
+        # OpenShell Gateway provider so GH_TOKEN stays valid in the sandbox.
+        # Prompt-mode sessions are typically short-lived — no refresh needed.
+        if iat_app_id and iat_installation_id and iat_private_key and iat_provider_name and mode != "prompt":
+            from swarmer.github_auth import start_token_refresh_loop
+
+            # Build a lightweight snapshot object so the refresh loop does not
+            # hold a reference to the ORM session or require DB access.
+            class _AppSnap:
+                app_id = iat_app_id
+                installation_id = iat_installation_id
+                private_key = iat_private_key
+
+            asyncio.create_task(
+                start_token_refresh_loop(
+                    app=_AppSnap(),  # type: ignore[arg-type]
+                    session_id=session_id,
+                    provider_name=iat_provider_name,
+                ),
+                name=f"iat-refresh-{session_id}",
+            )
 
     except asyncio.CancelledError:
         raise

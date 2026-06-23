@@ -38,6 +38,9 @@ class Workspace(Base):
     env_vars: Mapped[list["SandboxEnvVar"]] = relationship(  # noqa: F821
         "SandboxEnvVar", back_populates="workspace", cascade="all, delete-orphan"
     )
+    github_app: Mapped["GitHubApp | None"] = relationship(  # noqa: F821
+        "GitHubApp", back_populates="workspace", uselist=False, cascade="all, delete-orphan"
+    )
 
     @property
     def k8s_namespace(self) -> str:
