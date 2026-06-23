@@ -73,11 +73,20 @@ async def fetch_repo_info(repos: list, pat: str | None) -> dict:
             )
             if r.status_code == 200:
                 data = r.json()
-                perms = data.get("permissions", {})
-                raw_push = perms.get("push")
-                # For App IATs, suppress a False push value — the App's actual write
-                # access is determined by its installation permissions, not this field.
-                can_push = None if (_is_app_token and not raw_push) else raw_push
+                perms = data.get("permissions")
+                if perms is not None:
+                    raw_push = perms.get("push")
+                    # For App IATs, suppress a False push value — the App's actual write
+                    # access is determined by its installation permissions, not this field.
+                    can_push = None if (_is_app_token and not raw_push) else raw_push
+                elif pat and not _is_app_token:
+                    # Authenticated PAT but no permissions object — GitHub only includes
+                    # permissions when the token has explicit collaborator access.
+                    # Absence means no write access for this token.
+                    can_push = False
+                else:
+                    # Unauthenticated or App IAT without permissions — indeterminate.
+                    can_push = None
                 return repo.id, {
                     "is_public": not data.get("private", True),
                     "can_push": can_push,
