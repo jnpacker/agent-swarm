@@ -39,6 +39,9 @@ agent-swarm/
     ├── scheduler.py            # Background asyncio cron scheduler + queue processor + sandbox GC
     ├── openshell_client.py     # OpenShell sandbox SDK wrapper (async helpers, lazy SDK import)
     ├── openshell_policy.py     # Network policy builder for OpenShell sandboxes
+    ├── github_app.py           # Resolve workspace GitHub App credentials (user/shared visibility)
+    ├── github_auth.py          # IAT minting (JWT → GitHub REST → token) + refresh loop for long sessions
+    ├── csrf.py                 # CSRF token helpers for server-rendered HTML forms
     ├── agent_tools/            # Strategy pattern for multi-agent support
     │   ├── __init__.py         # AgentToolStrategy ABC
     │   ├── registry.py         # Global registry + aliases (_init() auto-registers all tools)
@@ -52,12 +55,13 @@ agent-swarm/
     │   ├── sandbox_env_var.py  # Per-workspace env vars (encrypted at rest, injected into sandboxes)
     │   ├── opencode_secret.py  # Fernet-encrypted provider credentials (GCP/Anthropic/OpenAI/Gemini)
     │   ├── github_pat.py       # Fernet-encrypted GitHub PATs for HTTPS git auth
+    │   ├── github_app.py       # Fernet-encrypted GitHub App credentials (one per workspace)
     │   └── mcp_server.py       # MCP server configs with Fernet-encrypted OAuth tokens
     ├── routers/                # FastAPI route handlers
     │   ├── auth.py             # /login (token paste + OpenShift OAuth), /logout, /auth/callback
     │   ├── workspaces.py       # CRUD for workspaces
     │   ├── sessions.py         # CRUD + launch/stop/schedule/patch generation + repo management
-    │   ├── secrets.py          # OpenCode secrets, GitHub PATs, pull secrets
+    │   ├── secrets.py          # OpenCode secrets, GitHub PATs, GitHub App, pull secrets
     │   ├── mcp_servers.py      # MCP server CRUD, OAuth 2.1 flow (PKCE + dynamic registration)
     │   ├── chat_proxy.py       # HTTP/SSE/WebSocket reverse proxy for server-mode sessions
     │   └── tui_ws.py           # WebSocket PTY proxy for TUI-mode sessions (K8s exec)
@@ -88,7 +92,8 @@ agent-swarm/
 - **Session phases**: `idle` → `pending` → `running` → `succeeded`/`failed`/`stopped`
 - **Cron scheduling** — sessions of any mode can have a cron schedule (`cron_schedule` field). A background asyncio loop (`scheduler.py`) checks every 30s, uses an atomic `UPDATE … RETURNING` to claim due rows (prevents duplicates), sets `session.mode = "prompt"` before calling `_do_launch()` (scheduled runs always execute in prompt mode regardless of the session's configured mode), then calls the shared `_do_launch()` helper in `sessions.py`.
 - **OpencodeSecret** — per-workspace encrypted storage for GCP project, Vertex location, ADC JSON, Google API key, Anthropic API key, OpenAI API key. Stored in SQLite via Fernet encryption. Despite the legacy name, used by both OpenCode and Crush.
-- **GitHubPAT** — per-workspace encrypted GitHub personal access tokens with optional org scope for HTTPS git auth. Injected into OpenShell sandboxes via Gateway credential providers.
+- **GitHubPAT** — per-workspace encrypted GitHub personal access tokens with optional org scope for HTTPS git auth. Injected into OpenShell sandboxes via Gateway credential providers. Acts as fallback when no GitHub App is configured.
+- **GitHubApp** — one GitHub App installation per workspace, storing `app_id`, `installation_id`, and a Fernet-encrypted RSA private key (`private_key_enc`). At session launch, Swarmer mints a short-lived Installation Access Token (IAT) server-side using PyJWT + GitHub's REST API and injects it into the sandbox via the OpenShell Gateway provider — the raw PEM key never enters the sandbox. For TUI and server-mode sessions that may exceed the 1-hour token lifetime, a background asyncio task (`github_auth.start_token_refresh_loop`) re-mints and re-registers the provider every 50 minutes. See [docs/GITHUB_APP_SETUP.md](GITHUB_APP_SETUP.md) for setup steps and required permissions.
 - **McpServer** — per-workspace MCP server configurations with OAuth 2.1 tokens encrypted at rest. Enabled servers are configured in the agent config JSON and credentials injected via Gateway env vars.
 - **SandboxEnvVar** — per-workspace arbitrary key-value env vars stored encrypted in SQLite, injected into every OpenShell sandbox via `create_provider()`.
 - **SessionRepo** — git repositories to clone into the sandbox via OpenShell API at session launch.

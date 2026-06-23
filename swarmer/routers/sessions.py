@@ -25,6 +25,7 @@ from swarmer.ansi import ansi_to_html
 from swarmer.flash import flash
 from swarmer.github import fetch_repo_info as _fetch_repo_info
 from swarmer.github import list_repos_for_pat as _list_repos_for_pat
+from swarmer.github import list_repos_for_github_app as _list_repos_for_github_app
 from swarmer.github_url_validator import GitHubURLError, validate_github_url
 from swarmer.models.github_pat import GitHubPAT
 from swarmer.models.opencode_secret import OpencodeSecret
@@ -50,6 +51,103 @@ def _is_valid_ref_name(name: str) -> bool:
     if not name or name.startswith("/") or name.endswith("/") or name.endswith("."):
         return False
     return _INVALID_REF_RE.search(name) is None
+
+
+async def _resolve_token_for_repo_check(
+    session,
+    db: AsyncSession,
+    user_id: str = "",
+) -> str | None:
+    """Return a token for repo visibility/access checks, or None (= do nothing).
+
+    Priority:
+      1. Session PAT — if assigned, use it and ignore any GitHub App.
+      2. GitHub App IAT — minted on the fly if no PAT and an App is configured.
+      3. None — no credential configured; caller skips the check entirely.
+    """
+    if session.github_pat:
+        token = session.github_pat.pat or None
+        log.debug(
+            "_resolve_token_for_repo_check: session %d using PAT id=%d token_present=%s",
+            session.id, session.github_pat.id, bool(token),
+        )
+        return token
+    # No PAT — try minting a short-lived App IAT.
+    try:
+        from swarmer.github_app import get_workspace_github_app
+        from swarmer.github_auth import mint_installation_token
+        app = await get_workspace_github_app(session.workspace_id, db, user_id=user_id)
+        if app:
+            return await mint_installation_token(app)
+    except Exception:
+        log.warning(
+            "_resolve_token_for_repo_check: IAT mint failed for session %d",
+            session.id, exc_info=True,
+        )
+    return None
+
+
+def _github_app_provider_name(workspace_id: int, session_id: int) -> str:
+    """Deterministic per-session GitHub App provider name.
+
+    Session-scoped so multiple sessions in the same workspace each get an
+    independent provider + IAT.  Derivable from IDs alone — no DB lookup needed
+    at cleanup time.
+    """
+    return f"swarmer-ws-{workspace_id}-github-app-s{session_id}"
+
+
+async def _delete_github_app_provider(workspace_id: int, session_id: int) -> None:
+    """Delete the session-scoped GitHub App provider from the OpenShell Gateway.
+
+    Safe to call even when no GitHub App was used — delete_provider is a no-op
+    if the provider does not exist (NOT_FOUND is suppressed by the client).
+    Also cancels the iat-refresh background task for the session.
+    """
+    from swarmer import openshell_client
+
+    pname = _github_app_provider_name(workspace_id, session_id)
+    # Cancel refresh loop first so it cannot race and re-create the provider
+    # after we delete it.
+    for _t in asyncio.all_tasks():
+        if _t.get_name() == f"iat-refresh-{session_id}":
+            _t.cancel()
+            log.info("_delete_github_app_provider: cancelled iat-refresh task for session %d", session_id)
+            break
+    try:
+        await openshell_client.delete_provider(pname)
+        log.info("_delete_github_app_provider: deleted provider %s", pname)
+    except Exception:
+        log.warning("_delete_github_app_provider: failed to delete provider %s", pname, exc_info=True)
+
+
+async def _delete_pat_provider(workspace_id: int, pat_id: int | None, session_id: int | None = None) -> None:
+    """Delete the session-scoped PAT provider from the OpenShell Gateway.
+
+    Safe to call when pat_id is None (no PAT was used) — returns immediately.
+    Also cleans up the legacy workspace-scoped name (swarmer-ws-{ws}-github-pat-{pat})
+    for sessions launched before the per-session naming change.
+    """
+    if not pat_id:
+        return
+    from swarmer import openshell_client
+
+    # Session-scoped name (current format).
+    if session_id:
+        pname = f"swarmer-ws-{workspace_id}-github-pat-{pat_id}-s{session_id}"
+        try:
+            await openshell_client.delete_provider(pname)
+            log.info("_delete_pat_provider: deleted provider %s", pname)
+        except Exception:
+            log.warning("_delete_pat_provider: failed to delete provider %s", pname, exc_info=True)
+
+    # Legacy workspace-scoped name — clean up if still present.
+    legacy_pname = f"swarmer-ws-{workspace_id}-github-pat-{pat_id}"
+    try:
+        await openshell_client.delete_provider(legacy_pname)
+        log.info("_delete_pat_provider: deleted legacy provider %s", legacy_pname)
+    except Exception:
+        log.warning("_delete_pat_provider: failed to delete legacy provider %s", legacy_pname, exc_info=True)
 
 
 def _build_repo_context(repos, base_path: str = "/sandbox") -> str:
@@ -452,8 +550,14 @@ async def session_detail(
         request.session["tui_tokens"] = tokens
 
     model_options = await _get_model_options(ws_id, db, session.agent_tool)
-    pat_token = session.github_pat.pat if session.github_pat else None
-    repo_info = await _fetch_repo_info(session.repos, pat_token)
+    # Resolve repo check token BEFORE any additional DB queries — extra queries
+    # on the same async session can interfere with loaded relationship attributes.
+    _repo_check_token = await _resolve_token_for_repo_check(
+        session, db, user_id=_current_user(request)
+    )
+    repo_info = await _fetch_repo_info(session.repos, _repo_check_token)
+    from swarmer.github_app import get_workspace_github_app as _get_ws_github_app
+    _ws_github_app = await _get_ws_github_app(ws_id, db, user_id=_current_user(request))
 
     _tools = all_tools()
     _avail = await asyncio.gather(
@@ -500,6 +604,7 @@ async def session_detail(
             "capacity": capacity,
             "model_options": model_options,
             "repo_info": repo_info,
+            "has_github_app": bool(_ws_github_app),
             "agent_tools": _tools,
             "tool_image_available": dict(zip([t.name for t in _tools], _avail, strict=False)),
             "patch_filename": _patch_filename(session),
@@ -767,9 +872,13 @@ async def _do_launch(session: Session, ws: Workspace, db: AsyncSession, user_id:
 
     _github_repos = [r for r in (session.repos or []) if "github.com" in (r.repo_url or "")]
     if _github_repos and not session.github_pat:
-        raise ValueError(
-            "A GitHub PAT is required for repos on github.com — add one in AI Tokens."
-        )
+        # Allow launch if the workspace has a GitHub App configured — it will mint an IAT.
+        from swarmer.github_app import get_workspace_github_app
+        _ws_github_app = await get_workspace_github_app(session.workspace_id, db, user_id=user_id)
+        if not _ws_github_app:
+            raise ValueError(
+                "A GitHub PAT is required for repos on github.com — add one in AI Tokens."
+            )
 
     if settings.max_concurrent_agents > 0:
         running = await _count_running_sessions(db)
@@ -851,6 +960,7 @@ async def _do_launch(session: Session, ws: Workspace, db: AsyncSession, user_id:
         mcp_servers=mcp_servers,
         resolved_prompt=resolved_prompt,
         prompt_sources=prompt_sources,
+        user_id=user_id,
     )
 
 
@@ -865,6 +975,7 @@ async def _do_launch_openshell(
     mcp_servers: list | None,
     resolved_prompt: str,
     prompt_sources: list | None = None,
+    user_id: str = "",
 ) -> None:
     """Launch a session via the OpenShell sandbox API."""
     from swarmer import openshell_client
@@ -886,6 +997,44 @@ async def _do_launch_openshell(
         sa_select(SandboxEnvVar).where(SandboxEnvVar.workspace_id == session.workspace_id)
     )
     extra_env: dict[str, str] = {row.key: row.value for row in _ev_result.scalars().all()}
+
+    # Extract GitHub repo names BEFORE committing — session.repos relationship
+    # attributes are guaranteed accessible while the DB session is still live.
+    #
+    # Credential routing: if a PAT is assigned to the session, use it exclusively
+    # and skip the GitHub App entirely.  The PAT is an explicit user choice and
+    # has the right write permissions for that session's repos.  The GitHub App
+    # is only used when no PAT is assigned.
+    from swarmer.github import github_slug as _github_slug
+    _session_repo_names: list[str] = []
+    _has_github_repos = False
+
+    for _r in (session.repos or []):
+        _url = _r.repo_url or ""
+        if "github.com" not in _url:
+            continue
+        _has_github_repos = True
+        try:
+            _slug = _github_slug(_url)
+            if _slug:
+                _session_repo_names.append(_slug.split("/", 1)[1])
+        except Exception:
+            log.warning("_do_launch_openshell: could not extract repo name from %r", _url, exc_info=True)
+
+    # Resolve GitHub App before committing (requires DB access).
+    # Skipped entirely when the session has a PAT assigned.
+    _github_app = None
+    if _has_github_repos and not session.github_pat:
+        try:
+            from swarmer.github_app import get_workspace_github_app
+            _github_app = await get_workspace_github_app(session.workspace_id, db, user_id=user_id)
+        except Exception:
+            log.warning("_do_launch_openshell: failed to resolve GitHub App for session %d", session.id, exc_info=True)
+
+    log.info(
+        "_do_launch_openshell: session %d has_github_repos=%s has_pat=%s has_app=%s repos=%s",
+        session.id, _has_github_repos, bool(session.github_pat), bool(_github_app), _session_repo_names,
+    )
 
     # Release the DB connection before long-running gRPC operations. The route
     # handler's session holds an autobegin transaction from earlier SELECTs in
@@ -920,8 +1069,37 @@ async def _do_launch_openshell(
                 "GOOGLE_GENERATIVE_AI_API_KEY": oc_secret.google_api_key,
             })
         provider_names.append(pname)
-    if session.github_pat:
-        pname = f"swarmer-ws-{ws_id}-github-pat-{session.github_pat.id}"
+    # 1b cont. GitHub App IAT — minted above before commit; now register the provider.
+    _app_pname: str | None = None
+
+    if _github_app:
+        try:
+            from swarmer.github_auth import mint_installation_token
+            iat = await mint_installation_token(
+                _github_app,
+                repo_names=_session_repo_names or None,  # empty list → None → full-installation scope
+            )
+            pname = f"swarmer-ws-{ws_id}-github-app-s{session.id}"
+            await openshell_client.ensure_provider(pname, "github", {}, credentials={
+                "GITHUB_TOKEN": iat,
+                "GH_TOKEN": iat,
+            })
+            provider_names.append(pname)
+            _app_pname = pname
+            log.info(
+                "_do_launch_openshell: using GitHub App IAT for session %d (repos=%s)",
+                session.id, _session_repo_names or "all",
+            )
+        except Exception:
+            log.warning(
+                "_do_launch_openshell: GitHub App IAT minting failed for session %d — "
+                "falling back to PAT if available",
+                session.id, exc_info=True,
+            )
+            _github_app = None  # signal fallback below
+
+    if not _github_app and session.github_pat:
+        pname = f"swarmer-ws-{ws_id}-github-pat-{session.github_pat.id}-s{session.id}"
         pat_token = session.github_pat.pat or ""
         await openshell_client.ensure_provider(pname, "github", {}, credentials={
             "GITHUB_TOKEN": pat_token,
@@ -988,7 +1166,24 @@ async def _do_launch_openshell(
         for r in (session.repos or [])
     ]
     git_username = (session.github_pat.github_username or "") if session.github_pat else ""
-    pat_token = (session.github_pat.pat or "") if session.github_pat else ""
+    # Serialise GitHub App credentials before ORM object detaches after commit.
+    # These are passed to _setup_openshell_sandbox so the refresh loop can re-mint
+    # without holding an ORM session.
+    if _github_app and _app_pname:
+        _iat_app_id = _github_app.app_id
+        _iat_installation_id = _github_app.installation_id
+        _iat_private_key = _github_app.private_key  # decrypts here; stored as plain str
+        _iat_repo_names: list[str] = _session_repo_names  # type: ignore[possibly-undefined]
+    else:
+        _iat_app_id = ""
+        _iat_installation_id = ""
+        _iat_private_key = ""
+        _iat_repo_names = []
+    # pat_token drives `gh auth setup-git` and git clone in the background task.
+    # Only used when no GitHub App is active (PAT-only sessions).
+    pat_token = (session.github_pat.pat or "") if (not _github_app and session.github_pat) else ""
+    # has_git_token signals that a git credential is available (App IAT or PAT).
+    has_git_token = bool(_app_pname or pat_token)
     # Build AGENTS.md content for all modes: resolved prompt + repo context table.
     # TUI/server: written to /sandbox/AGENTS.md, read automatically by the agent.
     # Prompt mode: same content written to /sandbox/AGENTS.md, then piped as the
@@ -1017,6 +1212,7 @@ async def _do_launch_openshell(
     asyncio.create_task(
         _setup_openshell_sandbox(
             session_id=session.id,
+            workspace_id=session.workspace_id,
             provider_names=provider_names,
             env_vars=env_vars,
             policy=policy,
@@ -1029,11 +1225,18 @@ async def _do_launch_openshell(
             repos_data=repos_data,
             git_username=git_username,
             pat_token=pat_token,
+            has_git_token=has_git_token,
             working_branch=session.working_branch or "",
             agents_md=agents_md,
             mode=session.mode,
             main_cmd=main_cmd,
             resolved_prompt=resolved_prompt_safe,
+            iat_app_id=_iat_app_id,
+            iat_installation_id=_iat_installation_id,
+            iat_private_key=_iat_private_key,
+            iat_provider_name=_app_pname or "",
+            iat_repo_names=_iat_repo_names,
+            pat_id=session.github_pat.id if session.github_pat else None,
         ),
         name=f"openshell-setup-{session.id}",
     )
@@ -1041,6 +1244,7 @@ async def _do_launch_openshell(
 
 async def _setup_openshell_sandbox(
     session_id: int,
+    workspace_id: int,
     provider_names: list[str],
     env_vars: dict,
     policy,
@@ -1058,6 +1262,14 @@ async def _setup_openshell_sandbox(
     mode: str,
     main_cmd: str,
     resolved_prompt: str = "",
+    has_git_token: bool = False,
+    # GitHub App IAT refresh loop params (all empty when using PAT fallback)
+    iat_app_id: str = "",
+    iat_installation_id: str = "",
+    iat_private_key: str = "",
+    iat_provider_name: str = "",
+    iat_repo_names: list[str] | None = None,
+    pat_id: int | None = None,  # PAT DB ID for provider cleanup on completion
 ) -> None:
     """Background task: create sandbox and run all setup steps, then launch agent."""
     from swarmer import openshell_client
@@ -1166,9 +1378,9 @@ async def _setup_openshell_sandbox(
 
         # Register gh as the git credential helper so that git clone/push/fetch
         # can authenticate via GH_TOKEN injected by the OpenShell provider.
-        # Must run before any git clone calls.  Guarded by pat_token: sessions
-        # without a PAT cannot have GitHub repos (enforced at launch time).
-        if pat_token:
+        # Must run before any git clone calls.  Guarded by has_git_token: sessions
+        # without any git credential cannot have GitHub repos (enforced at launch time).
+        if has_git_token:
             await openshell_client.exec_command(
                 ref.name,
                 ["sh", "-c", "export HOME=/sandbox; gh auth setup-git"],
@@ -1242,14 +1454,40 @@ async def _setup_openshell_sandbox(
         asyncio.create_task(
             _run_openshell_agent(
                 session_id=session_id,
+                workspace_id=workspace_id,
                 sandbox_name=ref.name,
                 cmd=["sh", "-c", agent_cmd],
                 mode=mode,
                 agent_tool=tool_name,
                 env_vars=env_vars,
+                pat_id=pat_id,
             ),
             name=f"openshell-agent-{session_id}",
         )
+
+        # GitHub App IAT refresh loop: for TUI and server sessions that may run
+        # longer than 1 hour, re-mint the IAT before it expires and update the
+        # OpenShell Gateway provider so GH_TOKEN stays valid in the sandbox.
+        # Prompt-mode sessions are typically short-lived — no refresh needed.
+        if iat_app_id and iat_installation_id and iat_private_key and iat_provider_name and mode != "prompt":
+            from swarmer.github_auth import start_token_refresh_loop
+
+            # Build a lightweight snapshot object so the refresh loop does not
+            # hold a reference to the ORM session or require DB access.
+            class _AppSnap:
+                app_id = iat_app_id
+                installation_id = iat_installation_id
+                private_key = iat_private_key
+
+            asyncio.create_task(
+                start_token_refresh_loop(
+                    app=_AppSnap(),  # type: ignore[arg-type]
+                    session_id=session_id,
+                    provider_name=iat_provider_name,
+                    repo_names=iat_repo_names or None,
+                ),
+                name=f"iat-refresh-{session_id}",
+            )
 
     except asyncio.CancelledError:
         raise
@@ -1260,11 +1498,13 @@ async def _setup_openshell_sandbox(
 
 async def _run_openshell_agent(
     session_id: int,
+    workspace_id: int,
     sandbox_name: str,
     cmd: list[str],
     mode: str,
     agent_tool: str,
     env_vars: dict | None = None,
+    pat_id: int | None = None,
 ) -> None:
     """Background task: starts the agent in the sandbox and tracks completion."""
     from swarmer import openshell_client
@@ -1368,6 +1608,18 @@ async def _run_openshell_agent(
                     new_sandbox_name = None
                 except Exception:
                     log.warning("Auto-cleanup of sandbox %s failed", sandbox_name, exc_info=True)
+                # Providers can only be deleted after sandbox is gone (Gateway rejects
+                # DeleteProvider with FAILED_PRECONDITION while sandbox is still attached).
+                await _delete_github_app_provider(workspace_id, session_id)
+                await _delete_pat_provider(workspace_id, pat_id, session_id)
+            else:
+                # failed/stopped — sandbox left running for debugging; providers stay
+                # attached and will be cleaned up when the session is stopped/deleted.
+                log.info(
+                    "_run_openshell_agent: skipping provider cleanup for phase=%s session=%d "
+                    "(sandbox still attached — cleanup on explicit stop/delete)",
+                    phase, session_id,
+                )
 
             await _update_db(
                 phase=phase,
@@ -1567,6 +1819,11 @@ async def session_stop(
             flash(request, f"Sandbox deletion failed: {exc}", "warning")
         session.sandbox_name = None
         session.service_url = None
+
+    # Clean up GitHub credentials providers AFTER sandbox deletion — the Gateway
+    # rejects DeleteProvider with FAILED_PRECONDITION if the sandbox is still attached.
+    await _delete_github_app_provider(ws_id, sid)
+    await _delete_pat_provider(ws_id, session.github_pat_id, sid)
 
     from swarmer.session_runs import STOPPED_BY_USER_DETAIL, record_session_run
 
@@ -2265,6 +2522,10 @@ async def session_delete(
         except Exception as exc:
             flash(request, f"Sandbox deletion failed: {exc}", "warning")
 
+    # Clean up GitHub credentials providers (App IAT and PAT).
+    await _delete_github_app_provider(ws_id, sid)
+    await _delete_pat_provider(ws_id, session.github_pat_id, sid)
+
     await db.delete(session)
     await db.commit()
     return RedirectResponse(url=f"/workspaces/{ws_id}/sessions", status_code=302)
@@ -2564,12 +2825,20 @@ async def repo_items(
     session = result.scalar_one_or_none()
     if session is None or session.workspace_id != ws_id:
         return HTMLResponse("")
-    pat_token = session.github_pat.pat if session.github_pat else None
-    repo_info = await _fetch_repo_info(session.repos, pat_token)
+    # Resolve token BEFORE additional DB queries to avoid async session interference.
+    _repo_check_token = await _resolve_token_for_repo_check(
+        session, db, user_id=_current_user(request)
+    )
+    repo_info = await _fetch_repo_info(session.repos, _repo_check_token)
+    from swarmer.github_app import get_workspace_github_app
+    _app = await get_workspace_github_app(ws_id, db, user_id=_current_user(request))
+    log.debug("repo_items: session %d pat=%s token_present=%s repo_info=%s",
+              session.id, bool(session.github_pat), bool(_repo_check_token), repo_info)
     return templates.TemplateResponse(
         request,
         "sessions/_repo_items.html",
-        {"ws_id": ws_id, "session": session, "repo_info": repo_info},
+        {"ws_id": ws_id, "session": session, "repo_info": repo_info,
+         "has_github_app": bool(_app)},
     )
 
 
@@ -2581,17 +2850,63 @@ async def repo_items(
 async def repo_pick(
     ws_id: int,
     sid: int,
-    pat_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
+    pat_id: int = 0,
 ):
-    """Return an HTMX partial listing all repos for the selected PAT."""
+    """Return an HTMX partial listing repos for the selected PAT or GitHub App.
+
+    pat_id=0 (default) means: use the workspace GitHub App installation repos.
+    Any non-zero pat_id fetches repos accessible via that PAT.
+    """
     session = await db.get(Session, sid)
     if session is None or session.workspace_id != ws_id:
         return HTMLResponse("")
     if session.is_active:
         return HTMLResponse("", status_code=409)
 
+    # GitHub App path: pat_id=0 → list repos via installation token.
+    if pat_id == 0:
+        from swarmer.github_app import get_workspace_github_app
+        from swarmer.github_auth import mint_installation_token
+        app = await get_workspace_github_app(
+            ws_id, db, user_id=_current_user(request)
+        )
+        if not app:
+            return templates.TemplateResponse(
+                request,
+                "sessions/_repo_picker.html",
+                {"error": "No GitHub App configured for this workspace.",
+                 "repos": [], "truncated": False,
+                 "ws_id": ws_id, "session": session},
+            )
+        try:
+            iat = await mint_installation_token(app)
+        except Exception as exc:
+            return templates.TemplateResponse(
+                request,
+                "sessions/_repo_picker.html",
+                {"error": f"Failed to mint GitHub App token: {exc}",
+                 "repos": [], "truncated": False,
+                 "ws_id": ws_id, "session": session},
+            )
+        result = await _list_repos_for_github_app(iat)
+        if isinstance(result, str):
+            return templates.TemplateResponse(
+                request,
+                "sessions/_repo_picker.html",
+                {"error": result, "repos": [], "truncated": False,
+                 "ws_id": ws_id, "session": session},
+            )
+        truncated = len(result) >= 500
+        return templates.TemplateResponse(
+            request,
+            "sessions/_repo_picker.html",
+            {"repos": result, "truncated": truncated, "error": None,
+             "ws_id": ws_id, "session": session},
+        )
+
+    # PAT path: fetch repos via the named PAT.
     pat = await db.get(GitHubPAT, pat_id)
     if pat is None or pat.workspace_id != ws_id:
         return templates.TemplateResponse(

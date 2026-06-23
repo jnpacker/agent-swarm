@@ -136,6 +136,18 @@ async def migrate_db() -> None:
         # ACM-35750: raw streaming console output preserved alongside processed last_output
         "ALTER TABLE sessions ADD COLUMN raw_output TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE session_runs ADD COLUMN raw_output TEXT NOT NULL DEFAULT ''",
+        # ACM-35370: GitHub App credentials for server-side IAT minting
+        """CREATE TABLE IF NOT EXISTS github_apps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            workspace_id INTEGER NOT NULL UNIQUE REFERENCES workspaces(id) ON DELETE CASCADE,
+            user_id TEXT NOT NULL DEFAULT '',
+            shared BOOLEAN NOT NULL DEFAULT 0,
+            app_id TEXT NOT NULL DEFAULT '',
+            installation_id TEXT NOT NULL DEFAULT '',
+            private_key_enc TEXT NOT NULL DEFAULT '',
+            created_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+            updated_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+        )""",
     ]
     async with _engine.begin() as conn:
         for stmt in migrations:
