@@ -86,7 +86,8 @@ async def fetch_repo_info(repos: list, pat: str | None) -> dict:
             if r.status_code == 404:
                 return repo.id, {"is_public": None, "can_push": False if (pat and not _is_app_token) else None}
             # 401 → token is invalid/expired — retry unauthenticated so public
-            # repos still get a Public pill even with a bad credential.
+            # repos still show a Public pill. Write access is False: an invalid
+            # credential cannot clone or push regardless of repo permissions.
             if r.status_code == 401:
                 log.warning("fetch_repo_info: 401 for %s — retrying unauthenticated", slug)
                 r2 = await client.get(
@@ -97,9 +98,9 @@ async def fetch_repo_info(repos: list, pat: str | None) -> dict:
                     data2 = r2.json()
                     return repo.id, {
                         "is_public": not data2.get("private", True),
-                        "can_push": None,  # can't determine push without valid auth
+                        "can_push": False,  # credential invalid — no write access
                     }
-                return repo.id, {"is_public": None, "can_push": None}
+                return repo.id, {"is_public": None, "can_push": False}
             # Any other non-200 (rate-limit, 5xx, …) — don't infer push access
             return repo.id, {"is_public": None, "can_push": None}
         except Exception:
