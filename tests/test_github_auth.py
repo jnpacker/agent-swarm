@@ -139,7 +139,7 @@ class TestStartTokenRefreshLoop:
         app = _make_app()
         calls = []
 
-        async def fake_mint(a):
+        async def fake_mint(a, **kwargs):
             calls.append("mint")
             return "ghs_refreshed"
 
@@ -173,7 +173,7 @@ class TestStartTokenRefreshLoop:
         app = _make_app()
         mint_attempts = []
 
-        async def flaky_mint(a):
+        async def flaky_mint(a, **kwargs):
             mint_attempts.append(1)
             if len(mint_attempts) == 1:
                 raise RuntimeError("GitHub API error")

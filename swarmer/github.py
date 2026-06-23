@@ -145,6 +145,48 @@ async def list_repos_for_pat(pat) -> list[dict] | str:
     return repos
 
 
+async def list_repos_for_github_app(token: str) -> list[dict] | str:
+    """Fetch all repos accessible to a GitHub App installation via an IAT.
+
+    Uses GET /installation/repositories (paginated, up to 500).
+    Returns same shape as list_repos_for_pat: list of dicts with keys
+    full_name, private, updated_at, description.
+    Returns a string error message on failure.
+    """
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"token {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    url: str | None = "https://api.github.com/installation/repositories"
+    params: dict = {"per_page": 100}
+    repos: list[dict] = []
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            while url and len(repos) < 500:
+                r = await client.get(url, headers=headers, params=params)
+                params = {}
+                if r.status_code != 200:
+                    ct = r.headers.get("content-type", "")
+                    msg = (
+                        r.json().get("message", "unknown error")
+                        if ct.startswith("application/json")
+                        else r.text
+                    )
+                    return f"GitHub API error {r.status_code}: {msg}"
+                data = r.json()
+                repos.extend(data.get("repositories", []))
+                next_url: str | None = None
+                for part in r.headers.get("link", "").split(","):
+                    if 'rel="next"' in part:
+                        next_url = part.split(";")[0].strip().strip("<>")
+                url = next_url
+    except Exception as exc:
+        return f"Failed to contact GitHub API: {exc}"
+
+    return repos
+
+
 async def list_folder_contents(
     owner: str, repo: str, path: str, branch: str, pat: str | None
 ) -> list[dict] | str:

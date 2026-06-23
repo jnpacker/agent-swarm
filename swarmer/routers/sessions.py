@@ -25,6 +25,7 @@ from swarmer.ansi import ansi_to_html
 from swarmer.flash import flash
 from swarmer.github import fetch_repo_info as _fetch_repo_info
 from swarmer.github import list_repos_for_pat as _list_repos_for_pat
+from swarmer.github import list_repos_for_github_app as _list_repos_for_github_app
 from swarmer.github_url_validator import GitHubURLError, validate_github_url
 from swarmer.models.github_pat import GitHubPAT
 from swarmer.models.opencode_secret import OpencodeSecret
@@ -50,6 +51,35 @@ def _is_valid_ref_name(name: str) -> bool:
     if not name or name.startswith("/") or name.endswith("/") or name.endswith("."):
         return False
     return _INVALID_REF_RE.search(name) is None
+
+
+async def _resolve_token_for_repo_check(
+    session,
+    db: AsyncSession,
+    user_id: str = "",
+) -> str | None:
+    """Return a GitHub token suitable for repo visibility/access checks.
+
+    Prefers a GitHub App IAT (minted on demand, no side effects).
+    Falls back to the session's assigned PAT.  Returns None when neither
+    is available (unauthenticated checks still work for public repos).
+    """
+    if session.github_pat:
+        # PAT is always cheap — use it directly.
+        return session.github_pat.pat or None
+    # No PAT — try minting a short-lived App IAT for the check.
+    try:
+        from swarmer.github_app import get_workspace_github_app
+        from swarmer.github_auth import mint_installation_token
+        app = await get_workspace_github_app(session.workspace_id, db, user_id=user_id)
+        if app:
+            return await mint_installation_token(app)
+    except Exception:
+        log.warning(
+            "_resolve_token_for_repo_check: IAT mint failed for session %d",
+            session.id, exc_info=True,
+        )
+    return None
 
 
 def _github_app_provider_name(workspace_id: int, session_id: int) -> str:
@@ -486,8 +516,12 @@ async def session_detail(
         request.session["tui_tokens"] = tokens
 
     model_options = await _get_model_options(ws_id, db, session.agent_tool)
-    pat_token = session.github_pat.pat if session.github_pat else None
-    repo_info = await _fetch_repo_info(session.repos, pat_token)
+    from swarmer.github_app import get_workspace_github_app as _get_ws_github_app
+    _ws_github_app = await _get_ws_github_app(ws_id, db, user_id=_current_user(request))
+    _repo_check_token = await _resolve_token_for_repo_check(
+        session, db, user_id=_current_user(request)
+    )
+    repo_info = await _fetch_repo_info(session.repos, _repo_check_token)
 
     _tools = all_tools()
     _avail = await asyncio.gather(
@@ -534,6 +568,7 @@ async def session_detail(
             "capacity": capacity,
             "model_options": model_options,
             "repo_info": repo_info,
+            "has_github_app": bool(_ws_github_app),
             "agent_tools": _tools,
             "tool_image_available": dict(zip([t.name for t in _tools], _avail, strict=False)),
             "patch_filename": _patch_filename(session),
@@ -974,7 +1009,21 @@ async def _do_launch_openshell(
     if _github_app:
         try:
             from swarmer.github_auth import mint_installation_token
-            iat = await mint_installation_token(_github_app)
+            from swarmer.github import github_slug as _github_slug
+            # Scope the IAT to only the repos attached to this session.
+            # Extract bare repo names (e.g. "agent-swarm") from the full slugs.
+            _session_repo_names: list[str] = []
+            for _r in (session.repos or []):
+                try:
+                    _slug = _github_slug(_r.repo_url)
+                    if _slug:
+                        _session_repo_names.append(_slug.split("/", 1)[1])
+                except Exception:
+                    pass
+            iat = await mint_installation_token(
+                _github_app,
+                repo_names=_session_repo_names or None,
+            )
             pname = f"swarmer-ws-{ws_id}-github-app-s{session.id}"
             await openshell_client.ensure_provider(pname, "github", {}, credentials={
                 "GITHUB_TOKEN": iat,
@@ -982,7 +1031,10 @@ async def _do_launch_openshell(
             })
             provider_names.append(pname)
             _github_app_provider_name = pname
-            log.info("_do_launch_openshell: using GitHub App IAT for session %d", session.id)
+            log.info(
+                "_do_launch_openshell: using GitHub App IAT for session %d (repos=%s)",
+                session.id, _session_repo_names or "all",
+            )
         except Exception:
             log.warning(
                 "_do_launch_openshell: GitHub App IAT minting failed for session %d — "
@@ -1066,10 +1118,12 @@ async def _do_launch_openshell(
         _iat_app_id = _github_app.app_id
         _iat_installation_id = _github_app.installation_id
         _iat_private_key = _github_app.private_key  # decrypts here; stored as plain str
+        _iat_repo_names: list[str] = _session_repo_names  # type: ignore[possibly-undefined]
     else:
         _iat_app_id = ""
         _iat_installation_id = ""
         _iat_private_key = ""
+        _iat_repo_names = []
     # pat_token drives `gh auth setup-git` and git clone in the background task.
     # When an App IAT is active the sandbox gets GH_TOKEN from the OpenShell provider,
     # so gh/git will use it automatically — we set pat_token="" to skip the redundant
@@ -1128,6 +1182,7 @@ async def _do_launch_openshell(
             iat_installation_id=_iat_installation_id,
             iat_private_key=_iat_private_key,
             iat_provider_name=_github_app_provider_name or "",
+            iat_repo_names=_iat_repo_names,
         ),
         name=f"openshell-setup-{session.id}",
     )
@@ -1159,6 +1214,7 @@ async def _setup_openshell_sandbox(
     iat_installation_id: str = "",
     iat_private_key: str = "",
     iat_provider_name: str = "",
+    iat_repo_names: list[str] | None = None,
 ) -> None:
     """Background task: create sandbox and run all setup steps, then launch agent."""
     from swarmer import openshell_client
@@ -1367,11 +1423,12 @@ async def _setup_openshell_sandbox(
                 installation_id = iat_installation_id
                 private_key = iat_private_key
 
-            asyncio.create_task(
+                asyncio.create_task(
                 start_token_refresh_loop(
                     app=_AppSnap(),  # type: ignore[arg-type]
                     session_id=session_id,
                     provider_name=iat_provider_name,
+                    repo_names=iat_repo_names or None,
                 ),
                 name=f"iat-refresh-{session_id}",
             )
@@ -2698,12 +2755,17 @@ async def repo_items(
     session = result.scalar_one_or_none()
     if session is None or session.workspace_id != ws_id:
         return HTMLResponse("")
-    pat_token = session.github_pat.pat if session.github_pat else None
-    repo_info = await _fetch_repo_info(session.repos, pat_token)
+    _repo_check_token = await _resolve_token_for_repo_check(
+        session, db, user_id=_current_user(request)
+    )
+    repo_info = await _fetch_repo_info(session.repos, _repo_check_token)
+    from swarmer.github_app import get_workspace_github_app
+    _app = await get_workspace_github_app(ws_id, db, user_id=_current_user(request))
     return templates.TemplateResponse(
         request,
         "sessions/_repo_items.html",
-        {"ws_id": ws_id, "session": session, "repo_info": repo_info},
+        {"ws_id": ws_id, "session": session, "repo_info": repo_info,
+         "has_github_app": bool(_app)},
     )
 
 
@@ -2715,17 +2777,63 @@ async def repo_items(
 async def repo_pick(
     ws_id: int,
     sid: int,
-    pat_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
+    pat_id: int = 0,
 ):
-    """Return an HTMX partial listing all repos for the selected PAT."""
+    """Return an HTMX partial listing repos for the selected PAT or GitHub App.
+
+    pat_id=0 (default) means: use the workspace GitHub App installation repos.
+    Any non-zero pat_id fetches repos accessible via that PAT.
+    """
     session = await db.get(Session, sid)
     if session is None or session.workspace_id != ws_id:
         return HTMLResponse("")
     if session.is_active:
         return HTMLResponse("", status_code=409)
 
+    # GitHub App path: pat_id=0 → list repos via installation token.
+    if pat_id == 0:
+        from swarmer.github_app import get_workspace_github_app
+        from swarmer.github_auth import mint_installation_token
+        app = await get_workspace_github_app(
+            ws_id, db, user_id=_current_user(request)
+        )
+        if not app:
+            return templates.TemplateResponse(
+                request,
+                "sessions/_repo_picker.html",
+                {"error": "No GitHub App configured for this workspace.",
+                 "repos": [], "truncated": False,
+                 "ws_id": ws_id, "session": session},
+            )
+        try:
+            iat = await mint_installation_token(app)
+        except Exception as exc:
+            return templates.TemplateResponse(
+                request,
+                "sessions/_repo_picker.html",
+                {"error": f"Failed to mint GitHub App token: {exc}",
+                 "repos": [], "truncated": False,
+                 "ws_id": ws_id, "session": session},
+            )
+        result = await _list_repos_for_github_app(iat)
+        if isinstance(result, str):
+            return templates.TemplateResponse(
+                request,
+                "sessions/_repo_picker.html",
+                {"error": result, "repos": [], "truncated": False,
+                 "ws_id": ws_id, "session": session},
+            )
+        truncated = len(result) >= 500
+        return templates.TemplateResponse(
+            request,
+            "sessions/_repo_picker.html",
+            {"repos": result, "truncated": truncated, "error": None,
+             "ws_id": ws_id, "session": session},
+        )
+
+    # PAT path: fetch repos via the named PAT.
     pat = await db.get(GitHubPAT, pat_id)
     if pat is None or pat.workspace_id != ws_id:
         return templates.TemplateResponse(

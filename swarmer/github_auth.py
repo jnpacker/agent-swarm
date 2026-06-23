@@ -54,8 +54,19 @@ def _build_jwt(app: "GitHubApp") -> str:
     return jwt.encode(payload, app.private_key, algorithm="RS256")
 
 
-async def mint_installation_token(app: "GitHubApp") -> str:
+async def mint_installation_token(
+    app: "GitHubApp",
+    repo_names: list[str] | None = None,
+) -> str:
     """Exchange a GitHub App JWT for a short-lived Installation Access Token.
+
+    Args:
+        app:        The GitHubApp credentials (app_id, installation_id, private_key).
+        repo_names: Optional list of repository names (without owner prefix, e.g.
+                    ["agent-swarm", "agent-containers"]) to scope the token to.
+                    Restricts the IAT to only those repos within the installation's
+                    existing access — cannot grant access beyond the installation scope.
+                    When None or empty, the token covers all repos in the installation.
 
     Returns the raw token string.  Raises httpx.HTTPStatusError on failure.
     """
@@ -66,15 +77,22 @@ async def mint_installation_token(app: "GitHubApp") -> str:
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+    body: dict = {}
+    if repo_names:
+        body["repositories"] = repo_names
+        log.info(
+            "github_auth: scoping IAT to repos %s for installation_id=%s",
+            repo_names, app.installation_id,
+        )
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(url, headers=headers)
+        resp = await client.post(url, headers=headers, json=body if body else None)
         resp.raise_for_status()
         data = resp.json()
     token: str = data["token"]
     expires_at = data.get("expires_at", "unknown")
     log.info(
-        "github_auth: minted IAT for app_id=%s installation_id=%s expires_at=%s",
-        app.app_id, app.installation_id, expires_at,
+        "github_auth: minted IAT for app_id=%s installation_id=%s expires_at=%s repos=%s",
+        app.app_id, app.installation_id, expires_at, repo_names or "all",
     )
     return token
 
@@ -83,6 +101,7 @@ async def start_token_refresh_loop(
     app: "GitHubApp",
     session_id: int,
     provider_name: str,
+    repo_names: list[str] | None = None,
 ) -> None:
     """Background task: re-mint an IAT and update the OpenShell provider on a fixed schedule.
 
@@ -95,6 +114,8 @@ async def start_token_refresh_loop(
                        private_key property decrypts on access).
         session_id:    Used only for log context.
         provider_name: The OpenShell Gateway provider name to update.
+        repo_names:    Repository names to scope the refreshed IAT to (same
+                       scope as the initial token minted at launch).
     """
     from swarmer import openshell_client
 
@@ -114,14 +135,14 @@ async def start_token_refresh_loop(
     snap.private_key = private_key  # type: ignore[attr-defined]
 
     log.info(
-        "github_auth: starting IAT refresh loop for session %d provider %s (interval=%ds)",
-        session_id, provider_name, IAT_REFRESH_INTERVAL,
+        "github_auth: starting IAT refresh loop for session %d provider %s (interval=%ds repos=%s)",
+        session_id, provider_name, IAT_REFRESH_INTERVAL, repo_names or "all",
     )
     try:
         while True:
             await asyncio.sleep(IAT_REFRESH_INTERVAL)
             try:
-                new_token = await mint_installation_token(snap)  # type: ignore[arg-type]
+                new_token = await mint_installation_token(snap, repo_names=repo_names)  # type: ignore[arg-type]
                 await openshell_client.ensure_provider(
                     provider_name,
                     "github",
