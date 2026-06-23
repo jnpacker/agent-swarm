@@ -1608,10 +1608,18 @@ async def _run_openshell_agent(
                     new_sandbox_name = None
                 except Exception:
                     log.warning("Auto-cleanup of sandbox %s failed", sandbox_name, exc_info=True)
-
-            # Clean up providers on any terminal phase (succeeded, failed, stopped).
-            await _delete_github_app_provider(workspace_id, session_id)
-            await _delete_pat_provider(workspace_id, pat_id, session_id)
+                # Providers can only be deleted after sandbox is gone (Gateway rejects
+                # DeleteProvider with FAILED_PRECONDITION while sandbox is still attached).
+                await _delete_github_app_provider(workspace_id, session_id)
+                await _delete_pat_provider(workspace_id, pat_id, session_id)
+            else:
+                # failed/stopped — sandbox left running for debugging; providers stay
+                # attached and will be cleaned up when the session is stopped/deleted.
+                log.info(
+                    "_run_openshell_agent: skipping provider cleanup for phase=%s session=%d "
+                    "(sandbox still attached — cleanup on explicit stop/delete)",
+                    phase, session_id,
+                )
 
             await _update_db(
                 phase=phase,
@@ -1789,10 +1797,6 @@ async def session_stop(
             _t.cancel()
             log.info("session_stop: cancelled background task %s", _t.get_name())
 
-    # Clean up GitHub credentials providers (App IAT and PAT).
-    await _delete_github_app_provider(ws_id, sid)
-    await _delete_pat_provider(ws_id, session.github_pat_id, sid)
-
     if session.sandbox_name:
         from swarmer import openshell_client
         # Snapshot draft policy chunks before deleting the sandbox so the
@@ -1815,6 +1819,11 @@ async def session_stop(
             flash(request, f"Sandbox deletion failed: {exc}", "warning")
         session.sandbox_name = None
         session.service_url = None
+
+    # Clean up GitHub credentials providers AFTER sandbox deletion — the Gateway
+    # rejects DeleteProvider with FAILED_PRECONDITION if the sandbox is still attached.
+    await _delete_github_app_provider(ws_id, sid)
+    await _delete_pat_provider(ws_id, session.github_pat_id, sid)
 
     from swarmer.session_runs import STOPPED_BY_USER_DETAIL, record_session_run
 
