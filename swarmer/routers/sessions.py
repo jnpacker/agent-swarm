@@ -1070,14 +1070,14 @@ async def _do_launch_openshell(
             })
         provider_names.append(pname)
     # 1b cont. GitHub App IAT — minted above before commit; now register the provider.
-    _github_app_provider_name: str | None = None
+    _app_pname: str | None = None
 
     if _github_app:
         try:
             from swarmer.github_auth import mint_installation_token
             iat = await mint_installation_token(
                 _github_app,
-                repo_names=_session_repo_names,  # always non-empty here
+                repo_names=_session_repo_names or None,  # empty list → None → full-installation scope
             )
             pname = f"swarmer-ws-{ws_id}-github-app-s{session.id}"
             await openshell_client.ensure_provider(pname, "github", {}, credentials={
@@ -1085,7 +1085,7 @@ async def _do_launch_openshell(
                 "GH_TOKEN": iat,
             })
             provider_names.append(pname)
-            _github_app_provider_name = pname
+            _app_pname = pname
             log.info(
                 "_do_launch_openshell: using GitHub App IAT for session %d (repos=%s)",
                 session.id, _session_repo_names or "all",
@@ -1169,7 +1169,7 @@ async def _do_launch_openshell(
     # Serialise GitHub App credentials before ORM object detaches after commit.
     # These are passed to _setup_openshell_sandbox so the refresh loop can re-mint
     # without holding an ORM session.
-    if _github_app and _github_app_provider_name:
+    if _github_app and _app_pname:
         _iat_app_id = _github_app.app_id
         _iat_installation_id = _github_app.installation_id
         _iat_private_key = _github_app.private_key  # decrypts here; stored as plain str
@@ -1183,7 +1183,7 @@ async def _do_launch_openshell(
     # Only used when no GitHub App is active (PAT-only sessions).
     pat_token = (session.github_pat.pat or "") if (not _github_app and session.github_pat) else ""
     # has_git_token signals that a git credential is available (App IAT or PAT).
-    has_git_token = bool(_github_app_provider_name or pat_token)
+    has_git_token = bool(_app_pname or pat_token)
     # Build AGENTS.md content for all modes: resolved prompt + repo context table.
     # TUI/server: written to /sandbox/AGENTS.md, read automatically by the agent.
     # Prompt mode: same content written to /sandbox/AGENTS.md, then piped as the
@@ -1234,7 +1234,7 @@ async def _do_launch_openshell(
             iat_app_id=_iat_app_id,
             iat_installation_id=_iat_installation_id,
             iat_private_key=_iat_private_key,
-            iat_provider_name=_github_app_provider_name or "",
+            iat_provider_name=_app_pname or "",
             iat_repo_names=_iat_repo_names,
             pat_id=session.github_pat.id if session.github_pat else None,
         ),

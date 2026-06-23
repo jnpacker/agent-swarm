@@ -37,11 +37,11 @@ agent-swarm/
     ├── k8s.py                  # Kubernetes utility functions (namespace, pull secrets, image check, extra env vars)
     ├── mcp_catalog.py          # Registry of well-known MCP servers (Jira, etc.) with OAuth defaults
     ├── scheduler.py            # Background asyncio cron scheduler + queue processor + sandbox GC
-     ├── openshell_client.py     # OpenShell sandbox SDK wrapper (async helpers, lazy SDK import)
-     ├── openshell_policy.py     # Network policy builder for OpenShell sandboxes
-     ├── github_app.py           # Resolve workspace GitHub App credentials (user/shared visibility)
-     ├── github_auth.py          # IAT minting (JWT → GitHub REST → token) + refresh loop for long sessions
-     ├── csrf.py                 # CSRF token helpers for server-rendered HTML forms
+    ├── openshell_client.py     # OpenShell sandbox SDK wrapper (async helpers, lazy SDK import)
+    ├── openshell_policy.py     # Network policy builder for OpenShell sandboxes
+    ├── github_app.py           # Resolve workspace GitHub App credentials (user/shared visibility)
+    ├── github_auth.py          # IAT minting (JWT → GitHub REST → token) + refresh loop for long sessions
+    ├── csrf.py                 # CSRF token helpers for server-rendered HTML forms
     ├── agent_tools/            # Strategy pattern for multi-agent support
     │   ├── __init__.py         # AgentToolStrategy ABC
     │   ├── registry.py         # Global registry + aliases (_init() auto-registers all tools)
@@ -54,14 +54,14 @@ agent-swarm/
     │   ├── session_repo.py     # Git repos attached to sessions (cloned into sandbox at launch)
     │   ├── sandbox_env_var.py  # Per-workspace env vars (encrypted at rest, injected into sandboxes)
     │   ├── opencode_secret.py  # Fernet-encrypted provider credentials (GCP/Anthropic/OpenAI/Gemini)
-     │   ├── github_pat.py       # Fernet-encrypted GitHub PATs for HTTPS git auth
-     │   ├── github_app.py       # Fernet-encrypted GitHub App credentials (one per workspace)
-     │   └── mcp_server.py       # MCP server configs with Fernet-encrypted OAuth tokens
+    │   ├── github_pat.py       # Fernet-encrypted GitHub PATs for HTTPS git auth
+    │   ├── github_app.py       # Fernet-encrypted GitHub App credentials (one per workspace)
+    │   └── mcp_server.py       # MCP server configs with Fernet-encrypted OAuth tokens
     ├── routers/                # FastAPI route handlers
     │   ├── auth.py             # /login (token paste + OpenShift OAuth), /logout, /auth/callback
     │   ├── workspaces.py       # CRUD for workspaces
     │   ├── sessions.py         # CRUD + launch/stop/schedule/patch generation + repo management
-    │        ├── secrets.py          # OpenCode secrets, GitHub PATs, GitHub App, pull secrets
+    │   ├── secrets.py          # OpenCode secrets, GitHub PATs, GitHub App, pull secrets
     │   ├── mcp_servers.py      # MCP server CRUD, OAuth 2.1 flow (PKCE + dynamic registration)
     │   ├── chat_proxy.py       # HTTP/SSE/WebSocket reverse proxy for server-mode sessions
     │   └── tui_ws.py           # WebSocket PTY proxy for TUI-mode sessions (K8s exec)
