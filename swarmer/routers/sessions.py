@@ -121,8 +121,8 @@ async def _delete_github_app_provider(workspace_id: int, session_id: int) -> Non
         log.warning("_delete_github_app_provider: failed to delete provider %s", pname, exc_info=True)
 
 
-async def _delete_pat_provider(workspace_id: int, pat_id: int | None) -> None:
-    """Delete the PAT provider from the OpenShell Gateway.
+async def _delete_pat_provider(workspace_id: int, pat_id: int | None, session_id: int | None = None) -> None:
+    """Delete the session-scoped PAT provider from the OpenShell Gateway.
 
     Safe to call when pat_id is None (no PAT was used) — returns immediately.
     """
@@ -130,7 +130,7 @@ async def _delete_pat_provider(workspace_id: int, pat_id: int | None) -> None:
         return
     from swarmer import openshell_client
 
-    pname = f"swarmer-ws-{workspace_id}-github-pat-{pat_id}"
+    pname = f"swarmer-ws-{workspace_id}-github-pat-{pat_id}-s{session_id}" if session_id else f"swarmer-ws-{workspace_id}-github-pat-{pat_id}"
     try:
         await openshell_client.delete_provider(pname)
         log.info("_delete_pat_provider: deleted provider %s", pname)
@@ -1087,7 +1087,7 @@ async def _do_launch_openshell(
             _github_app = None  # signal fallback below
 
     if not _github_app and session.github_pat:
-        pname = f"swarmer-ws-{ws_id}-github-pat-{session.github_pat.id}"
+        pname = f"swarmer-ws-{ws_id}-github-pat-{session.github_pat.id}-s{session.id}"
         pat_token = session.github_pat.pat or ""
         await openshell_client.ensure_provider(pname, "github", {}, credentials={
             "GITHUB_TOKEN": pat_token,
@@ -1598,7 +1598,7 @@ async def _run_openshell_agent(
                     log.warning("Auto-cleanup of sandbox %s failed", sandbox_name, exc_info=True)
                 # Clean up providers on prompt-mode completion.
                 await _delete_github_app_provider(workspace_id, session_id)
-                await _delete_pat_provider(workspace_id, pat_id)
+                await _delete_pat_provider(workspace_id, pat_id, session_id)
 
             await _update_db(
                 phase=phase,
@@ -1778,7 +1778,7 @@ async def session_stop(
 
     # Clean up GitHub credentials providers (App IAT and PAT).
     await _delete_github_app_provider(ws_id, sid)
-    await _delete_pat_provider(ws_id, session.github_pat_id)
+    await _delete_pat_provider(ws_id, session.github_pat_id, sid)
 
     if session.sandbox_name:
         from swarmer import openshell_client
@@ -2502,7 +2502,7 @@ async def session_delete(
 
     # Clean up GitHub credentials providers (App IAT and PAT).
     await _delete_github_app_provider(ws_id, sid)
-    await _delete_pat_provider(ws_id, session.github_pat_id)
+    await _delete_pat_provider(ws_id, session.github_pat_id, sid)
 
     await db.delete(session)
     await db.commit()
