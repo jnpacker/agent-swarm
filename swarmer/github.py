@@ -57,6 +57,12 @@ async def fetch_repo_info(repos: list, pat: str | None) -> dict:
     if pat:
         headers["Authorization"] = f"token {pat}"
 
+    # GitHub App IATs (ghs_...) return permissions based on the App's installation
+    # configuration, not the acting user's access.  The permissions.push field is
+    # unreliable for IATs — treat it as indeterminate to avoid false "No write access"
+    # warnings when the App actually has contents:write permission.
+    _is_app_token = bool(pat and pat.startswith("ghs_"))
+
     async def _check(client: httpx.AsyncClient, repo) -> tuple[int, dict]:
         slug = github_slug(repo.repo_url)
         if not slug:
@@ -68,13 +74,17 @@ async def fetch_repo_info(repos: list, pat: str | None) -> dict:
             if r.status_code == 200:
                 data = r.json()
                 perms = data.get("permissions", {})
+                raw_push = perms.get("push")
+                # For App IATs, suppress a False push value — the App's actual write
+                # access is determined by its installation permissions, not this field.
+                can_push = None if (_is_app_token and not raw_push) else raw_push
                 return repo.id, {
                     "is_public": not data.get("private", True),
-                    "can_push": perms.get("push"),
+                    "can_push": can_push,
                 }
             # 404 → private repo the token can't see (or doesn't exist)
             if r.status_code == 404:
-                return repo.id, {"is_public": None, "can_push": False if pat else None}
+                return repo.id, {"is_public": None, "can_push": False if (pat and not _is_app_token) else None}
             # Any other non-200 (rate-limit, 5xx, …) — don't infer push access
             return repo.id, {"is_public": None, "can_push": None}
         except Exception:

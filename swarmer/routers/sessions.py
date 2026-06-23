@@ -60,12 +60,12 @@ async def _resolve_token_for_repo_check(
 ) -> str | None:
     """Return a GitHub token suitable for repo visibility/access checks.
 
-    Prefers a GitHub App IAT (minted on demand, no side effects).
-    Falls back to the session's assigned PAT.  Returns None when neither
-    is available (unauthenticated checks still work for public repos).
+    If the session has a PAT assigned, use it — the PAT takes priority and
+    the GitHub App is ignored (mirrors the launch credential routing).
+    Otherwise mint a short-lived App IAT for the check.
+    Returns None when neither is available (public repos still show Public pill).
     """
     if session.github_pat:
-        # PAT is always cheap — use it directly.
         return session.github_pat.pat or None
     # No PAT — try minting a short-lived App IAT for the check.
     try:
@@ -964,29 +964,41 @@ async def _do_launch_openshell(
 
     # Extract GitHub repo names BEFORE committing — session.repos relationship
     # attributes are guaranteed accessible while the DB session is still live.
-    # Used to scope the GitHub App IAT to only this session's repos.
+    #
+    # Credential routing: if a PAT is assigned to the session, use it exclusively
+    # and skip the GitHub App entirely.  The PAT is an explicit user choice and
+    # has the right write permissions for that session's repos.  The GitHub App
+    # is only used when no PAT is assigned.
+    from swarmer.github import github_slug as _github_slug
     _session_repo_names: list[str] = []
+    _has_github_repos = False
+
     for _r in (session.repos or []):
         _url = _r.repo_url or ""
         if "github.com" not in _url:
             continue
+        _has_github_repos = True
         try:
-            from swarmer.github import github_slug as _github_slug
             _slug = _github_slug(_url)
             if _slug:
                 _session_repo_names.append(_slug.split("/", 1)[1])
         except Exception:
             log.warning("_do_launch_openshell: could not extract repo name from %r", _url, exc_info=True)
-    _has_github_repos = bool(_session_repo_names)
 
     # Resolve GitHub App before committing (requires DB access).
+    # Skipped entirely when the session has a PAT assigned.
     _github_app = None
-    if _has_github_repos:
+    if _has_github_repos and not session.github_pat:
         try:
             from swarmer.github_app import get_workspace_github_app
             _github_app = await get_workspace_github_app(session.workspace_id, db, user_id=user_id)
         except Exception:
             log.warning("_do_launch_openshell: failed to resolve GitHub App for session %d", session.id, exc_info=True)
+
+    log.info(
+        "_do_launch_openshell: session %d has_github_repos=%s has_pat=%s has_app=%s repos=%s",
+        session.id, _has_github_repos, bool(session.github_pat), bool(_github_app), _session_repo_names,
+    )
 
     # Release the DB connection before long-running gRPC operations. The route
     # handler's session holds an autobegin transaction from earlier SELECTs in
@@ -1132,9 +1144,7 @@ async def _do_launch_openshell(
         _iat_private_key = ""
         _iat_repo_names = []
     # pat_token drives `gh auth setup-git` and git clone in the background task.
-    # When an App IAT is active the sandbox gets GH_TOKEN from the OpenShell provider,
-    # so gh/git will use it automatically — we set pat_token="" to skip the redundant
-    # credential-helper setup that would overwrite the provider-injected token.
+    # Only used when no GitHub App is active (PAT-only sessions).
     pat_token = (session.github_pat.pat or "") if (not _github_app and session.github_pat) else ""
     # has_git_token signals that a git credential is available (App IAT or PAT).
     has_git_token = bool(_github_app_provider_name or pat_token)
