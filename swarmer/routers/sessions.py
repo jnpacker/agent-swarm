@@ -121,6 +121,23 @@ async def _delete_github_app_provider(workspace_id: int, session_id: int) -> Non
         log.warning("_delete_github_app_provider: failed to delete provider %s", pname, exc_info=True)
 
 
+async def _delete_pat_provider(workspace_id: int, pat_id: int | None) -> None:
+    """Delete the PAT provider from the OpenShell Gateway.
+
+    Safe to call when pat_id is None (no PAT was used) — returns immediately.
+    """
+    if not pat_id:
+        return
+    from swarmer import openshell_client
+
+    pname = f"swarmer-ws-{workspace_id}-github-pat-{pat_id}"
+    try:
+        await openshell_client.delete_provider(pname)
+        log.info("_delete_pat_provider: deleted provider %s", pname)
+    except Exception:
+        log.warning("_delete_pat_provider: failed to delete provider %s", pname, exc_info=True)
+
+
 def _build_repo_context(repos, base_path: str = "/sandbox") -> str:
     """Build a markdown section listing workspace repositories.
 
@@ -1207,6 +1224,7 @@ async def _do_launch_openshell(
             iat_private_key=_iat_private_key,
             iat_provider_name=_github_app_provider_name or "",
             iat_repo_names=_iat_repo_names,
+            pat_id=session.github_pat.id if session.github_pat else None,
         ),
         name=f"openshell-setup-{session.id}",
     )
@@ -1239,6 +1257,7 @@ async def _setup_openshell_sandbox(
     iat_private_key: str = "",
     iat_provider_name: str = "",
     iat_repo_names: list[str] | None = None,
+    pat_id: int | None = None,  # PAT DB ID for provider cleanup on completion
 ) -> None:
     """Background task: create sandbox and run all setup steps, then launch agent."""
     from swarmer import openshell_client
@@ -1429,6 +1448,7 @@ async def _setup_openshell_sandbox(
                 mode=mode,
                 agent_tool=tool_name,
                 env_vars=env_vars,
+                pat_id=pat_id,
             ),
             name=f"openshell-agent-{session_id}",
         )
@@ -1472,6 +1492,7 @@ async def _run_openshell_agent(
     mode: str,
     agent_tool: str,
     env_vars: dict | None = None,
+    pat_id: int | None = None,
 ) -> None:
     """Background task: starts the agent in the sandbox and tracks completion."""
     from swarmer import openshell_client
@@ -1575,8 +1596,9 @@ async def _run_openshell_agent(
                     new_sandbox_name = None
                 except Exception:
                     log.warning("Auto-cleanup of sandbox %s failed", sandbox_name, exc_info=True)
-                # Clean up per-session GitHub App IAT provider on prompt-mode completion.
+                # Clean up providers on prompt-mode completion.
                 await _delete_github_app_provider(workspace_id, session_id)
+                await _delete_pat_provider(workspace_id, pat_id)
 
             await _update_db(
                 phase=phase,
@@ -1754,8 +1776,9 @@ async def session_stop(
             _t.cancel()
             log.info("session_stop: cancelled background task %s", _t.get_name())
 
-    # Clean up per-session GitHub App IAT provider (cancels refresh loop too).
+    # Clean up GitHub credentials providers (App IAT and PAT).
     await _delete_github_app_provider(ws_id, sid)
+    await _delete_pat_provider(ws_id, session.github_pat_id)
 
     if session.sandbox_name:
         from swarmer import openshell_client
@@ -2477,8 +2500,9 @@ async def session_delete(
         except Exception as exc:
             flash(request, f"Sandbox deletion failed: {exc}", "warning")
 
-    # Clean up per-session GitHub App IAT provider (safe no-op if none was used).
+    # Clean up GitHub credentials providers (App IAT and PAT).
     await _delete_github_app_provider(ws_id, sid)
+    await _delete_pat_provider(ws_id, session.github_pat_id)
 
     await db.delete(session)
     await db.commit()
