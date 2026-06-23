@@ -998,31 +998,38 @@ async def _do_launch_openshell(
     # Resolve GitHub credentials: GitHub App (IAT) takes priority over PAT.
     # Option A: Swarmer mints the IAT server-side; the raw PEM never enters the sandbox.
     # For TUI/server mode, a refresh loop re-mints before the 1-hour expiry.
+    #
+    # IAT is only minted when the session has GitHub repos — a session with no
+    # repos needs no git credential at all, and sending repositories=[] to the
+    # GitHub API would cause a 422 Validation Error.
     _github_app = None
     _github_app_provider_name: str | None = None
-    try:
-        from swarmer.github_app import get_workspace_github_app
-        _github_app = await get_workspace_github_app(session.workspace_id, db, user_id=user_id)
-    except Exception:
-        log.warning("_do_launch_openshell: failed to resolve GitHub App for session %d", session.id, exc_info=True)
+    _session_repo_names: list[str] = []
+
+    # Identify GitHub repos attached to this session (non-GitHub repos need no token).
+    from swarmer.github import github_slug as _github_slug
+    for _r in (session.repos or []):
+        try:
+            _slug = _github_slug(_r.repo_url)
+            if _slug:
+                _session_repo_names.append(_slug.split("/", 1)[1])
+        except Exception:
+            pass
+    _has_github_repos = bool(_session_repo_names)
+
+    if _has_github_repos:
+        try:
+            from swarmer.github_app import get_workspace_github_app
+            _github_app = await get_workspace_github_app(session.workspace_id, db, user_id=user_id)
+        except Exception:
+            log.warning("_do_launch_openshell: failed to resolve GitHub App for session %d", session.id, exc_info=True)
 
     if _github_app:
         try:
             from swarmer.github_auth import mint_installation_token
-            from swarmer.github import github_slug as _github_slug
-            # Scope the IAT to only the repos attached to this session.
-            # Extract bare repo names (e.g. "agent-swarm") from the full slugs.
-            _session_repo_names: list[str] = []
-            for _r in (session.repos or []):
-                try:
-                    _slug = _github_slug(_r.repo_url)
-                    if _slug:
-                        _session_repo_names.append(_slug.split("/", 1)[1])
-                except Exception:
-                    pass
             iat = await mint_installation_token(
                 _github_app,
-                repo_names=_session_repo_names or None,
+                repo_names=_session_repo_names,  # always non-empty here
             )
             pname = f"swarmer-ws-{ws_id}-github-app-s{session.id}"
             await openshell_client.ensure_provider(pname, "github", {}, credentials={
