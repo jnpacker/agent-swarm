@@ -1608,9 +1608,10 @@ async def _run_openshell_agent(
                     new_sandbox_name = None
                 except Exception:
                     log.warning("Auto-cleanup of sandbox %s failed", sandbox_name, exc_info=True)
-                # Clean up providers on prompt-mode completion.
-                await _delete_github_app_provider(workspace_id, session_id)
-                await _delete_pat_provider(workspace_id, pat_id, session_id)
+
+            # Clean up providers on any terminal phase (succeeded, failed, stopped).
+            await _delete_github_app_provider(workspace_id, session_id)
+            await _delete_pat_provider(workspace_id, pat_id, session_id)
 
             await _update_db(
                 phase=phase,
