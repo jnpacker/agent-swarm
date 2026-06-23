@@ -193,6 +193,9 @@ async def _collect_orphaned_sandboxes(db) -> None:
                     if session:
                         session.sandbox_name = None
                         db_dirty = True
+                        # Clean up per-session GitHub App IAT provider.
+                        from swarmer.routers.sessions import _delete_github_app_provider
+                        await _delete_github_app_provider(session.workspace_id, session_id)
                 except Exception:
                     log.warning("sandbox-gc: failed to delete zombie %s", name, exc_info=True)
             if db_dirty:

@@ -52,6 +52,40 @@ def _is_valid_ref_name(name: str) -> bool:
     return _INVALID_REF_RE.search(name) is None
 
 
+def _github_app_provider_name(workspace_id: int, session_id: int) -> str:
+    """Deterministic per-session GitHub App provider name.
+
+    Session-scoped so multiple sessions in the same workspace each get an
+    independent provider + IAT.  Derivable from IDs alone — no DB lookup needed
+    at cleanup time.
+    """
+    return f"swarmer-ws-{workspace_id}-github-app-s{session_id}"
+
+
+async def _delete_github_app_provider(workspace_id: int, session_id: int) -> None:
+    """Delete the session-scoped GitHub App provider from the OpenShell Gateway.
+
+    Safe to call even when no GitHub App was used — delete_provider is a no-op
+    if the provider does not exist (NOT_FOUND is suppressed by the client).
+    Also cancels the iat-refresh background task for the session.
+    """
+    from swarmer import openshell_client
+
+    pname = _github_app_provider_name(workspace_id, session_id)
+    # Cancel refresh loop first so it cannot race and re-create the provider
+    # after we delete it.
+    for _t in asyncio.all_tasks():
+        if _t.get_name() == f"iat-refresh-{session_id}":
+            _t.cancel()
+            log.info("_delete_github_app_provider: cancelled iat-refresh task for session %d", session_id)
+            break
+    try:
+        await openshell_client.delete_provider(pname)
+        log.info("_delete_github_app_provider: deleted provider %s", pname)
+    except Exception:
+        log.warning("_delete_github_app_provider: failed to delete provider %s", pname, exc_info=True)
+
+
 def _build_repo_context(repos, base_path: str = "/sandbox") -> str:
     """Build a markdown section listing workspace repositories.
 
@@ -941,7 +975,7 @@ async def _do_launch_openshell(
         try:
             from swarmer.github_auth import mint_installation_token
             iat = await mint_installation_token(_github_app)
-            pname = f"swarmer-ws-{ws_id}-github-app"
+            pname = f"swarmer-ws-{ws_id}-github-app-s{session.id}"
             await openshell_client.ensure_provider(pname, "github", {}, credentials={
                 "GITHUB_TOKEN": iat,
                 "GH_TOKEN": iat,
@@ -1071,6 +1105,7 @@ async def _do_launch_openshell(
     asyncio.create_task(
         _setup_openshell_sandbox(
             session_id=session.id,
+            workspace_id=session.workspace_id,
             provider_names=provider_names,
             env_vars=env_vars,
             policy=policy,
@@ -1100,6 +1135,7 @@ async def _do_launch_openshell(
 
 async def _setup_openshell_sandbox(
     session_id: int,
+    workspace_id: int,
     provider_names: list[str],
     env_vars: dict,
     policy,
@@ -1307,6 +1343,7 @@ async def _setup_openshell_sandbox(
         asyncio.create_task(
             _run_openshell_agent(
                 session_id=session_id,
+                workspace_id=workspace_id,
                 sandbox_name=ref.name,
                 cmd=["sh", "-c", agent_cmd],
                 mode=mode,
@@ -1348,6 +1385,7 @@ async def _setup_openshell_sandbox(
 
 async def _run_openshell_agent(
     session_id: int,
+    workspace_id: int,
     sandbox_name: str,
     cmd: list[str],
     mode: str,
@@ -1456,6 +1494,8 @@ async def _run_openshell_agent(
                     new_sandbox_name = None
                 except Exception:
                     log.warning("Auto-cleanup of sandbox %s failed", sandbox_name, exc_info=True)
+                # Clean up per-session GitHub App IAT provider on prompt-mode completion.
+                await _delete_github_app_provider(workspace_id, session_id)
 
             await _update_db(
                 phase=phase,
@@ -1632,6 +1672,9 @@ async def session_stop(
         if _t.get_name() in _task_names:
             _t.cancel()
             log.info("session_stop: cancelled background task %s", _t.get_name())
+
+    # Clean up per-session GitHub App IAT provider (cancels refresh loop too).
+    await _delete_github_app_provider(ws_id, sid)
 
     if session.sandbox_name:
         from swarmer import openshell_client
@@ -2352,6 +2395,9 @@ async def session_delete(
             await openshell_client.delete_sandbox(session.sandbox_name)
         except Exception as exc:
             flash(request, f"Sandbox deletion failed: {exc}", "warning")
+
+    # Clean up per-session GitHub App IAT provider (safe no-op if none was used).
+    await _delete_github_app_provider(ws_id, sid)
 
     await db.delete(session)
     await db.commit()
