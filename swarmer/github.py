@@ -92,7 +92,9 @@ async def fetch_repo_info(repos: list, pat: str | None) -> dict:
 
     async with httpx.AsyncClient(timeout=5) as client:
         results = await asyncio.gather(*[_check(client, r) for r in repos])
-    return dict(results)
+    result_dict = dict(results)
+    log.debug("fetch_repo_info: token_present=%s results=%s", bool(pat), result_dict)
+    return result_dict
 
 
 async def list_repos_for_pat(pat) -> list[dict] | str:

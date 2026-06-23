@@ -66,7 +66,12 @@ async def _resolve_token_for_repo_check(
     Returns None when neither is available (public repos still show Public pill).
     """
     if session.github_pat:
-        return session.github_pat.pat or None
+        token = session.github_pat.pat or None
+        log.debug(
+            "_resolve_token_for_repo_check: session %d using PAT id=%d token_present=%s",
+            session.id, session.github_pat.id, bool(token),
+        )
+        return token
     # No PAT — try minting a short-lived App IAT for the check.
     try:
         from swarmer.github_app import get_workspace_github_app
@@ -516,12 +521,14 @@ async def session_detail(
         request.session["tui_tokens"] = tokens
 
     model_options = await _get_model_options(ws_id, db, session.agent_tool)
-    from swarmer.github_app import get_workspace_github_app as _get_ws_github_app
-    _ws_github_app = await _get_ws_github_app(ws_id, db, user_id=_current_user(request))
+    # Resolve repo check token BEFORE any additional DB queries — extra queries
+    # on the same async session can interfere with loaded relationship attributes.
     _repo_check_token = await _resolve_token_for_repo_check(
         session, db, user_id=_current_user(request)
     )
     repo_info = await _fetch_repo_info(session.repos, _repo_check_token)
+    from swarmer.github_app import get_workspace_github_app as _get_ws_github_app
+    _ws_github_app = await _get_ws_github_app(ws_id, db, user_id=_current_user(request))
 
     _tools = all_tools()
     _avail = await asyncio.gather(
@@ -2772,12 +2779,15 @@ async def repo_items(
     session = result.scalar_one_or_none()
     if session is None or session.workspace_id != ws_id:
         return HTMLResponse("")
+    # Resolve token BEFORE additional DB queries to avoid async session interference.
     _repo_check_token = await _resolve_token_for_repo_check(
         session, db, user_id=_current_user(request)
     )
     repo_info = await _fetch_repo_info(session.repos, _repo_check_token)
     from swarmer.github_app import get_workspace_github_app
     _app = await get_workspace_github_app(ws_id, db, user_id=_current_user(request))
+    log.debug("repo_items: session %d pat=%s token_present=%s repo_info=%s",
+              session.id, bool(session.github_pat), bool(_repo_check_token), repo_info)
     return templates.TemplateResponse(
         request,
         "sessions/_repo_items.html",
