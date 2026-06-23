@@ -962,6 +962,32 @@ async def _do_launch_openshell(
     )
     extra_env: dict[str, str] = {row.key: row.value for row in _ev_result.scalars().all()}
 
+    # Extract GitHub repo names BEFORE committing — session.repos relationship
+    # attributes are guaranteed accessible while the DB session is still live.
+    # Used to scope the GitHub App IAT to only this session's repos.
+    _session_repo_names: list[str] = []
+    for _r in (session.repos or []):
+        _url = _r.repo_url or ""
+        if "github.com" not in _url:
+            continue
+        try:
+            from swarmer.github import github_slug as _github_slug
+            _slug = _github_slug(_url)
+            if _slug:
+                _session_repo_names.append(_slug.split("/", 1)[1])
+        except Exception:
+            log.warning("_do_launch_openshell: could not extract repo name from %r", _url, exc_info=True)
+    _has_github_repos = bool(_session_repo_names)
+
+    # Resolve GitHub App before committing (requires DB access).
+    _github_app = None
+    if _has_github_repos:
+        try:
+            from swarmer.github_app import get_workspace_github_app
+            _github_app = await get_workspace_github_app(session.workspace_id, db, user_id=user_id)
+        except Exception:
+            log.warning("_do_launch_openshell: failed to resolve GitHub App for session %d", session.id, exc_info=True)
+
     # Release the DB connection before long-running gRPC operations. The route
     # handler's session holds an autobegin transaction from earlier SELECTs in
     # _do_launch(); committing here ends that transaction and returns the
@@ -995,34 +1021,8 @@ async def _do_launch_openshell(
                 "GOOGLE_GENERATIVE_AI_API_KEY": oc_secret.google_api_key,
             })
         provider_names.append(pname)
-    # Resolve GitHub credentials: GitHub App (IAT) takes priority over PAT.
-    # Option A: Swarmer mints the IAT server-side; the raw PEM never enters the sandbox.
-    # For TUI/server mode, a refresh loop re-mints before the 1-hour expiry.
-    #
-    # IAT is only minted when the session has GitHub repos — a session with no
-    # repos needs no git credential at all, and sending repositories=[] to the
-    # GitHub API would cause a 422 Validation Error.
-    _github_app = None
+    # 1b cont. GitHub App IAT — minted above before commit; now register the provider.
     _github_app_provider_name: str | None = None
-    _session_repo_names: list[str] = []
-
-    # Identify GitHub repos attached to this session (non-GitHub repos need no token).
-    from swarmer.github import github_slug as _github_slug
-    for _r in (session.repos or []):
-        try:
-            _slug = _github_slug(_r.repo_url)
-            if _slug:
-                _session_repo_names.append(_slug.split("/", 1)[1])
-        except Exception:
-            pass
-    _has_github_repos = bool(_session_repo_names)
-
-    if _has_github_repos:
-        try:
-            from swarmer.github_app import get_workspace_github_app
-            _github_app = await get_workspace_github_app(session.workspace_id, db, user_id=user_id)
-        except Exception:
-            log.warning("_do_launch_openshell: failed to resolve GitHub App for session %d", session.id, exc_info=True)
 
     if _github_app:
         try:

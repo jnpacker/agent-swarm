@@ -86,6 +86,30 @@ async def mint_installation_token(
         )
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(url, headers=headers, json=body if body else None)
+        if resp.status_code == 422 and body:
+            # Repo-scoped request rejected — the repo may not be installed under
+            # this installation (e.g. App only has access to specific repos and
+            # the session repo isn't one of them).  Fall back to full-installation
+            # scope rather than failing the entire launch.
+            try:
+                _err = resp.json()
+            except Exception:
+                _err = resp.text
+            log.warning(
+                "github_auth: repo-scoped IAT rejected (422) for installation_id=%s "
+                "repos=%s error=%s — retrying with full-installation scope",
+                app.installation_id, repo_names, _err,
+            )
+            resp = await client.post(url, headers=headers, json=None)
+        if not resp.is_success:
+            try:
+                _err = resp.json()
+            except Exception:
+                _err = resp.text
+            log.warning(
+                "github_auth: IAT request failed %d for installation_id=%s response=%s",
+                resp.status_code, app.installation_id, _err,
+            )
         resp.raise_for_status()
         data = resp.json()
     token: str = data["token"]
