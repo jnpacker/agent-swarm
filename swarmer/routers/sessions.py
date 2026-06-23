@@ -125,17 +125,29 @@ async def _delete_pat_provider(workspace_id: int, pat_id: int | None, session_id
     """Delete the session-scoped PAT provider from the OpenShell Gateway.
 
     Safe to call when pat_id is None (no PAT was used) — returns immediately.
+    Also cleans up the legacy workspace-scoped name (swarmer-ws-{ws}-github-pat-{pat})
+    for sessions launched before the per-session naming change.
     """
     if not pat_id:
         return
     from swarmer import openshell_client
 
-    pname = f"swarmer-ws-{workspace_id}-github-pat-{pat_id}-s{session_id}" if session_id else f"swarmer-ws-{workspace_id}-github-pat-{pat_id}"
+    # Session-scoped name (current format).
+    if session_id:
+        pname = f"swarmer-ws-{workspace_id}-github-pat-{pat_id}-s{session_id}"
+        try:
+            await openshell_client.delete_provider(pname)
+            log.info("_delete_pat_provider: deleted provider %s", pname)
+        except Exception:
+            log.warning("_delete_pat_provider: failed to delete provider %s", pname, exc_info=True)
+
+    # Legacy workspace-scoped name — clean up if still present.
+    legacy_pname = f"swarmer-ws-{workspace_id}-github-pat-{pat_id}"
     try:
-        await openshell_client.delete_provider(pname)
-        log.info("_delete_pat_provider: deleted provider %s", pname)
+        await openshell_client.delete_provider(legacy_pname)
+        log.info("_delete_pat_provider: deleted legacy provider %s", legacy_pname)
     except Exception:
-        log.warning("_delete_pat_provider: failed to delete provider %s", pname, exc_info=True)
+        log.warning("_delete_pat_provider: failed to delete legacy provider %s", legacy_pname, exc_info=True)
 
 
 def _build_repo_context(repos, base_path: str = "/sandbox") -> str:
