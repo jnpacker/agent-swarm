@@ -1430,7 +1430,7 @@ async def _setup_openshell_sandbox(
                 installation_id = iat_installation_id
                 private_key = iat_private_key
 
-                asyncio.create_task(
+            asyncio.create_task(
                 start_token_refresh_loop(
                     app=_AppSnap(),  # type: ignore[arg-type]
                     session_id=session_id,
