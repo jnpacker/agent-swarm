@@ -50,75 +50,92 @@ def github_slug(url: str) -> str | None:
 async def fetch_repo_info(repos: list, pat: str | None) -> dict:
     """Return per-repo visibility and push-access info via the GitHub API.
 
-    Result shape: {repo_id: {"is_public": bool|None, "can_push": bool|None}}
-    None means the check could not be performed (non-GitHub URL, API error, etc.)
-    """
-    headers = {"Accept": "application/vnd.github+json"}
-    if pat:
-        headers["Authorization"] = f"token {pat}"
+    Rules (caller is responsible for selecting the right token):
+      - No token (pat=None): do nothing — return all-None for every repo.
+      - Token present: determine public/private and whether the token can push.
 
-    # GitHub App IATs (ghs_...) return permissions based on the App's installation
-    # configuration, not the acting user's access.  The permissions.push field is
-    # unreliable for IATs — treat it as indeterminate to avoid false "No write access"
-    # warnings when the App actually has contents:write permission.
-    _is_app_token = bool(pat and pat.startswith("ghs_"))
+    Token-scope caveat for fine-grained PATs (github_pat_...):
+      GitHub's permissions.push field reflects the *user's* collaborator status,
+      not whether the token's repository scope includes the repo.  A fine-grained
+      PAT held by an admin will show push=True on a public repo even if that repo
+      is not listed in the token's allowed repositories.  To detect this we make a
+      second call to GET /repos/{slug}/git/refs which requires actual token-level
+      repo access — a 403 there means the token cannot access the repo regardless
+      of what permissions.push says.
+
+    Result shape: {repo_id: {"is_public": bool|None, "can_push": bool|None}}
+      is_public: True=public, False=private, None=could not determine
+      can_push:  True=confirmed write access, False=no write access, None=skipped (no token)
+    """
+    # No credential — nothing to check.
+    if not pat:
+        return {r.id: {"is_public": None, "can_push": None} for r in repos}
+
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"token {pat}",
+    }
+    _is_fine_grained = pat.startswith("github_pat_")
+    _is_app_token = pat.startswith("ghs_")
 
     async def _check(client: httpx.AsyncClient, repo) -> tuple[int, dict]:
         slug = github_slug(repo.repo_url)
         if not slug:
-            return repo.id, {"is_public": None, "can_push": None}
+            return repo.id, {"is_public": None, "can_push": False}
         try:
-            r = await client.get(
-                f"https://api.github.com/repos/{slug}", headers=headers
-            )
+            r = await client.get(f"https://api.github.com/repos/{slug}", headers=headers)
+
             if r.status_code == 200:
                 data = r.json()
-                perms = data.get("permissions")
-                if perms is not None:
-                    raw_push = perms.get("push")
-                    # For App IATs, suppress a False push value — the App's actual write
-                    # access is determined by its installation permissions, not this field.
-                    can_push = None if (_is_app_token and not raw_push) else raw_push
-                elif pat and not _is_app_token:
-                    # Authenticated PAT but no permissions object — GitHub only includes
-                    # permissions when the token has explicit collaborator access.
-                    # Absence means no write access for this token.
-                    can_push = False
-                else:
-                    # Unauthenticated or App IAT without permissions — indeterminate.
-                    can_push = None
-                return repo.id, {
-                    "is_public": not data.get("private", True),
-                    "can_push": can_push,
-                }
-            # 404 → private repo the token can't see (or doesn't exist)
-            if r.status_code == 404:
-                return repo.id, {"is_public": None, "can_push": False if (pat and not _is_app_token) else None}
-            # 401 → token is invalid/expired — retry unauthenticated so public
-            # repos still show a Public pill. Write access is False: an invalid
-            # credential cannot clone or push regardless of repo permissions.
+                is_public = not data.get("private", True)
+                perms = data.get("permissions", {})
+                push_from_perms = bool(perms.get("push"))
+
+                if not push_from_perms:
+                    if _is_app_token:
+                        # App IAT: permissions.push=False is unreliable — the App's actual
+                        # write access is determined by its installation permissions, not
+                        # this field. Treat as indeterminate so no false "No write access".
+                        return repo.id, {"is_public": is_public, "can_push": None}
+                    # PAT: push=False is definitive.
+                    return repo.id, {"is_public": is_public, "can_push": False}
+
+                if _is_fine_grained:
+                    # permissions.push reflects user collaborator status, not token scope.
+                    # Probe with a token-scoped read endpoint to confirm actual access.
+                    r2 = await client.get(
+                        f"https://api.github.com/repos/{slug}/git/refs",
+                        headers=headers,
+                    )
+                    if r2.status_code == 403:
+                        # Token does not include this repo in its scope.
+                        log.debug(
+                            "fetch_repo_info: fine-grained PAT excluded from %s (refs 403)", slug
+                        )
+                        return repo.id, {"is_public": is_public, "can_push": False}
+
+                return repo.id, {"is_public": is_public, "can_push": True}
+
             if r.status_code == 401:
+                # Token invalid/expired — retry unauthenticated for public/private visibility.
                 log.warning("fetch_repo_info: 401 for %s — retrying unauthenticated", slug)
                 r2 = await client.get(
                     f"https://api.github.com/repos/{slug}",
                     headers={"Accept": "application/vnd.github+json"},
                 )
-                if r2.status_code == 200:
-                    data2 = r2.json()
-                    return repo.id, {
-                        "is_public": not data2.get("private", True),
-                        "can_push": False,  # credential invalid — no write access
-                    }
-                return repo.id, {"is_public": None, "can_push": False}
-            # Any other non-200 (rate-limit, 5xx, …) — don't infer push access
-            return repo.id, {"is_public": None, "can_push": None}
+                is_public = not r2.json().get("private", True) if r2.status_code == 200 else None
+                return repo.id, {"is_public": is_public, "can_push": False}
+
+            # 404, 403, or anything else → no write access.
+            return repo.id, {"is_public": None, "can_push": False}
+
         except Exception:
-            return repo.id, {"is_public": None, "can_push": None}
+            return repo.id, {"is_public": None, "can_push": False}
 
     async with httpx.AsyncClient(timeout=5) as client:
         results = await asyncio.gather(*[_check(client, r) for r in repos])
     result_dict = dict(results)
-    log.debug("fetch_repo_info: token_present=%s results=%s", bool(pat), result_dict)
+    log.debug("fetch_repo_info: fine_grained=%s results=%s", _is_fine_grained, result_dict)
     return result_dict
 
 

@@ -58,12 +58,12 @@ async def _resolve_token_for_repo_check(
     db: AsyncSession,
     user_id: str = "",
 ) -> str | None:
-    """Return a GitHub token suitable for repo visibility/access checks.
+    """Return a token for repo visibility/access checks, or None (= do nothing).
 
-    If the session has a PAT assigned, use it — the PAT takes priority and
-    the GitHub App is ignored (mirrors the launch credential routing).
-    Otherwise mint a short-lived App IAT for the check.
-    Returns None when neither is available (public repos still show Public pill).
+    Priority:
+      1. Session PAT — if assigned, use it and ignore any GitHub App.
+      2. GitHub App IAT — minted on the fly if no PAT and an App is configured.
+      3. None — no credential configured; caller skips the check entirely.
     """
     if session.github_pat:
         token = session.github_pat.pat or None
@@ -72,7 +72,7 @@ async def _resolve_token_for_repo_check(
             session.id, session.github_pat.id, bool(token),
         )
         return token
-    # No PAT — try minting a short-lived App IAT for the check.
+    # No PAT — try minting a short-lived App IAT.
     try:
         from swarmer.github_app import get_workspace_github_app
         from swarmer.github_auth import mint_installation_token
