@@ -183,7 +183,14 @@ async def _get_model_options(
         select(OpencodeSecret).where(OpencodeSecret.workspace_id == ws_id)
     )
     oc = result.scalar_one_or_none()
-    return tool.get_model_options(oc)
+    # Check gateway for Vertex AI provider — ADC is stored on OpenShell, not Swarmer DB.
+    has_vertex = False
+    try:
+        from swarmer import openshell_client
+        has_vertex = await openshell_client.provider_exists(f"swarmer-ws-{ws_id}-google-cloud")
+    except Exception:
+        pass
+    return tool.get_model_options(oc, has_vertex=has_vertex)
 
 router = APIRouter()
 templates = Jinja2Templates(directory="swarmer/templates")
@@ -808,7 +815,7 @@ def _build_expected_hosts(model: str, repos_data: list[dict], tool_name: str, mo
 
     # AI provider endpoints based on model prefix
     provider = model.split("/")[0] if "/" in model else ""
-    if provider in ("google", "vertexai"):
+    if provider in ("google", "vertexai", "google-vertex-anthropic"):
         hosts.add("generativelanguage.googleapis.com")
         hosts.add("*.aiplatform.googleapis.com")
         hosts.add("oauth2.googleapis.com")
@@ -913,7 +920,13 @@ async def _do_launch(session: Session, ws: Workspace, db: AsyncSession, user_id:
                 break
     if oc_secret is None and _oc_all:
         oc_secret = _oc_all[0]
-    has_adc = oc_secret.has_adc if oc_secret else False
+    # has_adc: check gateway for google-cloud provider (ADC stored on OpenShell, not DB)
+    has_adc = False
+    try:
+        from swarmer import openshell_client as _oc_client
+        has_adc = await _oc_client.provider_exists(f"swarmer-ws-{session.workspace_id}-google-cloud")
+    except Exception:
+        pass
     has_gemini = bool(oc_secret and oc_secret.google_api_key_enc)
 
     # Fetch enabled & authenticated MCP servers for this workspace
@@ -1069,6 +1082,19 @@ async def _do_launch_openshell(
                 "GOOGLE_GENERATIVE_AI_API_KEY": oc_secret.google_api_key,
             })
         provider_names.append(pname)
+    # Vertex AI via google-cloud provider — ADC is stored on the gateway (not in Swarmer DB).
+    # Attach the provider if it already exists (created via the secrets UI).
+    _vertex_pname = f"swarmer-ws-{ws_id}-google-cloud"
+    _has_google_cloud_provider = False
+    try:
+        if await openshell_client.provider_exists(_vertex_pname):
+            provider_names.append(_vertex_pname)
+            _has_google_cloud_provider = True
+    except Exception:
+        log.warning(
+            "_do_launch_openshell: could not check google-cloud provider for session %d",
+            session.id, exc_info=True,
+        )
     # 1b cont. GitHub App IAT — minted above before commit; now register the provider.
     _app_pname: str | None = None
 
@@ -1148,6 +1174,7 @@ async def _do_launch_openshell(
         model=model,
         prompt_sources=list(prompt_sources or []),
         custom_policies=_custom_policies or None,
+        has_google_cloud_provider=_has_google_cloud_provider,
     )
 
     # Capture serialisable data for the background task before committing.

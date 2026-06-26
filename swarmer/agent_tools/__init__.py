@@ -54,7 +54,7 @@ class AgentToolStrategy(ABC):
         return True
 
     @abstractmethod
-    def get_model_options(self, secret=None) -> list[dict]:
+    def get_model_options(self, secret=None, has_vertex: bool = False) -> list[dict]:
         ...
 
     @abstractmethod
