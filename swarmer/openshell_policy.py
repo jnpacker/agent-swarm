@@ -294,7 +294,7 @@ def _build_google_cloud_provider_block(agent_tool: str) -> dict:
     return {
         "name": "google-cloud-provider",
         "endpoints": [
-            _endpoint("aiplatform.googleapis.com"),
+            _endpoint("*.aiplatform.googleapis.com"),
             _endpoint("api.github.com"),
         ],
         "binaries": binaries,

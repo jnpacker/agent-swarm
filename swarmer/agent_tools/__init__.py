@@ -58,5 +58,5 @@ class AgentToolStrategy(ABC):
         ...
 
     @abstractmethod
-    def get_default_model(self, has_adc: bool, has_gemini: bool) -> str:
+    def get_default_model(self, has_adc: bool) -> str:
         ...

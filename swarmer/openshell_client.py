@@ -14,10 +14,19 @@ import logging
 import pathlib
 import queue
 import shlex
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+# ── provider_exists TTL cache ─────────────────────────────────────────────────
+# Avoids a gRPC round-trip on every page-load that renders model options or the
+# secrets status badge.  Cache entries expire after _PROVIDER_CACHE_TTL seconds.
+# Invalidated explicitly by create_google_cloud_provider / delete_provider.
+
+_PROVIDER_CACHE_TTL: float = 30.0
+_provider_cache: dict[str, tuple[bool, float]] = {}  # name → (exists, expires_at)
 
 
 def _get_client():
@@ -150,10 +159,23 @@ async def delete_provider(name: str, client=None) -> None:
             raise
 
     await asyncio.to_thread(_do_delete)
+    _provider_cache.pop(name, None)  # invalidate cached existence check
 
 
 async def provider_exists(name: str, client=None) -> bool:
-    """Return True if a named provider exists on the gateway."""
+    """Return True if a named provider exists on the gateway.
+
+    Results are cached for _PROVIDER_CACHE_TTL seconds to avoid a gRPC round-trip
+    on every page render.  The cache is invalidated by create_google_cloud_provider
+    and delete_provider.
+    """
+    now = time.monotonic()
+    cached = _provider_cache.get(name)
+    if cached is not None:
+        result, expires_at = cached
+        if now < expires_at:
+            return result
+
     from openshell._proto import openshell_pb2
     import grpc
 
@@ -171,7 +193,9 @@ async def provider_exists(name: str, client=None) -> bool:
                 return False
             raise
 
-    return await asyncio.to_thread(_do_check)
+    result = await asyncio.to_thread(_do_check)
+    _provider_cache[name] = (result, now + _PROVIDER_CACHE_TTL)
+    return result
 
 
 async def create_google_cloud_provider(
@@ -195,6 +219,8 @@ async def create_google_cloud_provider(
         credentials={"GCP_ADC_ACCESS_TOKEN": "__placeholder__"},
         client=client,
     )
+    # Provider now exists — update cache so the next page load doesn't need an RPC.
+    _provider_cache[name] = (True, time.monotonic() + _PROVIDER_CACHE_TTL)
 
 
 async def configure_google_cloud_provider(

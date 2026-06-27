@@ -139,7 +139,7 @@ class OpenCodeStrategy(AgentToolStrategy):
             ])
         return options
 
-    def get_default_model(self, has_adc: bool, has_gemini: bool) -> str:
+    def get_default_model(self, has_adc: bool) -> str:
         if has_adc:
             return "google-vertex-anthropic/claude-sonnet-4-6@default"
         return "google/gemini-3.1-pro-preview"

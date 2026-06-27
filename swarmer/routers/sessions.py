@@ -927,8 +927,6 @@ async def _do_launch(session: Session, ws: Workspace, db: AsyncSession, user_id:
         has_adc = await _oc_client.provider_exists(f"swarmer-ws-{session.workspace_id}-google-cloud")
     except Exception:
         pass
-    has_gemini = bool(oc_secret and oc_secret.google_api_key_enc)
-
     # Fetch enabled & authenticated MCP servers for this workspace
     from swarmer.routers.mcp_servers import get_enabled_mcp_servers
     all_ws_mcp = await get_enabled_mcp_servers(session.workspace_id, db, user_id=user_id)
@@ -969,7 +967,6 @@ async def _do_launch(session: Session, ws: Workspace, db: AsyncSession, user_id:
         suffix=suffix,
         oc_secret=oc_secret,
         has_adc=has_adc,
-        has_gemini=has_gemini,
         mcp_servers=mcp_servers,
         resolved_prompt=resolved_prompt,
         prompt_sources=prompt_sources,
@@ -984,7 +981,6 @@ async def _do_launch_openshell(
     suffix: str,
     oc_secret,
     has_adc: bool,
-    has_gemini: bool,
     mcp_servers: list | None,
     resolved_prompt: str,
     prompt_sources: list | None = None,
@@ -1000,7 +996,7 @@ async def _do_launch_openshell(
     if session.model and tool.is_valid_model(session.model):
         model = session.model
     else:
-        model = tool.get_default_model(has_adc, has_gemini)
+        model = tool.get_default_model(has_adc)
     model = model.strip("\r\n")  # strip any stray line endings before embedding in shell commands
 
     # Query workspace env vars from DB before releasing the connection.
