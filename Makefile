@@ -8,7 +8,7 @@
 # Container image settings
 IMAGE        ?= swarmer
 IMAGE_TAG    ?= $(shell cat VERSION)
-REGISTRY     ?=
+REGISTRY     ?= $(shell grep '^REGISTRY=' .push-defaults 2>/dev/null | cut -d= -f2-)
 # If REGISTRY is set, full ref is REGISTRY/IMAGE:TAG, otherwise IMAGE:TAG
 IMAGE_REF     = $(if $(REGISTRY),$(REGISTRY)/$(IMAGE):$(IMAGE_TAG),$(IMAGE):$(IMAGE_TAG))
 
@@ -16,8 +16,10 @@ IMAGE_REF     = $(if $(REGISTRY),$(REGISTRY)/$(IMAGE):$(IMAGE_TAG),$(IMAGE):$(IM
 CONTAINER_CMD ?= podman
 
 # Agent tool images (overridable via .env or command line)
-AGENT_IMAGE_OPENCODE ?=
-AGENT_IMAGE_CRUSH    ?=
+AC_REGISTRY          ?= $(shell grep '^REGISTRY=' .push-defaults 2>/dev/null | cut -d= -f2-)
+AC_TAG               ?= $(shell grep '^IMAGE_TAG=' .push-defaults 2>/dev/null | cut -d= -f2-)
+AGENT_IMAGE_OPENCODE ?= $(if $(AC_REGISTRY),$(AC_REGISTRY)/opencode:$(AC_TAG),)
+AGENT_IMAGE_CRUSH    ?= $(if $(AC_REGISTRY),$(AC_REGISTRY)/crush:$(AC_TAG),)
 
 # Kubernetes
 NAMESPACE            ?= swarmer
@@ -30,6 +32,7 @@ LOCAL_PORT      ?= 8080
 OS_LOCAL_PORT   ?= 17671
 
 # User token duration
+TOKEN_DURATION ?= 8h
 # agent-containers build defaults (registry + image tag — checked in)
 AC_DEFAULTS ?= .push-defaults
 
