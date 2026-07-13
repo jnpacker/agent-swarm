@@ -66,6 +66,14 @@ spec:
             - name: OPENSHELL_TLS_KEY
               value: "/auth/openshell/tls.key"
 
+          # Model preset mappings (ACM-37232) — see k8s/swarmer/configmap.yaml.
+          # Edit that file directly and re-apply + restart the deployment
+          # (no code change or image rebuild needed) when Vertex AI / Google
+          # ship new model versions.
+          envFrom:
+            - configMapRef:
+                name: swarmer-model-presets
+
           volumeMounts:
             - name: swarmer-data
               mountPath: /data

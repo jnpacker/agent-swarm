@@ -88,13 +88,18 @@ Verify the output looks correct before continuing.
 
 This is the manual step-by-step procedure. For an automated approach, see `make deploy`.
 
-#### Step 1 — Apply shared resources (namespace, RBAC, PVC)
+#### Step 1 — Apply shared resources (namespace, RBAC, PVC, model presets)
 
 ```bash
 oc apply -f k8s/swarmer/namespace.yaml
 oc apply -f k8s/swarmer/rbac.yaml
 oc apply -f k8s/swarmer/pvc.yaml
+oc apply -f k8s/swarmer/configmap.yaml
 ```
+
+> `configmap.yaml` holds the Claude/Gemini model preset mappings (ACM-37232). Edit it directly
+> and re-apply + `oc rollout restart deployment/swarmer -n swarmer` to bump a model ID when
+> Vertex AI / Google ship new versions — no code change or image rebuild needed.
 
 #### Step 2 — Create the swarmer secret
 
@@ -586,11 +591,23 @@ Config written to `/workspace/.config/opencode/opencode.json` at pod startup.
 
 #### Model Selection
 
-- Models are selected per-session from a dropdown in the UI
-- Available models depend on which credentials are configured in the workspace
+- The primary UX is two family-level **presets** — **Claude** and **Gemini** — selected via
+  radio pills at the top of the Model field. Each preset maps to three roles configured in
+  `Settings` (`swarmer/config.py`), so they can be changed without code changes:
+  - **plan** — stronger-reasoning model used by the opencode plan agent (requires
+    `OPENCODE_EXPERIMENTAL_PLAN_MODE=true`, enabled by default)
+  - **build** — the model used for `opencode run` / the coding agent (this is what session.model
+    resolves to for policy/network purposes)
+  - **small** — title generation / housekeeping model
+- An **Advanced** `<details>` toggle reveals the full individual model dropdown (grouped by
+  provider) for users who want to pick a specific model instead of a preset — session.model
+  stores the raw `provider/model@version` string in this case
+- Both presets and individual models are **always listed**, even when the backing provider
+  isn't configured — unavailable choices are shown disabled with an inline error (e.g. "Vertex
+  AI not configured — add credentials in Secrets") instead of silently disappearing
 - Default model auto-selected based on available credentials:
-  - ADC configured → Vertex AI Claude Sonnet
-  - Gemini API key only → `google/gemini-3.5-flash`
+  - ADC configured → **Claude** preset
+  - Gemini API key only → **Gemini** preset
 
 ### MCP Servers
 
@@ -643,6 +660,7 @@ Or manually with `oc`:
 
 ```bash
 oc delete -f k8s/swarmer/deployment.yaml --ignore-not-found
+oc delete -f k8s/swarmer/configmap.yaml --ignore-not-found
 oc delete -f k8s/openshift/service.yaml --ignore-not-found
 oc delete route swarmer -n swarmer --ignore-not-found
 oc delete oauthclient swarmer --ignore-not-found

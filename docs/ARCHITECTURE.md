@@ -221,6 +221,36 @@ All settings live in `swarmer/config.py` (`Settings` class) and are read from en
 | `openshell_bearer_token` | `OPENSHELL_BEARER_TOKEN` | `str` | `""` | Bearer token for Gateway/Supervisor authentication |
 | `sandbox_gc_interval` | `SANDBOX_GC_INTERVAL` | `int` | `300` | Seconds between sandbox garbage-collection sweeps |
 
+### Model Preset Settings (ACM-37232)
+
+Claude/Gemini preset → model-ID mappings, read from env vars via `swarmer/config.py`'s `Settings`
+class. In a cluster deployment these are sourced from a dedicated `ConfigMap`
+(`k8s/swarmer/configmap.yaml`, name `swarmer-model-presets`), referenced by the `swarmer`
+Deployment via `envFrom: configMapRef` — kept separate from the Deployment's own env vars
+(image, URLs, credentials) so it can be edited independently:
+
+```sh
+kubectl edit configmap swarmer-model-presets -n swarmer   # or: kubectl apply -f k8s/swarmer/configmap.yaml
+kubectl rollout restart deployment/swarmer -n swarmer     # env vars are only read at container start
+```
+
+No code change or image rebuild needed when Vertex AI / Google ship new model versions — just
+edit the ConfigMap and restart the deployment. `make deploy` applies it automatically before the
+Deployment; `make delete` removes it.
+
+| Setting | Env Var | Default | Purpose |
+|---|---|---|---|
+| `claude_preset_plan_model` | `CLAUDE_PRESET_PLAN_MODEL` | `google-vertex-anthropic/claude-opus-4-6@default` | Claude preset's PLAN-role model |
+| `claude_preset_build_model` | `CLAUDE_PRESET_BUILD_MODEL` | `google-vertex-anthropic/claude-sonnet-5@default` | Claude preset's BUILD-role model |
+| `claude_preset_small_model` | `CLAUDE_PRESET_SMALL_MODEL` | `google-vertex-anthropic/claude-haiku-4-5@20251001` | Claude preset's small/housekeeping model |
+| `gemini_preset_plan_model` | `GEMINI_PRESET_PLAN_MODEL` | `google/gemini-3.1-pro-preview` | Gemini preset's PLAN-role model |
+| `gemini_preset_build_model` | `GEMINI_PRESET_BUILD_MODEL` | `google/gemini-3.5-flash` | Gemini preset's BUILD-role model |
+| `gemini_preset_small_model` | `GEMINI_PRESET_SMALL_MODEL` | `google/gemini-3.1-flash-lite` | Gemini preset's small/housekeeping model |
+| `opencode_experimental_plan_mode` | `OPENCODE_EXPERIMENTAL_PLAN_MODE` | `true` | Enables the opencode plan agent so the PLAN-role model above is actually used |
+
+For local dev (`make dev`), the same env vars are set via `.env` (see `.env.example`) — no
+ConfigMap involved outside a real cluster deployment.
+
 ## Agent Container Data Interface
 
 Every data item Swarmer currently pushes into agent pods, its source model, the current K8s mechanism, and the target OpenShell API call. This table is the migration contract for ACM-34850.
