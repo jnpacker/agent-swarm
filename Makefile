@@ -81,23 +81,110 @@ user-token:  ## Issue a login token for a K8s user  (SA_USER=alice, TOKEN_DURATI
 	@echo "Paste this token into the Swarmer login page."
 	@echo "Grant workspace access with: make grant-workspace-access SA_USER=$(SA_USER) WORKSPACE_NS=<ns>"
 
-grant-workspace-access:  ## Grant a user access to a specific workspace namespace  (SA_USER=alice, WORKSPACE_NS=my-project)
-	@test -n "$(SA_USER)"      || (echo "Usage: make grant-workspace-access SA_USER=<name> WORKSPACE_NS=<ns>" && exit 1)
-	@test -n "$(WORKSPACE_NS)" || (echo "Usage: make grant-workspace-access SA_USER=<name> WORKSPACE_NS=<ns>" && exit 1)
-	kubectl create rolebinding swarmer-user-$(SA_USER) \
-	  --clusterrole=swarmer-user \
-	  --serviceaccount=$(NAMESPACE):$(SA_USER) \
-	  --namespace=$(WORKSPACE_NS) \
-	  --dry-run=client -o yaml | kubectl apply -f -
-	@echo "$(SA_USER) can now access workspace namespace '$(WORKSPACE_NS)'."
+# SA_USER/OIDC_USER/WORKSPACE_NS/NAMESPACE are carried as exported shell env
+# vars (not textually substituted into the recipe) and validated against a
+# strict allow-list before ever reaching kubectl, so a value containing
+# shell metacharacters cannot alter the command that runs.
+#
+# NOTE: the exported shell variables are deliberately named differently from
+# the Make command-line variables they're sourced from (_SA_USER vs SA_USER).
+# `target: export SA_USER := $(value SA_USER)` (i.e. reusing the same name)
+# creates a self-referential target-specific variable that shadows the
+# global SA_USER while evaluating its own right-hand side, causing GNU Make
+# to silently truncate values containing "$(...)" sequences (e.g.
+# "alice$(touch /x)" collapses to "alice") *before* our allow-list check
+# ever runs. Using a distinct name avoids this Make quirk entirely.
 
-grant-workspace-create:  ## Allow a user to create new workspaces  (SA_USER=alice)
-	@test -n "$(SA_USER)" || (echo "Usage: make grant-workspace-create SA_USER=<name>" && exit 1)
-	kubectl create clusterrolebinding swarmer-workspace-creator-$(SA_USER) \
-	  --clusterrole=swarmer-workspace-creator \
-	  --serviceaccount=$(NAMESPACE):$(SA_USER) \
-	  --dry-run=client -o yaml | kubectl apply -f -
-	@echo "$(SA_USER) can now create new workspaces (but cannot see others' workspaces without grant-workspace-access)."
+# The SA_USER/OIDC_USER allow-list above permits characters (. _ : @) that
+# are NOT valid in a Kubernetes object name (RoleBinding/ClusterRoleBinding
+# `metadata.name` must be a DNS-1123 subdomain: lowercase alphanumeric and
+# '-' or '.', max 253 chars), and OIDC subjects can be arbitrarily long.
+# Rather than use the raw value as the binding name, derive a DNS-safe slug
+# and append a short stable hash of the *original* value so distinct inputs
+# that collapse to the same slug (e.g. "Alice@x" vs "alice_x") still
+# produce distinct, collision-resistant binding names. The raw value is
+# still used unmodified as the RBAC subject (--serviceaccount=/--user=).
+define K8S_SAFE_NAME_PY
+import hashlib, re, sys
+prefix, raw = sys.argv[1], sys.argv[2]
+slug = re.sub(r"[^a-z0-9-]+", "-", raw.lower()).strip("-")[:32] or "x"
+digest = hashlib.sha256(raw.encode()).hexdigest()[:8]
+print(f"{prefix}-{slug}-{digest}")
+endef
+export K8S_SAFE_NAME_PY
+
+# WORKSPACE_NS/NAMESPACE are used as Kubernetes namespace names, which must
+# be a valid DNS-1123 label: lowercase alphanumeric or '-', starting and
+# ending with an alphanumeric character, max 63 characters. A character-set
+# only check (as previously used) still lets through values with leading or
+# trailing hyphens (e.g. "-ns" or "ns-") or over-length values, which the
+# Kubernetes API would reject anyway but only after invoking kubectl with a
+# less helpful error. Enforce the full label format up front instead.
+define K8S_DNS_LABEL_CHECK_PY
+import re, sys
+name, value = sys.argv[1], sys.argv[2]
+if not re.fullmatch(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?", value):
+    print(f"Error: {name} must be a valid Kubernetes namespace name (lowercase alphanumeric or '-', must start and end with an alphanumeric character, max 63 characters)", file=sys.stderr)
+    sys.exit(1)
+endef
+export K8S_DNS_LABEL_CHECK_PY
+
+grant-workspace-access: export _SA_USER := $(value SA_USER)
+grant-workspace-access: export _OIDC_USER := $(value OIDC_USER)
+grant-workspace-access: export _WORKSPACE_NS := $(value WORKSPACE_NS)
+grant-workspace-access: export _NAMESPACE := $(value NAMESPACE)
+grant-workspace-access:  ## Grant a user access to a specific workspace namespace  (SA_USER=alice OR OIDC_USER=alice, WORKSPACE_NS=my-project)
+	@test -n "$$_SA_USER$$_OIDC_USER" || (echo "Usage: make grant-workspace-access SA_USER=<name> WORKSPACE_NS=<ns>  (or OIDC_USER=<name> for OpenShift/OIDC users)" && exit 1)
+	@test -z "$$_SA_USER" -o -z "$$_OIDC_USER" || (echo "Error: specify only one of SA_USER or OIDC_USER, not both" && exit 1)
+	@test -n "$$_WORKSPACE_NS" || (echo "Usage: make grant-workspace-access SA_USER=<name>|OIDC_USER=<name> WORKSPACE_NS=<ns>" && exit 1)
+	@case "$$_SA_USER$$_OIDC_USER" in \
+	  *[!A-Za-z0-9._:@-]*) echo "Error: SA_USER/OIDC_USER may only contain letters, digits, and . _ - : @" >&2; exit 1 ;; \
+	esac
+	@python3 -c "$$K8S_DNS_LABEL_CHECK_PY" WORKSPACE_NS "$$_WORKSPACE_NS"
+	@python3 -c "$$K8S_DNS_LABEL_CHECK_PY" NAMESPACE "$$_NAMESPACE"
+	@if [ -n "$$_SA_USER" ]; then \
+	  _BIND_NAME=$$(python3 -c "$$K8S_SAFE_NAME_PY" swarmer-user "$$_SA_USER"); \
+	  kubectl create rolebinding "$$_BIND_NAME" \
+	    --clusterrole=swarmer-user \
+	    --serviceaccount="$$_NAMESPACE:$$_SA_USER" \
+	    --namespace="$$_WORKSPACE_NS" \
+	    --dry-run=client -o yaml | kubectl apply -f -; \
+	  echo "$$_SA_USER (ServiceAccount) can now access workspace namespace '$$_WORKSPACE_NS'."; \
+	else \
+	  _BIND_NAME=$$(python3 -c "$$K8S_SAFE_NAME_PY" swarmer-user "$$_OIDC_USER"); \
+	  kubectl create rolebinding "$$_BIND_NAME" \
+	    --clusterrole=swarmer-user \
+	    --user="$$_OIDC_USER" \
+	    --namespace="$$_WORKSPACE_NS" \
+	    --dry-run=client -o yaml | kubectl apply -f -; \
+	  echo "$$_OIDC_USER (OpenShift/OIDC User) can now access workspace namespace '$$_WORKSPACE_NS'."; \
+	fi
+
+grant-workspace-create: export _SA_USER := $(value SA_USER)
+grant-workspace-create: export _OIDC_USER := $(value OIDC_USER)
+grant-workspace-create: export _NAMESPACE := $(value NAMESPACE)
+grant-workspace-create:  ## Allow a user to create new workspaces  (SA_USER=alice OR OIDC_USER=alice)
+	@test -n "$$_SA_USER$$_OIDC_USER" || (echo "Usage: make grant-workspace-create SA_USER=<name>  (or OIDC_USER=<name> for OpenShift/OIDC users)" && exit 1)
+	@test -z "$$_SA_USER" -o -z "$$_OIDC_USER" || (echo "Error: specify only one of SA_USER or OIDC_USER, not both" && exit 1)
+	@case "$$_SA_USER$$_OIDC_USER" in \
+	  *[!A-Za-z0-9._:@-]*) echo "Error: SA_USER/OIDC_USER may only contain letters, digits, and . _ - : @" >&2; exit 1 ;; \
+	esac
+	@python3 -c "$$K8S_DNS_LABEL_CHECK_PY" NAMESPACE "$$_NAMESPACE"
+	@if [ -n "$$_SA_USER" ]; then \
+	  _BIND_NAME=$$(python3 -c "$$K8S_SAFE_NAME_PY" swarmer-workspace-creator "$$_SA_USER"); \
+	  kubectl create clusterrolebinding "$$_BIND_NAME" \
+	    --clusterrole=swarmer-workspace-creator \
+	    --serviceaccount="$$_NAMESPACE:$$_SA_USER" \
+	    --dry-run=client -o yaml | kubectl apply -f -; \
+	  echo "$$_SA_USER (ServiceAccount) can now create new workspaces (but cannot see others' workspaces without grant-workspace-access)."; \
+	else \
+	  _BIND_NAME=$$(python3 -c "$$K8S_SAFE_NAME_PY" swarmer-workspace-creator "$$_OIDC_USER"); \
+	  kubectl create clusterrolebinding "$$_BIND_NAME" \
+	    --clusterrole=swarmer-workspace-creator \
+	    --user="$$_OIDC_USER" \
+	    --dry-run=client -o yaml | kubectl apply -f -; \
+	  echo "$$_OIDC_USER (OpenShift/OIDC User) can now create new workspaces (but cannot see others' workspaces without grant-workspace-access)."; \
+	fi
 
 grant-workspace: grant-workspace-access  ## Deprecated alias for grant-workspace-access
 
