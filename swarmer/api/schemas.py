@@ -84,6 +84,7 @@ class SessionCreate(BaseModel):
     prompt_id: int | None = None
     working_branch: str = ""
     mcp_server_ids: list[int] = Field(default_factory=list)
+    ephemeral_disk: str = Field("2Gi", pattern=r"^(2Gi|5Gi|10Gi)$")
 
 
 class SessionUpdate(BaseModel):
@@ -96,6 +97,7 @@ class SessionUpdate(BaseModel):
     prompt_id: int | None = None
     working_branch: str | None = None
     mcp_server_ids: list[int] | None = None
+    ephemeral_disk: str | None = Field(None, pattern=r"^(2Gi|5Gi|10Gi)$")
 
 
 class SessionOut(BaseModel):
@@ -109,6 +111,7 @@ class SessionOut(BaseModel):
     github_pat_id: int | None
     prompt_id: int | None
     working_branch: str
+    ephemeral_disk: str
     phase: str
     status_detail: str
     sandbox_name: str | None = None

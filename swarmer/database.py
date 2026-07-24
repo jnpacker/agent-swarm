@@ -164,6 +164,10 @@ async def migrate_db() -> None:
         # rather than a specific model ID. "no such column" (fresh DB already
         # created with "provider", or already migrated) is safely suppressed.
         "ALTER TABLE sessions RENAME COLUMN model TO provider",
+        # ACM-38184: per-session ephemeral disk size, replacing the global
+        # SANDBOX_EPHEMERAL_STORAGE env var. Default matches OpenShell's own
+        # built-in default (2Gi) so existing sessions are a no-op until edited.
+        "ALTER TABLE sessions ADD COLUMN ephemeral_disk VARCHAR(32) NOT NULL DEFAULT '2Gi'",
     ]
     async with _engine.begin() as conn:
         for stmt in migrations:

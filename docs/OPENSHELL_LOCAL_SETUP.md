@@ -11,7 +11,7 @@ Step-by-step guide to running Swarmer with a live OpenShell sandbox backend, eit
 | `helm` | 3.8+ | Required for OCI chart support |
 | `oc` | any | OpenShift only — grants SCC policies |
 | Python | 3.12 | `python3 --version` |
-| `openshell` CLI | 0.0.70+ | `openshell --version` — must match or be compatible with gateway version |
+| `openshell` CLI | 0.0.82+ | `openshell --version` — must match or be compatible with gateway version |
 
 > **CLI version matters.** The `openshell` CLI version must be compatible with the deployed gateway. Run `openshell --version` and compare with `OPENSHELL_VERSION` in the Makefile. Install the matching release from [NVIDIA/OpenShell releases](https://github.com/NVIDIA/OpenShell/releases).
 
@@ -22,7 +22,7 @@ Step-by-step guide to running Swarmer with a live OpenShell sandbox backend, eit
 What `make deploy` does:
 
 1. **Installs Agent Sandbox CRDs** from `AGENT_SANDBOX_VERSION` (do not upgrade to v0.5.0+ until the gateway supports v1beta1 ownerReferences)
-2. **Installs or skips OpenShell** via `helm upgrade --install oci://ghcr.io/nvidia/openshell/helm-chart` — idempotent; skipped if already installed
+2. **Installs OpenShell on first run only** via `helm upgrade --install oci://ghcr.io/nvidia/openshell/helm-chart --version $(OPENSHELL_VERSION) --set server.workspaceDefaultStorageSize=$(OPENSHELL_WORKSPACE_STORAGE)`. If OpenShell is already installed, this step is **skipped entirely** — changing `OPENSHELL_VERSION` or `OPENSHELL_WORKSPACE_STORAGE` afterwards does **not** get applied automatically; `make deploy` prints the `helm upgrade` command to run manually. `server.workspaceDefaultStorageSize` (Makefile default `10Gi`) controls the size of the per-sandbox `workspace-{name}` PVC mounted at `/sandbox` (OpenShell's own built-in default `2Gi`) — this is the actual fix for large-repo Go CVE scans exhausting disk (ACM-38172). It is a gateway-wide ceiling, distinct from the per-session "Ephemeral Disk" dropdown (`2Gi`/`5Gi`/`10Gi`, ACM-38184) on each session's create/edit page, which only bounds that session's sandbox pod ephemeral-storage compute resource (container writable layer / unsized emptyDirs)
 3. **Grants OpenShift SCCs** (if `oc` is on PATH — no-op on plain Kubernetes):
    - `anyuid` and `privileged` for both `openshell` and `openshell-sandbox` service accounts
    - Sandbox pods require `NET_ADMIN`, `SYS_ADMIN`, `SYS_PTRACE`, and `SYSLOG` capabilities; `anyuid` alone is insufficient

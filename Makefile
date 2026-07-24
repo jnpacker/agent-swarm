@@ -33,14 +33,21 @@ OS_LOCAL_PORT   ?= 17671
 AC_DEFAULTS ?= .push-defaults
 
 # OpenShell gateway
-OPENSHELL_VERSION        ?= 0.0.70
+OPENSHELL_VERSION        ?= 0.0.82
 # agent-sandbox v0.4.6 is required — v0.5.0+ graduates the CRD to v1beta1 and
 # sets ownerReference apiVersion=agents.x-k8s.io/v1beta1 on sandbox pods, but
-# the OpenShell gateway (through at least 0.0.70) checks for v1alpha1 in
+# the OpenShell gateway (through at least 0.0.82) checks for v1alpha1 in
 # IssueSandboxToken, causing "Policy fetch failed" on every sandbox launch.
 AGENT_SANDBOX_VERSION    ?= v0.4.6
 OPENSHELL_NAMESPACE      ?= openshell
 OPENSHELL_TLS_DIR        ?= auth/openshell
+# Default size of the workspace PVC (backing each sandbox's /sandbox mount) at the
+# OpenShell gateway level. Per-session ephemeral disk selection (ACM-38184) only
+# controls the sandbox pod's ephemeral-storage COMPUTE resource, not this PVC — so
+# this is set to the largest per-session dropdown option (2Gi/5Gi/10Gi) as a ceiling
+# that comfortably fits any session. Override with OPENSHELL_WORKSPACE_STORAGE=<val>
+# if needed; only applied on first OpenShell install (see the deploy target).
+OPENSHELL_WORKSPACE_STORAGE ?= 10Gi
 
 # ──────────────────────────────────────────────────────────────
 #  Phony targets
@@ -56,13 +63,20 @@ OPENSHELL_TLS_DIR        ?= auth/openshell
 #  Developer tooling
 # ──────────────────────────────────────────────────────────────
 
-sync-images:  ## Sync AGENT_IMAGE_OPENCODE in .env from .push-defaults
+sync-images:  ## Sync AGENT_IMAGE_OPENCODE in .env from ../agent-containers .push-defaults
 	@test -f $(AC_DEFAULTS) || (echo "$(AC_DEFAULTS) not found — create/update .push-defaults first" && exit 1)
 	$(eval AC_REGISTRY := $(shell grep '^REGISTRY=' $(AC_DEFAULTS) | cut -d= -f2-))
 	$(eval AC_TAG      := $(shell grep '^IMAGE_TAG=' $(AC_DEFAULTS) | cut -d= -f2-))
 	@echo "Syncing agent image → $(AC_REGISTRY)/opencode:$(AC_TAG)"
-	@sed -i "s|^AGENT_IMAGE_OPENCODE=.*|AGENT_IMAGE_OPENCODE=$(AC_REGISTRY)/opencode:$(AC_TAG)|" .env
-	@echo "Updated .env"
+	@if [ -f .env ]; then \
+	  sed -i "s|^AGENT_IMAGE_OPENCODE=.*|AGENT_IMAGE_OPENCODE=$(AC_REGISTRY)/opencode:$(AC_TAG)|" .env; \
+	  echo "✓ Updated .env"; \
+	else \
+	  echo "  (no .env found — skipped; run 'cp .env.example .env' first if you need one)"; \
+	fi
+	@# NOTE: .env.example is committed and must never contain a real registry/image
+	@# reference (Sensitive Data Policy) — .push-defaults is developer-local and
+	@# often points at a personal registry, so it is intentionally NOT synced here.
 
 setup-secret:  ## Generate a new SWARMER_SECRET_KEY and save to auth/secret.key
 	@mkdir -p auth
@@ -252,6 +266,21 @@ deploy:  ## Deploy swarmer to the current kubectl context  (SILENT=1 for non-int
 	kubectl apply -f k8s/swarmer/rbac.yaml
 	kubectl apply -f k8s/swarmer/pvc.yaml
 	kubectl apply -f k8s/swarmer/configmap.yaml
+	@# ── 1.5 Resolve interactive deploy-time settings (persisted in .deploy-defaults) ──
+	@set -e; \
+	PREV_MAX=$$(grep '^MAX_CONCURRENT_AGENTS=' .deploy-defaults 2>/dev/null | cut -d= -f2 || true); \
+	DEF_MAX=$${PREV_MAX:-5}; \
+	MAX_VAL="$(MAX_CONCURRENT_AGENTS)"; \
+	if [ -z "$$MAX_VAL" ] && [ "$(SILENT)" != "1" ]; then \
+	  printf "MAX_CONCURRENT_AGENTS [$$DEF_MAX]: "; \
+	  read MAX_INPUT; \
+	  MAX_VAL=$${MAX_INPUT:-$$DEF_MAX}; \
+	else \
+	  MAX_VAL=$${MAX_VAL:-$$DEF_MAX}; \
+	fi; \
+	grep -v '^MAX_CONCURRENT_AGENTS=' .deploy-defaults 2>/dev/null > .deploy-defaults.tmp || true; \
+	echo "MAX_CONCURRENT_AGENTS=$$MAX_VAL" >> .deploy-defaults.tmp; \
+	mv .deploy-defaults.tmp .deploy-defaults
 	@# ── 2. OpenShell (install if not already present) ──────────────────────
 	@set -e; \
 	HELM_VER=$$(helm version --short 2>/dev/null | grep -oP 'v\K[0-9]+\.[0-9]+' | head -1); \
@@ -270,10 +299,15 @@ deploy:  ## Deploy swarmer to the current kubectl context  (SILENT=1 for non-int
 	    --version $(OPENSHELL_VERSION) \
 	    --namespace $(OPENSHELL_NAMESPACE) \
 	    --set server.auth.allowUnauthenticatedUsers=true \
+	    --set server.workspaceDefaultStorageSize=$(OPENSHELL_WORKSPACE_STORAGE) \
 	    --wait --timeout 5m; \
-	  echo "✓ OpenShell $(OPENSHELL_VERSION) installed."; \
+	  echo "✓ OpenShell $(OPENSHELL_VERSION) installed (workspaceDefaultStorageSize=$(OPENSHELL_WORKSPACE_STORAGE))."; \
 	else \
-	  echo "OpenShell already installed."; \
+	  echo "OpenShell already installed — version and workspaceDefaultStorageSize changes are"; \
+	  echo "  NOT applied automatically. To upgrade in place, run:"; \
+	  echo "  helm upgrade openshell oci://ghcr.io/nvidia/openshell/helm-chart --version $(OPENSHELL_VERSION) \\"; \
+	  echo "    -n $(OPENSHELL_NAMESPACE) --set server.auth.allowUnauthenticatedUsers=true \\"; \
+	  echo "    --set server.workspaceDefaultStorageSize=$(OPENSHELL_WORKSPACE_STORAGE) --wait"; \
 	fi; \
 	# Grant OpenShift SCCs required for sandbox pods (no-op on plain k8s / if oc is absent) \
 	if command -v oc > /dev/null 2>&1; then \
@@ -332,19 +366,8 @@ deploy:  ## Deploy swarmer to the current kubectl context  (SILENT=1 for non-int
 	  fi; \
 	fi; \
 	\
-	PREV_MAX=$$(grep '^MAX_CONCURRENT_AGENTS=' .deploy-defaults 2>/dev/null | cut -d= -f2 || true); \
-	DEF_MAX=$${PREV_MAX:-5}; \
-	MAX_VAL="$(MAX_CONCURRENT_AGENTS)"; \
-	if [ -z "$$MAX_VAL" ] && [ "$(SILENT)" != "1" ]; then \
-	  printf "MAX_CONCURRENT_AGENTS [$$DEF_MAX]: "; \
-	  read MAX_INPUT; \
-	  MAX_VAL=$${MAX_INPUT:-$$DEF_MAX}; \
-	else \
-	  MAX_VAL=$${MAX_VAL:-$$DEF_MAX}; \
-	fi; \
-	grep -v '^MAX_CONCURRENT_AGENTS=' .deploy-defaults 2>/dev/null > .deploy-defaults.tmp || true; \
-	echo "MAX_CONCURRENT_AGENTS=$$MAX_VAL" >> .deploy-defaults.tmp; \
-	mv .deploy-defaults.tmp .deploy-defaults; \
+	MAX_VAL=$$(grep '^MAX_CONCURRENT_AGENTS=' .deploy-defaults 2>/dev/null | cut -d= -f2); \
+	MAX_VAL=$${MAX_VAL:-5}; \
 	\
 	OPENSHELL_GW=$$(kubectl get svc openshell -n $(OPENSHELL_NAMESPACE) \
 	  -o jsonpath='{.metadata.name}.{.metadata.namespace}.svc.cluster.local:{.spec.ports[?(@.appProtocol=="grpc")].port}' \

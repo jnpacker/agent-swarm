@@ -329,6 +329,8 @@ cp .env.example .env
 | `SESSION_RUN_HISTORY_LIMIT` | `100` | Completed prompt-mode runs kept per session in history (with logs); oldest pruned when exceeded; `0` = unlimited |
 | `SESSION_RUN_HISTORY_MAX_AGE_DAYS` | `7` | Max age (days) of completed runs kept per session; applied together with `SESSION_RUN_HISTORY_LIMIT` (whichever prunes more wins); `0` = disabled |
 
+> **Ephemeral disk is not an env var (ACM-38184).** Each session has an "Ephemeral Disk" dropdown (`2Gi`/`5Gi`/`10Gi`, default `2Gi`) on its create/edit page, replacing the old global `SANDBOX_EPHEMERAL_STORAGE` setting. It bounds the sandbox pod's ephemeral-storage compute resource; it does not resize the `/sandbox` PVC (see `docs/OPENSHELL_LOCAL_SETUP.md` for the gateway-level `workspaceDefaultStorageSize` ceiling).
+
 ### Secret Key
 
 The `SWARMER_SECRET_KEY` is used for Fernet encryption of all sensitive data at rest (API keys, PATs, credentials) and for deriving the session cookie secret.
