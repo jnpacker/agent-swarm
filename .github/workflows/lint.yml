@@ -18,6 +18,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install ruff
+      # Pinned: ruff 0.16.0 (released 2026-07-24) expanded its default rule
+      # selection (adds isort/flake8-blind-except/tryceratops/etc. checks),
+      # which surfaces ~345 pre-existing findings across swarmer/ unrelated
+      # to any single PR. Pin to the last known-good version until those are
+      # triaged and either fixed or an explicit `[tool.ruff]` rule selection
+      # is added to pin the intended rule set independent of ruff's own
+      # evolving defaults.
+      - run: pip install ruff==0.15.22
 
       - run: ruff check swarmer/

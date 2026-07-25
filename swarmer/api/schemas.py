@@ -6,6 +6,10 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field
 
+from swarmer.models.session import DEFAULT_EPHEMERAL_DISK, EPHEMERAL_DISK_OPTIONS
+
+_EPHEMERAL_DISK_PATTERN = r"^(" + "|".join(EPHEMERAL_DISK_OPTIONS) + r")$"
+
 
 # ============================================================
 # Workspaces
@@ -84,6 +88,7 @@ class SessionCreate(BaseModel):
     prompt_id: int | None = None
     working_branch: str = ""
     mcp_server_ids: list[int] = Field(default_factory=list)
+    ephemeral_disk: str = Field(DEFAULT_EPHEMERAL_DISK, pattern=_EPHEMERAL_DISK_PATTERN)
 
 
 class SessionUpdate(BaseModel):
@@ -96,6 +101,7 @@ class SessionUpdate(BaseModel):
     prompt_id: int | None = None
     working_branch: str | None = None
     mcp_server_ids: list[int] | None = None
+    ephemeral_disk: str | None = Field(None, pattern=_EPHEMERAL_DISK_PATTERN)
 
 
 class SessionOut(BaseModel):
@@ -109,6 +115,7 @@ class SessionOut(BaseModel):
     github_pat_id: int | None
     prompt_id: int | None
     working_branch: str
+    ephemeral_disk: str
     phase: str
     status_detail: str
     sandbox_name: str | None = None

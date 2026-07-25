@@ -815,6 +815,7 @@ async def create_sandbox(
     env_vars: dict[str, str] | None,
     policy,
     provider_names: list[str] | None = None,
+    ephemeral_storage: str = "",
     client=None,
 ):
     """Create an OpenShell sandbox and wait for it to be ready.
@@ -822,6 +823,10 @@ async def create_sandbox(
     provider_names lists pre-configured gateway providers to attach at creation
     time so the supervisor can call GetSandboxProviderEnvironment at startup
     and receive injected reference tokens before any exec commands run.
+
+    ephemeral_storage, when set (Kubernetes quantity string, e.g. "5Gi"), is applied
+    as both the request and limit for the sandbox's ephemeral disk — overriding the
+    OpenShell default (2Gi), which is too small for Go module caches on large repos.
 
     Returns the SandboxRef; caller stores ref.name as session.sandbox_name.
     """
@@ -839,6 +844,15 @@ async def create_sandbox(
         spec.providers.append(pname)
     if policy is not None:
         spec.policy.CopyFrom(policy)
+    if ephemeral_storage:
+        from google.protobuf import struct_pb2
+
+        resources = struct_pb2.Struct()
+        resources.update({
+            "requests": {"ephemeral-storage": ephemeral_storage},
+            "limits": {"ephemeral-storage": ephemeral_storage},
+        })
+        spec.template.resources.CopyFrom(resources)
 
     def _do_create():
         return client.create(spec=spec)

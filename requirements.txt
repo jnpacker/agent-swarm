@@ -16,4 +16,15 @@ google-auth==2.53.0
 websockets==16.0
 itsdangerous==2.2.0
 croniter==6.2.2
-openshell>=0.0.70             # OpenShell sandbox SDK
+openshell>=0.0.72,<0.0.88     # OpenShell sandbox SDK, range-pinned:
+                               #  - lower bound 0.0.72 is the first release whose
+                               #    wheel ships real generated _proto/*.py files
+                               #    (<0.0.72 ships only _proto/__init__.py, which
+                               #    tests/conftest.py's real-proto pre-import needs).
+                               #  - upper bound <0.0.88 excludes the release that
+                               #    added a "workspace" field/kwarg to
+                               #    SandboxClient.create()/.list(), which our code
+                               #    doesn't pass and our deployed gateway (v0.0.82)
+                               #    doesn't support. Bump past 0.0.87 only after
+                               #    upgrading the OpenShell gateway and adopting the
+                               #    Workspace API in openshell_client.py.
