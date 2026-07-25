@@ -67,8 +67,10 @@ sync-images:  ## Sync AGENT_IMAGE_OPENCODE in .env from ../agent-containers .pus
 	@test -f $(AC_DEFAULTS) || (echo "$(AC_DEFAULTS) not found — create/update .push-defaults first" && exit 1)
 	$(eval AC_REGISTRY := $(shell grep '^REGISTRY=' $(AC_DEFAULTS) | cut -d= -f2-))
 	$(eval AC_TAG      := $(shell grep '^IMAGE_TAG=' $(AC_DEFAULTS) | cut -d= -f2-))
+	@test -n "$(AC_REGISTRY)" -a -n "$(AC_TAG)" || (echo "Error: REGISTRY or IMAGE_TAG missing from $(AC_DEFAULTS)" && exit 1)
 	@echo "Syncing agent image → $(AC_REGISTRY)/opencode:$(AC_TAG)"
 	@if [ -f .env ]; then \
+	  grep -q "^AGENT_IMAGE_OPENCODE=" .env || echo "AGENT_IMAGE_OPENCODE=" >> .env; \
 	  sed -i "s|^AGENT_IMAGE_OPENCODE=.*|AGENT_IMAGE_OPENCODE=$(AC_REGISTRY)/opencode:$(AC_TAG)|" .env; \
 	  echo "✓ Updated .env"; \
 	else \
@@ -277,6 +279,10 @@ deploy:  ## Deploy swarmer to the current kubectl context  (SILENT=1 for non-int
 	  MAX_VAL=$${MAX_INPUT:-$$DEF_MAX}; \
 	else \
 	  MAX_VAL=$${MAX_VAL:-$$DEF_MAX}; \
+	fi; \
+	if ! echo "$$MAX_VAL" | grep -Eq '^[0-9]+$$'; then \
+	  echo "Error: MAX_CONCURRENT_AGENTS must be a number" >&2; \
+	  exit 1; \
 	fi; \
 	grep -v '^MAX_CONCURRENT_AGENTS=' .deploy-defaults 2>/dev/null > .deploy-defaults.tmp || true; \
 	echo "MAX_CONCURRENT_AGENTS=$$MAX_VAL" >> .deploy-defaults.tmp; \
