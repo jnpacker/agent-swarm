@@ -68,11 +68,16 @@ sync-images:  ## Sync AGENT_IMAGE_OPENCODE in .env from ../agent-containers .pus
 	$(eval AC_REGISTRY := $(shell grep '^REGISTRY=' $(AC_DEFAULTS) | cut -d= -f2-))
 	$(eval AC_TAG      := $(shell grep '^IMAGE_TAG=' $(AC_DEFAULTS) | cut -d= -f2-))
 	@test -n "$(AC_REGISTRY)" -a -n "$(AC_TAG)" || (echo "Error: REGISTRY or IMAGE_TAG missing from $(AC_DEFAULTS)" && exit 1)
+	@echo "$(AC_REGISTRY)" | grep -Eq '^[A-Za-z0-9.:_/-]+$$' || \
+	  (echo "Error: REGISTRY in $(AC_DEFAULTS) contains unsupported characters" >&2 && exit 1)
+	@echo "$(AC_TAG)" | grep -Eq '^[A-Za-z0-9._-]+$$' || \
+	  (echo "Error: IMAGE_TAG in $(AC_DEFAULTS) contains unsupported characters" >&2 && exit 1)
 	@echo "Syncing agent image → $(AC_REGISTRY)/opencode:$(AC_TAG)"
 	@if [ -f .env ]; then \
 	  grep -q "^AGENT_IMAGE_OPENCODE=" .env || echo "AGENT_IMAGE_OPENCODE=" >> .env; \
-	  sed -i "s|^AGENT_IMAGE_OPENCODE=.*|AGENT_IMAGE_OPENCODE=$(AC_REGISTRY)/opencode:$(AC_TAG)|" .env; \
-	  echo "✓ Updated .env"; \
+	  sed -i "s|^AGENT_IMAGE_OPENCODE=.*|AGENT_IMAGE_OPENCODE=$(AC_REGISTRY)/opencode:$(AC_TAG)|" .env \
+	    && echo "✓ Updated .env" \
+	    || (echo "Error: failed to update .env" >&2 && exit 1); \
 	else \
 	  echo "  (no .env found — skipped; run 'cp .env.example .env' first if you need one)"; \
 	fi
@@ -288,6 +293,8 @@ deploy:  ## Deploy swarmer to the current kubectl context  (SILENT=1 for non-int
 	echo "MAX_CONCURRENT_AGENTS=$$MAX_VAL" >> .deploy-defaults.tmp; \
 	mv .deploy-defaults.tmp .deploy-defaults
 	@# ── 2. OpenShell (install if not already present) ──────────────────────
+	@echo "$(OPENSHELL_WORKSPACE_STORAGE)" | grep -Eq '^[0-9]+(\.[0-9]+)?[EPTGMK]i?$$' || \
+	  (echo "Error: OPENSHELL_WORKSPACE_STORAGE must be a Kubernetes quantity (e.g. 10Gi)" >&2 && exit 1)
 	@set -e; \
 	HELM_VER=$$(helm version --short 2>/dev/null | grep -oP 'v\K[0-9]+\.[0-9]+' | head -1); \
 	HELM_MAJOR=$$(echo "$$HELM_VER" | cut -d. -f1); \
