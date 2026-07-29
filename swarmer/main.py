@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
@@ -32,6 +33,13 @@ if TYPE_CHECKING:
     from swarmer.models.session import Session
 
 log = logging.getLogger(__name__)
+
+# Strong references to fire-and-forget IAT-refresh restart tasks (one per surviving
+# server/TUI session in _restart_github_app_iat_refresh). asyncio only holds a weak
+# reference to tasks created via asyncio.create_task(); without this registry the
+# task object could be garbage-collected mid-refresh with no warning. Each task
+# removes itself via add_done_callback once it completes (or is cancelled).
+_iat_refresh_restart_tasks: set[asyncio.Task] = set()
 
 # Custom provider profiles swarmer registers in the OpenShell gateway at startup.
 # google-vertex-ai is built-in since OpenShell 0.0.55 — no need to import it.
@@ -113,7 +121,6 @@ async def _ensure_openshell_provider_profiles() -> None:
 
 async def _restart_prompt_pollers() -> None:
     """Re-launch background monitors for prompt sessions still active after a restart."""
-    import asyncio
     from sqlalchemy import select
 
     from swarmer.database import get_db
@@ -259,8 +266,6 @@ async def _restart_github_app_iat_refresh(session: Session, db: AsyncSession) ->
         return
 
     try:
-        import asyncio
-
         from swarmer import openshell_client
         from swarmer.github import github_slug as _github_slug
         from swarmer.github_app import get_workspace_github_app
@@ -288,10 +293,17 @@ async def _restart_github_app_iat_refresh(session: Session, db: AsyncSession) ->
             provider_name, "github", {},
             credentials={"GITHUB_TOKEN": iat, "GH_TOKEN": iat},
         )
-        asyncio.create_task(
+        # Keep a strong reference in _iat_refresh_restart_tasks — asyncio's own
+        # reference to the task is weak, so without this the task could be
+        # garbage-collected before it ever sleeps through its first refresh
+        # interval. The done-callback removes it from the set once it finishes
+        # (normal completion, exception, or cancellation via session stop/delete).
+        refresh_task = asyncio.create_task(
             start_token_refresh_loop(app, session.id, provider_name, repo_names=repo_names or None),
             name=f"iat-refresh-{session.id}",
         )
+        _iat_refresh_restart_tasks.add(refresh_task)
+        refresh_task.add_done_callback(_iat_refresh_restart_tasks.discard)
         log.info(
             "restart: re-minted GitHub App IAT and restarted refresh loop for session %d",
             session.id,

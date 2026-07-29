@@ -1040,6 +1040,12 @@ class TestRestartServerSessions:
 # ===========================================================================
 
 
+# Not a real key — GitHubApp.is_configured only checks that private_key_enc is
+# non-empty, so a non-PEM-shaped placeholder avoids tripping secret scanners
+# while still exercising the encrypt/decrypt round trip.
+_FAKE_APP_PRIVATE_KEY = "test-placeholder-not-a-real-key"
+
+
 class TestRestartGitHubAppIATRefresh:
     """TUI/server sessions using a workspace GitHub App get their IAT refresh
     loop restarted after a Swarmer restart — otherwise the App IAT (valid ~1h)
@@ -1055,7 +1061,7 @@ class TestRestartGitHubAppIATRefresh:
         ws = await _create_workspace(client)
         s = await _create_session(client, ws["id"], mode="tui", agent_tool="opencode")
 
-        pem = "-----BEGIN RSA PRIVATE KEY-----\nseed\n-----END RSA PRIVATE KEY-----"
+        pem = _FAKE_APP_PRIVATE_KEY
         async with _TestSession() as db:
             app = GitHubApp(
                 workspace_id=ws["id"], user_id="", app_id="111", installation_id="222",
@@ -1143,7 +1149,7 @@ class TestRestartGitHubAppIATRefresh:
         ws = await _create_workspace(client)
         s = await _create_session(client, ws["id"], mode="tui", agent_tool="opencode")
 
-        pem = "-----BEGIN RSA PRIVATE KEY-----\nseed\n-----END RSA PRIVATE KEY-----"
+        pem = _FAKE_APP_PRIVATE_KEY
         async with _TestSession() as db:
             app = GitHubApp(
                 workspace_id=ws["id"], user_id="", app_id="111", installation_id="222",
@@ -1177,7 +1183,7 @@ class TestRestartGitHubAppIATRefresh:
         ws = await _create_workspace(client)
         s = await _create_session(client, ws["id"], mode="tui", agent_tool="opencode")
 
-        pem = "-----BEGIN RSA PRIVATE KEY-----\nseed\n-----END RSA PRIVATE KEY-----"
+        pem = _FAKE_APP_PRIVATE_KEY
         async with _TestSession() as db:
             app = GitHubApp(
                 workspace_id=ws["id"], user_id="", app_id="111", installation_id="222",
