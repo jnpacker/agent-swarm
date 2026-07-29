@@ -1,5 +1,9 @@
+from __future__ import annotations
+
+import asyncio
 import logging
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse
@@ -23,7 +27,19 @@ from swarmer.routers import secrets as secrets_router
 from swarmer.routers import tui_ws as tui_router
 from swarmer.routers import workspaces as workspaces_router
 
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from swarmer.models.session import Session
+
 log = logging.getLogger(__name__)
+
+# Strong references to fire-and-forget IAT-refresh restart tasks (one per surviving
+# server/TUI session in _restart_github_app_iat_refresh). asyncio only holds a weak
+# reference to tasks created via asyncio.create_task(); without this registry the
+# task object could be garbage-collected mid-refresh with no warning. Each task
+# removes itself via add_done_callback once it completes (or is cancelled).
+_iat_refresh_restart_tasks: set[asyncio.Task] = set()
 
 # Custom provider profiles swarmer registers in the OpenShell gateway at startup.
 # google-vertex-ai is built-in since OpenShell 0.0.55 — no need to import it.
@@ -105,7 +121,6 @@ async def _ensure_openshell_provider_profiles() -> None:
 
 async def _restart_prompt_pollers() -> None:
     """Re-launch background monitors for prompt sessions still active after a restart."""
-    import asyncio
     from sqlalchemy import select
 
     from swarmer.database import get_db
@@ -136,24 +151,37 @@ async def _restart_prompt_pollers() -> None:
             _model_arg = _shlex.quote(_model) if _model else ""
             _main_cmd = f"HOME=/sandbox {_tool_bin} --model {_model_arg} \"$(</sandbox/AGENTS.md)\""
             asyncio.create_task(
-                _run_openshell_agent(s.id, s.sandbox_name, ["sh", "-c", _main_cmd], s.mode, s.agent_tool),
+                _run_openshell_agent(
+                    s.id, s.workspace_id, s.sandbox_name, ["sh", "-c", _main_cmd], s.mode, s.agent_tool
+                ),
                 name=f"openshell-agent-{s.id}",
             )
         break
 
 
 async def _restart_server_sessions() -> None:
-    """Re-establish proxy connections for server-mode sessions still active after a restart.
+    """Re-establish proxy connections and IAT refresh loops for server/TUI sessions
+    still active after a restart.
 
-    For each server-mode session that was running/pending with a live sandbox:
-    - Re-call expose_service() to get a fresh service_url (handles gateway restarts).
-    - Sessions whose sandbox has disappeared are moved to 'stopped'.
+    For each server/TUI-mode session that was running/pending with a live sandbox:
+    - server mode: re-call expose_service() to get a fresh service_url (handles
+      gateway restarts). Sessions whose sandbox has disappeared are moved to
+      'stopped'.
+    - server/TUI mode: if the session is using a workspace GitHub App (no PAT
+      assigned), restart the background IAT refresh loop. Swarmer's own restart
+      does not affect the sandbox or the OpenShell provider — the previously
+      minted IAT is still installed on the gateway and keeps working — but the
+      refresh task that would keep it from expiring was an in-process asyncio
+      task that died with the old process. Without restarting it here, the App
+      IAT silently expires ~1 hour after the Swarmer restart and git push starts
+      failing inside an otherwise-healthy sandbox.
 
     This allows Swarmer to restart while OpenCode continues running in the sandbox
-    without losing the proxy connection.
+    without losing the proxy connection or GitHub App authentication.
     """
     from datetime import datetime, timezone
     from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
 
     from swarmer import openshell_client
     from swarmer.database import get_db
@@ -168,11 +196,13 @@ async def _restart_server_sessions() -> None:
 
     async for db in get_db():
         result = await db.execute(
-            select(Session).where(
-                Session.mode == "server",
+            select(Session)
+            .where(
+                Session.mode.in_(["server", "tui"]),
                 Session.phase.in_(["pending", "running"]),
                 Session.sandbox_name.isnot(None),
             )
+            .options(selectinload(Session.github_pat), selectinload(Session.repos))
         )
         sessions = result.scalars().all()
         if not sessions:
@@ -183,8 +213,8 @@ async def _restart_server_sessions() -> None:
             if sandbox_name not in live_sandboxes:
                 # Sandbox is gone — stop the session cleanly.
                 log.warning(
-                    "restart: server-mode session %d sandbox %s not found — marking stopped",
-                    s.id, sandbox_name,
+                    "restart: %s-mode session %d sandbox %s not found — marking stopped",
+                    s.mode, s.id, sandbox_name,
                 )
                 s.phase = "stopped"
                 s.sandbox_name = None
@@ -192,29 +222,98 @@ async def _restart_server_sessions() -> None:
                 s.run_completed_at = datetime.now(timezone.utc)
                 continue
 
-            # Sandbox is alive — re-expose the service to get a fresh URL.
-            try:
-                _tool = _get_tool(s.agent_tool)
-                port = _tool.get_server_port() or 4096
-                service_url = await openshell_client.expose_service(sandbox_name, "agent", port)
-                s.service_url = service_url
-                s.phase = "running"
-                log.info(
-                    "restart: server-mode session %d re-connected to sandbox %s at %s",
-                    s.id, sandbox_name, service_url,
-                )
-            except Exception:
-                log.warning(
-                    "restart: could not re-expose service for session %d sandbox %s — marking stopped",
-                    s.id, sandbox_name, exc_info=True,
-                )
-                s.phase = "stopped"
-                s.sandbox_name = None
-                s.service_url = None
-                s.run_completed_at = datetime.now(timezone.utc)
+            if s.mode == "server":
+                # Sandbox is alive — re-expose the service to get a fresh URL.
+                try:
+                    _tool = _get_tool(s.agent_tool)
+                    port = _tool.get_server_port() or 4096
+                    service_url = await openshell_client.expose_service(sandbox_name, "agent", port)
+                    s.service_url = service_url
+                    s.phase = "running"
+                    log.info(
+                        "restart: server-mode session %d re-connected to sandbox %s at %s",
+                        s.id, sandbox_name, service_url,
+                    )
+                except Exception:
+                    log.warning(
+                        "restart: could not re-expose service for session %d sandbox %s — marking stopped",
+                        s.id, sandbox_name, exc_info=True,
+                    )
+                    s.phase = "stopped"
+                    s.sandbox_name = None
+                    s.service_url = None
+                    s.run_completed_at = datetime.now(timezone.utc)
+                    continue
+
+            await _restart_github_app_iat_refresh(s, db)
 
         await db.commit()
         break
+
+
+async def _restart_github_app_iat_refresh(session: Session, db: AsyncSession) -> None:
+    """Restart the IAT refresh background task for a surviving server/TUI session.
+
+    No-op when the session has an explicit PAT assigned, has no GitHub repos, or
+    the workspace has no GitHub App configured. Failures are logged and swallowed
+    — a missed refresh restart degrades gracefully (existing IAT keeps working
+    until it expires) rather than blocking the rest of the restart sequence.
+    """
+    if session.github_pat:
+        return
+    _has_github_repos = any("github.com" in (r.repo_url or "") for r in (session.repos or []))
+    if not _has_github_repos:
+        return
+
+    try:
+        from swarmer import openshell_client
+        from swarmer.github import github_slug as _github_slug
+        from swarmer.github_app import get_workspace_github_app
+        from swarmer.github_auth import mint_installation_token, start_token_refresh_loop
+        from swarmer.routers.sessions import _github_app_provider_name
+
+        app = await get_workspace_github_app(session.workspace_id, db, user_id="")
+        if not app:
+            return
+
+        repo_names: list[str] = []
+        for r in (session.repos or []):
+            if "github.com" not in (r.repo_url or ""):
+                continue
+            try:
+                slug = _github_slug(r.repo_url)
+                if slug:
+                    repo_names.append(slug.split("/", 1)[1])
+            except Exception:
+                pass
+
+        provider_name = _github_app_provider_name(session.workspace_id, session.id)
+        iat = await mint_installation_token(app, repo_names=repo_names or None)
+        await openshell_client.ensure_provider(
+            provider_name, "github", {},
+            credentials={"GITHUB_TOKEN": iat, "GH_TOKEN": iat},
+        )
+        # Keep a strong reference in _iat_refresh_restart_tasks — asyncio's own
+        # reference to the task is weak, so without this the task could be
+        # garbage-collected before it ever sleeps through its first refresh
+        # interval. The done-callback removes it from the set once it finishes
+        # (normal completion, exception, or cancellation via session stop/delete).
+        refresh_task = asyncio.create_task(
+            start_token_refresh_loop(app, session.id, provider_name, repo_names=repo_names or None),
+            name=f"iat-refresh-{session.id}",
+        )
+        _iat_refresh_restart_tasks.add(refresh_task)
+        refresh_task.add_done_callback(_iat_refresh_restart_tasks.discard)
+        log.info(
+            "restart: re-minted GitHub App IAT and restarted refresh loop for session %d",
+            session.id,
+        )
+    except Exception:
+        log.warning(
+            "restart: failed to restart GitHub App IAT refresh for session %d — "
+            "existing IAT will keep working until it expires",
+            session.id, exc_info=True,
+        )
 
 
 app = FastAPI(title="Swarmer", lifespan=lifespan)

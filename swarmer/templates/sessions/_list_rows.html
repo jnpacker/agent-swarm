@@ -24,7 +24,7 @@
       <th class="pf-v6-c-table__th" role="columnheader">Tool</th>
       <th class="pf-v6-c-table__th" role="columnheader">Status</th>
       <th class="pf-v6-c-table__th" role="columnheader">Last Run</th>
-      <th class="pf-v6-c-table__th" role="columnheader">GitHub PAT</th>
+      <th class="pf-v6-c-table__th" role="columnheader">GitHub Credential</th>
       <th class="pf-v6-c-table__th" role="columnheader">Repos</th>
       <th class="pf-v6-c-table__th" role="columnheader">Schedule</th>
       <th class="pf-v6-c-table__th" role="columnheader">Next Run</th>
@@ -77,7 +77,7 @@
           —
         {% endif %}
       </td>
-      <td class="pf-v6-c-table__td" role="cell" data-label="GitHub PAT" style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm);">
+      <td class="pf-v6-c-table__td" role="cell" data-label="GitHub Credential" style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm);">
         {{ s.github_pat.name if s.github_pat else '—' }}
       </td>
       <td class="pf-v6-c-table__td" role="cell" data-label="Repos" style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm);">

@@ -44,7 +44,7 @@ async def test_no_token_returns_all_none():
         # No HTTP calls should be made — respx will raise if any are attempted.
         result = await fetch_repo_info(_repos(), pat=None)
 
-    assert result[1] == {"is_public": None, "can_push": None}
+    assert result[1] == {"is_public": None, "can_push": None, "reachable": None}
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +62,7 @@ async def test_pat_push_true():
 
     assert result[1]["can_push"] is True
     assert result[1]["is_public"] is True
+    assert result[1]["reachable"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +84,7 @@ async def test_pat_no_permissions_object():
 
     assert result[1]["can_push"] is False
     assert result[1]["is_public"] is True
+    assert result[1]["reachable"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +101,7 @@ async def test_pat_push_false():
         result = await fetch_repo_info(_repos(), pat="ghp_valid")
 
     assert result[1]["can_push"] is False
+    assert result[1]["reachable"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +126,9 @@ async def test_fine_grained_pat_public_repo_not_in_scope():
 
     assert result[1]["can_push"] is False
     assert result[1]["is_public"] is True
+    # Main /repos call returned 200 (repo is visible, likely public) — this is
+    # a write-access gap, not an "Unreachable" state.
+    assert result[1]["reachable"] is True
 
 
 @pytest.mark.asyncio
@@ -137,6 +143,7 @@ async def test_fine_grained_pat_public_repo_in_scope():
 
     assert result[1]["can_push"] is True
     assert result[1]["is_public"] is True
+    assert result[1]["reachable"] is True
 
 
 @pytest.mark.asyncio
@@ -157,6 +164,7 @@ async def test_fine_grained_pat_push_false_skips_refs_probe():
         result = await fetch_repo_info(_repos(), pat="github_pat_AAAA")
 
     assert result[1]["can_push"] is False
+    assert result[1]["reachable"] is True
     assert refs_called is False  # probe not made when push already False
 
 
@@ -178,18 +186,20 @@ async def test_classic_pat_does_not_probe_refs():
         result = await fetch_repo_info(_repos(), pat="ghp_classic")
 
     assert result[1]["can_push"] is True
+    assert result[1]["reachable"] is True
     assert refs_called is False  # classic PAT never probes refs
 
 
 @pytest.mark.asyncio
 async def test_pat_403_repo_not_in_scope():
-    """Fine-grained PAT: initial /repos call returns 403 (private repo outside scope) → can_push=False."""
+    """Fine-grained PAT: initial /repos call returns 403 (private repo outside scope) → can_push=False, unreachable."""
     with respx.mock:
         respx.get(REPO_API).mock(return_value=httpx.Response(403))
         result = await fetch_repo_info(_repos(), pat="github_pat_AAAA")
 
     assert result[1]["can_push"] is False
     assert result[1]["is_public"] is None
+    assert result[1]["reachable"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -198,13 +208,14 @@ async def test_pat_403_repo_not_in_scope():
 
 @pytest.mark.asyncio
 async def test_pat_404():
-    """404 → can_push=False, is_public=None."""
+    """404 → can_push=False, is_public=None, reachable=False."""
     with respx.mock:
         respx.get(REPO_API).mock(return_value=httpx.Response(404))
         result = await fetch_repo_info(_repos(), pat="ghp_noaccess")
 
     assert result[1]["can_push"] is False
     assert result[1]["is_public"] is None
+    assert result[1]["reachable"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +240,7 @@ async def test_pat_401_retries_unauthenticated_public():
 
     assert result[1]["can_push"] is False
     assert result[1]["is_public"] is True
+    assert result[1]["reachable"] is False
     assert call_count == 2
 
 
@@ -248,6 +260,7 @@ async def test_pat_401_retry_also_fails():
 
     assert result[1]["can_push"] is False
     assert result[1]["is_public"] is None
+    assert result[1]["reachable"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +278,7 @@ async def test_app_iat_push_true():
 
     assert result[1]["can_push"] is True
     assert result[1]["is_public"] is True
+    assert result[1]["reachable"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +299,7 @@ async def test_app_iat_push_false():
         result = await fetch_repo_info(_repos(), pat="ghs_apptoken")
 
     assert result[1]["can_push"] is None
+    assert result[1]["reachable"] is True
 
 
 @pytest.mark.asyncio
@@ -297,6 +312,7 @@ async def test_app_iat_no_permissions_object():
         result = await fetch_repo_info(_repos(), pat="ghs_apptoken")
 
     assert result[1]["can_push"] is None
+    assert result[1]["reachable"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -305,13 +321,14 @@ async def test_app_iat_no_permissions_object():
 
 @pytest.mark.asyncio
 async def test_app_iat_404_not_installed():
-    """App IAT 404 (org not installed) → can_push=False."""
+    """App IAT 404 (org not installed) → can_push=False, reachable=False."""
     with respx.mock:
         respx.get(REPO_API).mock(return_value=httpx.Response(404))
         result = await fetch_repo_info(_repos(), pat="ghs_apptoken")
 
     assert result[1]["can_push"] is False
     assert result[1]["is_public"] is None
+    assert result[1]["reachable"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -320,12 +337,13 @@ async def test_app_iat_404_not_installed():
 
 @pytest.mark.asyncio
 async def test_rate_limit_returns_false():
-    """429 rate-limit → can_push=False (assume no access, token is present)."""
+    """429 rate-limit → can_push=False, reachable=False (assume no access, token is present)."""
     with respx.mock:
         respx.get(REPO_API).mock(return_value=httpx.Response(429))
         result = await fetch_repo_info(_repos(), pat="ghp_test")
 
     assert result[1]["can_push"] is False
+    assert result[1]["reachable"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -334,13 +352,14 @@ async def test_rate_limit_returns_false():
 
 @pytest.mark.asyncio
 async def test_network_exception_returns_false():
-    """Network exception → can_push=False, no crash."""
+    """Network exception → can_push=False, reachable=False, no crash."""
     with respx.mock:
         respx.get(REPO_API).mock(side_effect=httpx.ConnectError("connection refused"))
         result = await fetch_repo_info(_repos(), pat="ghp_test")
 
     assert result[1]["can_push"] is False
     assert result[1]["is_public"] is None
+    assert result[1]["reachable"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -349,13 +368,18 @@ async def test_network_exception_returns_false():
 
 @pytest.mark.asyncio
 async def test_non_github_url_skipped():
-    """Non-GitHub URLs make no API call and return can_push=False (no verified access)."""
+    """Non-GitHub URLs make no API call and return can_push=False (no verified access).
+
+    reachable=None (not a github.com repo — the credential check does not apply,
+    so this does not surface as "Unreachable").
+    """
     repos = [_FakeRepo(1, "https://gitlab.com/myorg/myrepo")]
     with respx.mock:
         result = await fetch_repo_info(repos, pat="ghp_test")
 
     assert result[1]["can_push"] is False
     assert result[1]["is_public"] is None
+    assert result[1]["reachable"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -380,5 +404,35 @@ async def test_multiple_repos_keyed_by_id():
 
     assert result[10]["can_push"] is True
     assert result[10]["is_public"] is True
+    assert result[10]["reachable"] is True
     assert result[20]["can_push"] is False
     assert result[20]["is_public"] is False
+    assert result[20]["reachable"] is True
+
+
+# ---------------------------------------------------------------------------
+# "Unreachable" pill semantics — 403/404/401 mean the credential cannot see
+# the repo at all, distinct from "can see but no write access" (ACM-39064).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_unreachable_repo_via_404():
+    """404 → reachable=False regardless of PAT or App IAT — repo not visible at all."""
+    with respx.mock:
+        respx.get(REPO_API).mock(return_value=httpx.Response(404))
+        result = await fetch_repo_info(_repos(), pat="ghp_noaccess")
+
+    assert result[1]["reachable"] is False
+
+
+@pytest.mark.asyncio
+async def test_reachable_repo_with_no_write_access():
+    """200 + push=False (PAT) → reachable=True, can_push=False — distinct states."""
+    with respx.mock:
+        respx.get(REPO_API).mock(return_value=httpx.Response(
+            200, json={"private": False, "permissions": {"push": False}}
+        ))
+        result = await fetch_repo_info(_repos(), pat="ghp_readonly")
+
+    assert result[1]["reachable"] is True
+    assert result[1]["can_push"] is False
