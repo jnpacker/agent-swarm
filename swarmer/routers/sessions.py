@@ -395,12 +395,15 @@ async def session_new(
     from swarmer.routers.mcp_servers import get_enabled_mcp_servers
     mcp_servers = await get_enabled_mcp_servers(ws_id, db, user_id=_current_user(request))
     prompt_sources = await _get_prompt_sources(ws_id, db)
+    from swarmer.github_app import get_workspace_github_app
+    _ws_github_app = await get_workspace_github_app(ws_id, db, user_id=_current_user(request))
     return templates.TemplateResponse(
         request,
         "sessions/new.html",
         {
             "ws": ws,
             "pats": pats,
+            "has_github_app": bool(_ws_github_app),
             "provider_options": provider_options,
             "selected_provider": "",
             "agent_tools": _tools,
@@ -522,12 +525,15 @@ async def session_create(
         from swarmer.routers.mcp_servers import get_enabled_mcp_servers
         mcp_servers = await get_enabled_mcp_servers(ws_id, db, user_id=_current_user(request))
         prompt_sources = await _get_prompt_sources(ws_id, db)
+        from swarmer.github_app import get_workspace_github_app
+        _ws_github_app = await get_workspace_github_app(ws_id, db, user_id=_current_user(request))
         return templates.TemplateResponse(
             request,
             "sessions/new.html",
             {
                 "ws": ws,
                 "pats": pats,
+                "has_github_app": bool(_ws_github_app),
                 "error": f"A session named '{name}' already exists in this workspace.",
                 "form": {"name": name, "instruction_prompt": instruction_prompt, "working_branch": wb, "ephemeral_disk": ephemeral_disk},
                 "provider_options": provider_options,

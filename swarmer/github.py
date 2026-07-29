@@ -48,11 +48,12 @@ def github_slug(url: str) -> str | None:
 
 
 async def fetch_repo_info(repos: list, pat: str | None) -> dict:
-    """Return per-repo visibility and push-access info via the GitHub API.
+    """Return per-repo visibility, reachability, and push-access info via the GitHub API.
 
     Rules (caller is responsible for selecting the right token):
       - No token (pat=None): do nothing — return all-None for every repo.
-      - Token present: determine public/private and whether the token can push.
+      - Token present: determine reachability, public/private, and whether the
+        token can push.
 
     Token-scope caveat for fine-grained PATs (github_pat_...):
       GitHub's permissions.push field reflects the *user's* collaborator status,
@@ -63,13 +64,15 @@ async def fetch_repo_info(repos: list, pat: str | None) -> dict:
       repo access — a 403 there means the token cannot access the repo regardless
       of what permissions.push says.
 
-    Result shape: {repo_id: {"is_public": bool|None, "can_push": bool|None}}
-      is_public: True=public, False=private, None=could not determine
-      can_push:  True=confirmed write access, False=no write access, None=skipped (no token)
+    Result shape: {repo_id: {"is_public": bool|None, "can_push": bool|None, "reachable": bool|None}}
+      is_public:  True=public, False=private, None=could not determine
+      can_push:   True=confirmed write access, False=no write access, None=skipped/indeterminate
+      reachable:  True=credential can see the repo, False=credential cannot see it at
+                  all (404/403/401/error), None=skipped (no token)
     """
     # No credential — nothing to check.
     if not pat:
-        return {r.id: {"is_public": None, "can_push": None} for r in repos}
+        return {r.id: {"is_public": None, "can_push": None, "reachable": None} for r in repos}
 
     headers = {
         "Accept": "application/vnd.github+json",
@@ -81,7 +84,7 @@ async def fetch_repo_info(repos: list, pat: str | None) -> dict:
     async def _check(client: httpx.AsyncClient, repo) -> tuple[int, dict]:
         slug = github_slug(repo.repo_url)
         if not slug:
-            return repo.id, {"is_public": None, "can_push": False}
+            return repo.id, {"is_public": None, "can_push": False, "reachable": None}
         try:
             r = await client.get(f"https://api.github.com/repos/{slug}", headers=headers)
 
@@ -96,9 +99,9 @@ async def fetch_repo_info(repos: list, pat: str | None) -> dict:
                         # App IAT: permissions.push=False is unreliable — the App's actual
                         # write access is determined by its installation permissions, not
                         # this field. Treat as indeterminate so no false "No write access".
-                        return repo.id, {"is_public": is_public, "can_push": None}
+                        return repo.id, {"is_public": is_public, "can_push": None, "reachable": True}
                     # PAT: push=False is definitive.
-                    return repo.id, {"is_public": is_public, "can_push": False}
+                    return repo.id, {"is_public": is_public, "can_push": False, "reachable": True}
 
                 if _is_fine_grained:
                     # permissions.push reflects user collaborator status, not token scope.
@@ -108,13 +111,15 @@ async def fetch_repo_info(repos: list, pat: str | None) -> dict:
                         headers=headers,
                     )
                     if r2.status_code == 403:
-                        # Token does not include this repo in its scope.
+                        # Token does not include this repo in its scope. The repo itself
+                        # is visible (200 above, likely public) so it's not "Unreachable" —
+                        # it's a write-access gap, same as the permissions.push=False case.
                         log.debug(
                             "fetch_repo_info: fine-grained PAT excluded from %s (refs 403)", slug
                         )
-                        return repo.id, {"is_public": is_public, "can_push": False}
+                        return repo.id, {"is_public": is_public, "can_push": False, "reachable": True}
 
-                return repo.id, {"is_public": is_public, "can_push": True}
+                return repo.id, {"is_public": is_public, "can_push": True, "reachable": True}
 
             if r.status_code == 401:
                 # Token invalid/expired — retry unauthenticated for public/private visibility.
@@ -124,13 +129,13 @@ async def fetch_repo_info(repos: list, pat: str | None) -> dict:
                     headers={"Accept": "application/vnd.github+json"},
                 )
                 is_public = not r2.json().get("private", True) if r2.status_code == 200 else None
-                return repo.id, {"is_public": is_public, "can_push": False}
+                return repo.id, {"is_public": is_public, "can_push": False, "reachable": False}
 
-            # 404, 403, or anything else → no write access.
-            return repo.id, {"is_public": None, "can_push": False}
+            # 404, 403, or anything else → credential cannot reach the repo.
+            return repo.id, {"is_public": None, "can_push": False, "reachable": False}
 
         except Exception:
-            return repo.id, {"is_public": None, "can_push": False}
+            return repo.id, {"is_public": None, "can_push": False, "reachable": False}
 
     async with httpx.AsyncClient(timeout=5) as client:
         results = await asyncio.gather(*[_check(client, r) for r in repos])

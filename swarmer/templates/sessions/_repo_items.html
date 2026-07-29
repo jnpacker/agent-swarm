@@ -22,7 +22,13 @@
         <code>{{ repo.branch }}</code>
         <span style="margin:0 var(--pf-t--global--spacer--xs);">→</span>
         <code>/workspace/{{ repo.local_path }}</code>
-        {% if info is not none and info.can_push is false %}
+        {% if info is not none and info.reachable is false %}
+        <span class="pf-v6-c-label pf-m-red pf-m-outline"
+              style="margin-left:var(--pf-t--global--spacer--xs); vertical-align:middle;"
+              title="The selected credential cannot see this repository — clone and push will fail">
+          <span class="pf-v6-c-label__content">⚠ Unreachable</span>
+        </span>
+        {% elif info is not none and info.can_push is false %}
         <span class="pf-v6-c-label pf-m-gold pf-m-outline"
               style="margin-left:var(--pf-t--global--spacer--xs); vertical-align:middle;"
               title="Write access could not be confirmed — commits and PRs will fail">

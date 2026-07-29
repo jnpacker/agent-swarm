@@ -1035,6 +1035,223 @@ class TestRestartServerSessions:
 
 
 # ===========================================================================
+# 6b. _restart_server_sessions() — TUI mode + GitHub App IAT refresh restart
+#     (ACM-39064: Swarmer restart must not silently let App IATs expire)
+# ===========================================================================
+
+
+class TestRestartGitHubAppIATRefresh:
+    """TUI/server sessions using a workspace GitHub App get their IAT refresh
+    loop restarted after a Swarmer restart — otherwise the App IAT (valid ~1h)
+    silently expires and git push starts failing inside an otherwise-healthy
+    sandbox."""
+
+    @pytest.mark.asyncio
+    async def test_tui_session_with_github_app_restarts_refresh_loop(self, client):
+        from swarmer.models.github_app import GitHubApp
+        from swarmer.models.session import Session as _Session
+        from swarmer.models.session_repo import SessionRepo
+
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="tui", agent_tool="opencode")
+
+        pem = "-----BEGIN RSA PRIVATE KEY-----\nseed\n-----END RSA PRIVATE KEY-----"
+        async with _TestSession() as db:
+            app = GitHubApp(
+                workspace_id=ws["id"], user_id="", app_id="111", installation_id="222",
+            )
+            app.private_key = pem
+            db.add(app)
+
+            session_obj = await db.get(_Session, s["id"])
+            session_obj.phase = "running"
+            session_obj.sandbox_name = "sandbox-tui"
+            db.add(SessionRepo(
+                session_id=s["id"], repo_url="https://github.com/org/repo",
+                branch="main", local_path="repo",
+            ))
+            await db.commit()
+
+        mock_mint = AsyncMock(return_value="ghs_freshtoken")
+        mock_ensure_provider = AsyncMock()
+        mock_start_loop = AsyncMock()
+
+        with (
+            patch("swarmer.openshell_client.list_sandboxes", new=AsyncMock(return_value=["sandbox-tui"])),
+            patch("swarmer.openshell_client.ensure_provider", new=mock_ensure_provider),
+            patch("swarmer.github_auth.mint_installation_token", new=mock_mint),
+            patch("swarmer.github_auth.start_token_refresh_loop", new=mock_start_loop),
+            patch("swarmer.database.get_db", new=_override_get_db),
+        ):
+            from swarmer.main import _restart_server_sessions
+            await _restart_server_sessions()
+            await asyncio.sleep(0)  # let the created task run its first line
+
+        mock_mint.assert_awaited_once()
+        mock_ensure_provider.assert_awaited_once()
+        _, provider_type, _config = mock_ensure_provider.call_args.args[:3]
+        assert provider_type == "github"
+        creds = mock_ensure_provider.call_args.kwargs["credentials"]
+        assert creds["GH_TOKEN"] == "ghs_freshtoken"
+        assert creds["GITHUB_TOKEN"] == "ghs_freshtoken"
+        mock_start_loop.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_session_with_pat_skips_iat_refresh(self, client):
+        """A session with an explicit PAT never triggers GitHub App IAT refresh."""
+        from swarmer.models.github_pat import GitHubPAT
+        from swarmer.models.session import Session as _Session
+        from swarmer.models.session_repo import SessionRepo
+
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="server", agent_tool="opencode")
+
+        async with _TestSession() as db:
+            pat = GitHubPAT(workspace_id=ws["id"], name="p", github_username="u")
+            pat.pat = "ghp_xxx"
+            db.add(pat)
+            await db.flush()
+
+            session_obj = await db.get(_Session, s["id"])
+            session_obj.phase = "running"
+            session_obj.sandbox_name = "sandbox-srv"
+            session_obj.github_pat_id = pat.id
+            db.add(SessionRepo(
+                session_id=s["id"], repo_url="https://github.com/org/repo",
+                branch="main", local_path="repo",
+            ))
+            await db.commit()
+
+        mock_mint = AsyncMock()
+        with (
+            patch("swarmer.openshell_client.list_sandboxes", new=AsyncMock(return_value=["sandbox-srv"])),
+            patch("swarmer.openshell_client.expose_service", new=AsyncMock(return_value="http://svc:4096")),
+            patch("swarmer.github_auth.mint_installation_token", new=mock_mint),
+            patch("swarmer.database.get_db", new=_override_get_db),
+        ):
+            from swarmer.main import _restart_server_sessions
+            await _restart_server_sessions()
+
+        mock_mint.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_github_repos_skips_iat_refresh(self, client):
+        """A session with no GitHub repos never triggers IAT refresh, even with an App configured."""
+        from swarmer.models.github_app import GitHubApp
+        from swarmer.models.session import Session as _Session
+
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="tui", agent_tool="opencode")
+
+        pem = "-----BEGIN RSA PRIVATE KEY-----\nseed\n-----END RSA PRIVATE KEY-----"
+        async with _TestSession() as db:
+            app = GitHubApp(
+                workspace_id=ws["id"], user_id="", app_id="111", installation_id="222",
+            )
+            app.private_key = pem
+            db.add(app)
+
+            session_obj = await db.get(_Session, s["id"])
+            session_obj.phase = "running"
+            session_obj.sandbox_name = "sandbox-tui2"
+            await db.commit()
+
+        mock_mint = AsyncMock()
+        with (
+            patch("swarmer.openshell_client.list_sandboxes", new=AsyncMock(return_value=["sandbox-tui2"])),
+            patch("swarmer.github_auth.mint_installation_token", new=mock_mint),
+            patch("swarmer.database.get_db", new=_override_get_db),
+        ):
+            from swarmer.main import _restart_server_sessions
+            await _restart_server_sessions()
+
+        mock_mint.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_iat_mint_failure_is_swallowed(self, client):
+        """IAT re-mint failure on restart must not crash the restart sequence."""
+        from swarmer.models.github_app import GitHubApp
+        from swarmer.models.session import Session as _Session
+        from swarmer.models.session_repo import SessionRepo
+
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="tui", agent_tool="opencode")
+
+        pem = "-----BEGIN RSA PRIVATE KEY-----\nseed\n-----END RSA PRIVATE KEY-----"
+        async with _TestSession() as db:
+            app = GitHubApp(
+                workspace_id=ws["id"], user_id="", app_id="111", installation_id="222",
+            )
+            app.private_key = pem
+            db.add(app)
+
+            session_obj = await db.get(_Session, s["id"])
+            session_obj.phase = "running"
+            session_obj.sandbox_name = "sandbox-tui3"
+            db.add(SessionRepo(
+                session_id=s["id"], repo_url="https://github.com/org/repo",
+                branch="main", local_path="repo",
+            ))
+            await db.commit()
+
+        with (
+            patch("swarmer.openshell_client.list_sandboxes", new=AsyncMock(return_value=["sandbox-tui3"])),
+            patch("swarmer.github_auth.mint_installation_token", new=AsyncMock(side_effect=Exception("github down"))),
+            patch("swarmer.database.get_db", new=_override_get_db),
+        ):
+            from swarmer.main import _restart_server_sessions
+            await _restart_server_sessions()  # must not raise
+
+        async with _TestSession() as db:
+            session_obj = await db.get(_Session, s["id"])
+            assert session_obj.phase == "running"  # unaffected by the mint failure
+
+
+# ===========================================================================
+# 6c. _restart_prompt_pollers() — positional argument regression (ACM-39064)
+# ===========================================================================
+
+
+class TestRestartPromptPollersArgs:
+    """_restart_prompt_pollers() must call _run_openshell_agent() with
+    workspace_id in the correct positional slot. A prior regression omitted
+    workspace_id, shifting every subsequent positional argument and crashing
+    with TypeError on restart for any active prompt-mode session."""
+
+    @pytest.mark.asyncio
+    async def test_run_openshell_agent_called_with_correct_positional_args(self, client):
+        from swarmer.models.session import Session as _Session
+
+        ws = await _create_workspace(client)
+        s = await _create_session(client, ws["id"], mode="prompt", agent_tool="opencode")
+
+        async with _TestSession() as db:
+            session_obj = await db.get(_Session, s["id"])
+            session_obj.phase = "running"
+            session_obj.sandbox_name = "sandbox-prompt-restart"
+            await db.commit()
+
+        mock_run = AsyncMock()
+        with (
+            patch("swarmer.routers.sessions._run_openshell_agent", new=mock_run),
+            patch("swarmer.database.get_db", new=_override_get_db),
+        ):
+            from swarmer.main import _restart_prompt_pollers
+            await _restart_prompt_pollers()
+            await asyncio.sleep(0)  # let the created task invoke the (mocked) coroutine
+
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args.args
+        # Positional signature: (session_id, workspace_id, sandbox_name, cmd, mode, agent_tool)
+        assert call_args[0] == s["id"]
+        assert call_args[1] == ws["id"]
+        assert call_args[2] == "sandbox-prompt-restart"
+        assert isinstance(call_args[3], list)
+        assert call_args[4] == "prompt"
+        assert call_args[5] == "opencode"
+
+
+# ===========================================================================
 # 7. TUI WebSocket — OpenShell path (unit-level)
 # ===========================================================================
 
