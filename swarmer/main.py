@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import logging
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse
@@ -22,6 +25,11 @@ from swarmer.routers import sessions as sessions_router
 from swarmer.routers import secrets as secrets_router
 from swarmer.routers import tui_ws as tui_router
 from swarmer.routers import workspaces as workspaces_router
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from swarmer.models.session import Session
 
 log = logging.getLogger(__name__)
 
@@ -236,7 +244,7 @@ async def _restart_server_sessions() -> None:
         break
 
 
-async def _restart_github_app_iat_refresh(session, db) -> None:
+async def _restart_github_app_iat_refresh(session: Session, db: AsyncSession) -> None:
     """Restart the IAT refresh background task for a surviving server/TUI session.
 
     No-op when the session has an explicit PAT assigned, has no GitHub repos, or

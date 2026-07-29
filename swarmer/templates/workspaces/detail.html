@@ -54,7 +54,7 @@
       <th class="pf-v6-c-table__th" role="columnheader">Status</th>
       <th class="pf-v6-c-table__th" role="columnheader">Started</th>
       <th class="pf-v6-c-table__th" role="columnheader">Duration</th>
-      <th class="pf-v6-c-table__th" role="columnheader">GitHub PAT</th>
+      <th class="pf-v6-c-table__th" role="columnheader">GitHub Credential</th>
       <th class="pf-v6-c-table__th pf-m-fit-content" role="columnheader" style="text-align:right;">Actions</th>
     </tr>
   </thead>
@@ -96,7 +96,7 @@
       <td class="pf-v6-c-table__td" role="cell" data-label="Duration" style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm); white-space:nowrap;">
         {% if s.run_duration %}{% if s.is_active %}⏱️ {% endif %}{{ s.run_duration }}{% else %}—{% endif %}
       </td>
-      <td class="pf-v6-c-table__td" role="cell" data-label="GitHub PAT" style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm);">
+      <td class="pf-v6-c-table__td" role="cell" data-label="GitHub Credential" style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm);">
         {{ s.github_pat.name if s.github_pat else '—' }}
       </td>
       <td class="pf-v6-c-table__td pf-m-fit-content" role="cell" data-label="Actions" style="text-align:right;">
