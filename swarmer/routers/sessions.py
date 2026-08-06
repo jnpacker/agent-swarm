@@ -1009,7 +1009,7 @@ async def _do_launch_openshell(
 ) -> None:
     """Launch a session via the OpenShell sandbox API."""
     from swarmer import openshell_client
-    from swarmer.openshell_policy import build_session_policy
+    from swarmer.openshell_policy import build_session_policy, slack_webhook_enabled
 
     tool = get_tool(session.agent_tool)
 
@@ -1204,6 +1204,10 @@ async def _do_launch_openshell(
         except Exception:
             pass
 
+    # Slack Incoming Webhook: grant hooks.slack.com egress when the workspace
+    # has SLACK_WEBHOOK_URL configured (see docs/SLACK_NOTIFICATIONS.md).
+    _has_slack_webhook = slack_webhook_enabled(extra_env)
+
     policy = build_session_policy(
         session=session,
         repos=list(session.repos or []),
@@ -1213,6 +1217,7 @@ async def _do_launch_openshell(
         prompt_sources=list(prompt_sources or []),
         custom_policies=_custom_policies or None,
         has_google_cloud_provider=_has_google_cloud_provider,
+        has_slack_webhook=_has_slack_webhook,
     )
 
     # Capture serialisable data for the background task before committing.

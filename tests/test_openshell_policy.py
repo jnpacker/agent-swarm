@@ -18,7 +18,11 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from swarmer.openshell_policy import build_session_policy, build_session_network_policies
+from swarmer.openshell_policy import (
+    build_session_policy,
+    build_session_network_policies,
+    slack_webhook_enabled,
+)
 
 # Tests that call build_session_policy() need the real openshell protobuf
 # classes to construct a SandboxPolicy proto.  The stub package on PyPI
@@ -256,7 +260,9 @@ def test_all_binary_entries_have_harness_true():
     repo = _make_repo(org="stolostron", name="agent-swarm")
     session = _make_session(language="golang")
     mcp = _make_mcp("jira")
-    net = build_session_network_policies(session, [repo], [mcp], "opencode", _MODEL)
+    net = build_session_network_policies(
+        session, [repo], [mcp], "opencode", _MODEL, has_slack_webhook=True,
+    )
 
     for block_name, block in net.items():
         for binary in block.get("binaries", []):
@@ -293,6 +299,70 @@ def test_jira_block_absent_when_no_jira_mcp():
 
 def test_jira_block_absent_when_only_non_jira_mcp():
     assert "atlassian.net" not in _bhosts(mcp_servers=[_make_mcp(slug="github")])
+
+
+# ---------------------------------------------------------------------------
+# 3b. Slack webhook block (conditional on SLACK_WEBHOOK_URL)
+# ---------------------------------------------------------------------------
+
+def test_slack_webhook_block_present_when_enabled():
+    net = build_session_network_policies(
+        _make_session(), [], [], "opencode", _MODEL, has_slack_webhook=True,
+    )
+    assert "slack_webhook" in net
+    hosts = [ep["host"] for ep in net["slack_webhook"]["endpoints"]]
+    assert "hooks.slack.com" in hosts
+    assert any(
+        ep["host"] == "hooks.slack.com" and ep["port"] == 443
+        for ep in net["slack_webhook"]["endpoints"]
+    )
+    bins = [b["path"] for b in net["slack_webhook"]["binaries"]]
+    assert "/usr/bin/curl" in bins
+    assert "/usr/local/bin/python3.14" in bins
+
+
+def test_slack_webhook_block_absent_by_default():
+    net = _bnet()
+    assert "slack_webhook" not in net
+    assert "hooks.slack.com" not in _bhosts()
+
+
+def test_slack_webhook_all_binaries_have_harness():
+    from swarmer.openshell_policy import _SLACK_WEBHOOK_BLOCK
+    for b in _SLACK_WEBHOOK_BLOCK["binaries"]:
+        assert b.get("harness") is True, f"expected harness=True for {b}"
+
+
+@pytest.mark.parametrize(
+    "extra_env,expected",
+    [
+        (None, False),
+        ({}, False),
+        ({"SLACK_WEBHOOK_URL": ""}, False),
+        ({"SLACK_WEBHOOK_URL": "   "}, False),
+        ({"SLACK_WEBHOOK_URL": "configured"}, True),
+    ],
+)
+def test_slack_webhook_enabled_from_workspace_env(extra_env, expected):
+    """Flag derivation used by _do_launch_openshell for SLACK_WEBHOOK_URL."""
+    assert slack_webhook_enabled(extra_env) is expected
+    net = build_session_network_policies(
+        _make_session(), [], [], "opencode", _MODEL,
+        has_slack_webhook=slack_webhook_enabled(extra_env),
+    )
+    assert ("slack_webhook" in net) is expected
+
+
+@_requires_sdk
+def test_build_session_policy_includes_slack_webhook_when_enabled():
+    """End-to-end: has_slack_webhook flows into the SandboxPolicy proto."""
+    proto = build_session_policy(
+        _make_session(), repos=[], mcp_servers=[], agent_tool="opencode",
+        model=_MODEL, has_slack_webhook=True,
+    )
+    assert "slack_webhook" in proto.network_policies
+    endpoints = proto.network_policies["slack_webhook"].endpoints
+    assert any(ep.host == "hooks.slack.com" and ep.port == 443 for ep in endpoints)
 
 
 # ---------------------------------------------------------------------------
