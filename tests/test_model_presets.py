@@ -41,7 +41,6 @@ class TestResolvePreset:
             "plan": settings.claude_preset_plan_model,
             "build": settings.claude_preset_build_model,
             "small": settings.claude_preset_small_model,
-            "plan_variant": settings.claude_preset_plan_variant,
         }
 
     def test_resolve_gemini_preset(self):
@@ -50,7 +49,6 @@ class TestResolvePreset:
             "plan": settings.gemini_preset_plan_model,
             "build": settings.gemini_preset_build_model,
             "small": settings.gemini_preset_small_model,
-            "plan_variant": settings.gemini_preset_plan_variant,
         }
 
     def test_resolve_unknown_preset_returns_none(self):
@@ -174,8 +172,6 @@ class TestBuildConfigDataPresets:
         assert config["model"] == settings.claude_preset_build_model
         assert config["small_model"] == settings.claude_preset_small_model
         assert config["agent"]["plan"]["model"] == settings.claude_preset_plan_model
-        # claude_preset_plan_variant defaults to "" — no variant key emitted.
-        assert "variant" not in config["agent"]["plan"]
 
     def test_gemini_preset_resolves_all_three_roles(self, monkeypatch):
         monkeypatch.setattr(settings, "opencode_experimental_plan_mode", True)
@@ -184,14 +180,6 @@ class TestBuildConfigDataPresets:
         assert config["model"] == settings.gemini_preset_build_model
         assert config["small_model"] == settings.gemini_preset_small_model
         assert config["agent"]["plan"]["model"] == settings.gemini_preset_plan_model
-        assert config["agent"]["plan"]["variant"] == settings.gemini_preset_plan_variant
-
-    def test_gemini_preset_plan_variant_omitted_when_unset(self, monkeypatch):
-        monkeypatch.setattr(settings, "opencode_experimental_plan_mode", True)
-        monkeypatch.setattr(settings, "gemini_preset_plan_variant", "")
-        data = _opencode.build_config_data(model="gemini")
-        config = json.loads(data["opencode.json"])
-        assert "variant" not in config["agent"]["plan"]
 
     def test_plan_stanza_omitted_when_plan_mode_disabled(self, monkeypatch):
         monkeypatch.setattr(settings, "opencode_experimental_plan_mode", False)

@@ -621,9 +621,7 @@ Config written to `/workspace/.config/opencode/opencode.json` at pod startup.
   radio pills at the top of the Model field. Each preset maps to three roles configured in
   `Settings` (`swarmer/config.py`), so they can be changed without code changes:
   - **plan** — stronger-reasoning model used by the opencode plan agent (requires
-    `OPENCODE_EXPERIMENTAL_PLAN_MODE=true`, enabled by default). An optional
-    `*_preset_plan_variant` setting (e.g. `GEMINI_PRESET_PLAN_VARIANT=high`) sets the
-    opencode `agent.plan.variant` reasoning-effort field for that role.
+    `OPENCODE_EXPERIMENTAL_PLAN_MODE=true`, enabled by default)
   - **build** — the model used for `opencode run` / the coding agent (this is what session.model
     resolves to for policy/network purposes)
   - **small** — title generation / housekeeping model
