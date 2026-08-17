@@ -30,23 +30,27 @@ class OpenCodeStrategy(AgentToolStrategy):
                 "plan": settings.claude_preset_plan_model,
                 "build": settings.claude_preset_build_model,
                 "small": settings.claude_preset_small_model,
+                "plan_variant": settings.claude_preset_plan_variant,
             }
         if preset == "gemini":
             return {
                 "plan": settings.gemini_preset_plan_model,
                 "build": settings.gemini_preset_build_model,
                 "small": settings.gemini_preset_small_model,
+                "plan_variant": settings.gemini_preset_plan_variant,
             }
         return None
 
     def build_config_data(self, secret=None, mcp_servers=None, use_inference_local: bool = False, model: str = "") -> dict[str, str]:  # noqa: ARG002 (use_inference_local retained for interface compat)
         preset = self.resolve_preset(model)
         _plan_model = ""
+        _plan_variant = ""
         if preset:
             # Preset selected — plan/build/small all come from the configured mapping.
             _model = preset["build"]
             _small_model = preset["small"]
             _plan_model = preset["plan"]
+            _plan_variant = preset.get("plan_variant", "")
         else:
             # Raw provider/model string (not a preset) — derive small_model from the
             # chosen model: swap pro→flash / opus/sonnet→haiku within same provider.
@@ -95,7 +99,10 @@ class OpenCodeStrategy(AgentToolStrategy):
         # Only takes effect at runtime when OPENCODE_EXPERIMENTAL_PLAN_MODE=true
         # is also set in the sandbox environment (see routers/sessions.py).
         if _plan_model and settings.opencode_experimental_plan_mode:
-            config["agent"] = {"plan": {"model": _plan_model}}
+            _plan_agent = {"model": _plan_model}
+            if _plan_variant:
+                _plan_agent["variant"] = _plan_variant
+            config["agent"] = {"plan": _plan_agent}
 
         if mcp_servers:
             mcp_config = {}
