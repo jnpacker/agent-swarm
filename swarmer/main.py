@@ -125,6 +125,7 @@ async def _restart_prompt_pollers() -> None:
     from sqlalchemy import select
 
     from swarmer.database import get_db
+    from swarmer.models.sandbox_env_var import SandboxEnvVar
     from swarmer.models.session import Session
 
     async for db in get_db():
@@ -138,22 +139,62 @@ async def _restart_prompt_pollers() -> None:
         )
         for s in result.scalars().all():
             import shlex as _shlex
-            from swarmer.routers.sessions import _run_openshell_agent
+
             from swarmer.agent_tools.registry import get as _get_tool
+            from swarmer.routers.sessions import (
+                _resolve_schedule_prompt,
+                _resolve_session_prompt,
+                _run_openshell_agent,
+            )
+
+            # Reconstruct workspace extra env vars (arbitrary key-value pairs stored
+            # in the DB and injected into the sandbox at initial launch via
+            # exec_command_streaming(env=...).  These are NOT the AI credentials
+            # (those live in the OpenShell gateway provider layer, which persists
+            # across Swarmer restarts).  Without this, shell/prompt sessions that
+            # rely on JIRA_SERVER_URL, GOOGLE_API_KEY, or any other workspace env
+            # var would restart with an empty environment and silently fail.
+            _ev_result = await db.execute(
+                select(SandboxEnvVar).where(SandboxEnvVar.workspace_id == s.workspace_id)
+            )
+            _env_vars: dict[str, str] = {row.key: row.value for row in _ev_result.scalars().all()}
+
             _tool = _get_tool(s.agent_tool)
-            _raw_model = s.provider or _tool.get_default_model(False)
-            # s.provider is a family preset name ("claude"/"gemini", ACM-37232);
-            # resolve it to a concrete provider/model@version ID for the CLI flag.
-            _model = _tool.resolve_build_model(_raw_model)
-            # Reconstruct the same AGENTS.md-reading command used at initial launch
-            # (ACM-35060).  build_main_cmd would embed a CLI arg that is unavailable
-            # at restart time; AGENTS.md already exists in the sandbox from launch.
-            _tool_bin = {"opencode": "opencode run"}.get(s.agent_tool, "opencode run")
-            _model_arg = _shlex.quote(_model) if _model else ""
-            _main_cmd = f"HOME=/sandbox {_tool_bin} --model {_model_arg} \"$(</sandbox/AGENTS.md)\""
+            if s.agent_tool == "shell":
+                # Shell tool: reconstruct the command exactly as it was resolved
+                # at initial launch. build_main_cmd() at launch time is passed
+                # resolved_prompt (instruction_prompt layered with any
+                # prompt_id/schedule override — see _resolve_session_prompt /
+                # _resolve_schedule_prompt), which can differ from the raw
+                # instruction_prompt. Re-resolve the same way here so a restart
+                # reruns the identical command rather than a stale or empty one.
+                if s.active_schedule_id:
+                    _raw_cmd = (await _resolve_schedule_prompt(s.active_schedule_id, s, db)).strip()
+                else:
+                    _raw_cmd = (await _resolve_session_prompt(s, db)).strip()
+                # Security note: _raw_cmd is the re-resolved instruction_prompt injected
+                # into a compound sh -c string without sanitisation — intentional by
+                # design (sandbox is the security boundary; see sessions.py equivalent).
+                _main_cmd = (
+                    f"export HOME=/sandbox PATH=\"/sandbox/.local/bin:$PATH\" && "
+                    f"cd /sandbox && {_raw_cmd}"
+                )
+            else:
+                _raw_model = s.provider or _tool.get_default_model(False)
+                # s.provider is a family preset name ("claude"/"gemini", ACM-37232);
+                # resolve it to a concrete provider/model@version ID for the CLI flag.
+                _model = _tool.resolve_build_model(_raw_model)
+                # Reconstruct the same AGENTS.md-reading command used at initial launch
+                # (ACM-35060).  build_main_cmd would embed a CLI arg that is unavailable
+                # at restart time; AGENTS.md already exists in the sandbox from launch.
+                _tool_bin = {"opencode": "opencode run"}.get(s.agent_tool, "opencode run")
+                _model_arg = _shlex.quote(_model) if _model else ""
+                _main_cmd = f"HOME=/sandbox {_tool_bin} --model {_model_arg} \"$(</sandbox/AGENTS.md)\""
             asyncio.create_task(
                 _run_openshell_agent(
-                    s.id, s.workspace_id, s.sandbox_name, ["sh", "-c", _main_cmd], s.mode, s.agent_tool
+                    s.id, s.workspace_id, s.sandbox_name, ["sh", "-c", _main_cmd], s.mode, s.agent_tool,
+                    env_vars=_env_vars,
+                    pat_id=s.github_pat_id,
                 ),
                 name=f"openshell-agent-{s.id}",
             )
