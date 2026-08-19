@@ -8,6 +8,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application
 COPY swarmer/ swarmer/
+# Ops/admin scripts run via `kubectl exec` against a live pod (e.g.
+# scripts/openshell_seed_oidc_credential.py — see `make openshell-oidc-seed`).
+COPY scripts/ scripts/
 
 # Create mount point directories as root (base image runs as uid 1001)
 # Note: PVC mounts overlay /data at runtime; ensure the PVC root is group-0

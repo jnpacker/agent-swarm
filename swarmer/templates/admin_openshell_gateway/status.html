@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}OpenShell Gateway — Swarmer{% endblock %}
+
+{% block content %}
+<h1 class="pf-v6-c-title pf-m-2xl" style="margin-bottom:var(--pf-t--global--spacer--xs);">🔌 OpenShell Gateway</h1>
+<p style="color:var(--pf-t--global--text--color--subtle); margin-bottom:var(--pf-t--global--spacer--lg);">
+  Manage the OIDC credential Swarmer uses to connect to a remote/hosted OpenShell gateway
+  (e.g. a Keycloak-backed gateway like <code>swarm</code>). Deployment-level settings
+  (<code>OPENSHELL_AUTH_MODE</code>, <code>OPENSHELL_GATEWAY_URL</code>,
+  <code>OPENSHELL_OIDC_ISSUER</code>/<code>CLIENT_ID</code>/<code>AUDIENCE</code>) are set via
+  environment variables and require a redeploy to change — only the refresh token is managed here.
+</p>
+
+{% if is_admin %}
+
+<h2 class="pf-v6-c-title pf-m-lg" style="margin-bottom:var(--pf-t--global--spacer--md);">Status</h2>
+<table class="pf-v6-c-table pf-m-grid-md" role="grid" style="margin-bottom:var(--pf-t--global--spacer--xl); max-width:800px;">
+  <tbody class="pf-v6-c-table__tbody" role="rowgroup">
+    <tr class="pf-v6-c-table__tr" role="row">
+      <td class="pf-v6-c-table__td" role="cell" style="font-weight:var(--pf-t--global--font--weight--heading--bold); width:220px;">Auth mode</td>
+      <td class="pf-v6-c-table__td" role="cell"><code>{{ status.auth_mode or "—" }}</code></td>
+    </tr>
+    <tr class="pf-v6-c-table__tr" role="row">
+      <td class="pf-v6-c-table__td" role="cell" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">Gateway URL</td>
+      <td class="pf-v6-c-table__td" role="cell"><code>{{ status.gateway_url or "—" }}</code></td>
+    </tr>
+    <tr class="pf-v6-c-table__tr" role="row">
+      <td class="pf-v6-c-table__td" role="cell" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">OIDC issuer</td>
+      <td class="pf-v6-c-table__td" role="cell"><code>{{ status.oidc_issuer or "—" }}</code></td>
+    </tr>
+    <tr class="pf-v6-c-table__tr" role="row">
+      <td class="pf-v6-c-table__td" role="cell" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">OIDC client ID</td>
+      <td class="pf-v6-c-table__td" role="cell"><code>{{ status.oidc_client_id or "—" }}</code></td>
+    </tr>
+    <tr class="pf-v6-c-table__tr" role="row">
+      <td class="pf-v6-c-table__td" role="cell" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">OIDC CA bundle</td>
+      <td class="pf-v6-c-table__td" role="cell">
+        <code>{{ status.oidc_tls_ca or "— (gRPC default bundled roots)" }}</code>
+        <div style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm); margin-top:2px;">
+          Only needed if the gateway's cert chains to a private/internal CA. If Test Connection fails with
+          <code>CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate</code>, see
+          <code>make openshell-oidc-ca CA_FILE=...</code>.
+        </div>
+      </td>
+    </tr>
+    <tr class="pf-v6-c-table__tr" role="row">
+      <td class="pf-v6-c-table__td" role="cell" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">Credential</td>
+      <td class="pf-v6-c-table__td" role="cell">
+        {% if status.has_credential %}
+          <span class="pf-v6-c-label pf-m-green pf-m-compact"><span class="pf-v6-c-label__content">Configured</span></span>
+        {% else %}
+          <span class="pf-v6-c-label pf-m-orange pf-m-compact"><span class="pf-v6-c-label__content">Not configured</span></span>
+        {% endif %}
+        {% if status.loaded_in_process %}
+          <span style="color:var(--pf-t--global--text--color--subtle); font-size:var(--pf-t--global--font--size--sm); margin-left:var(--pf-t--global--spacer--sm);">active in this process</span>
+        {% endif %}
+      </td>
+    </tr>
+  </tbody>
+</table>
+
+{% if not status.oidc_configured %}
+<div class="pf-v6-c-alert pf-m-warning" style="margin-bottom:var(--pf-t--global--spacer--lg); max-width:800px;">
+  <div class="pf-v6-c-alert__icon"></div>
+  <p class="pf-v6-c-alert__title">OIDC is not fully configured</p>
+  <div class="pf-v6-c-alert__description">
+    <code>OPENSHELL_OIDC_ISSUER</code> and/or <code>OPENSHELL_OIDC_CLIENT_ID</code> are not set on the
+    Swarmer deployment. You can still save a credential here to pre-seed it, but the gateway won't be
+    usable until those env vars (and <code>OPENSHELL_AUTH_MODE=oidc</code>) are set and Swarmer is redeployed.
+  </div>
+</div>
+{% endif %}
+
+<h2 class="pf-v6-c-title pf-m-lg" style="margin-bottom:var(--pf-t--global--spacer--md);">
+  {{ "Rotate" if status.has_credential else "Set" }} Refresh Token
+</h2>
+<p style="color:var(--pf-t--global--text--color--subtle); margin-bottom:var(--pf-t--global--spacer--md); max-width:800px;">
+  Obtain this by running <code>openshell gateway login &lt;name&gt;</code> on a machine with a browser,
+  then pasting the <code>refresh_token</code> field from
+  <code>~/.config/openshell/gateways/&lt;name&gt;/oidc_token.json</code>. Swarmer never performs the
+  interactive OIDC login itself. Stored encrypted; never displayed back once saved.
+</p>
+<form method="post" action="/admin/openshell-gateway/credential" class="pf-v6-c-form" style="max-width:600px;">
+  <div class="pf-v6-c-form__group">
+    <label class="pf-v6-c-form__label" for="refresh-token">
+      <span class="pf-v6-c-form__label-text" style="font-weight:var(--pf-t--global--font--weight--heading--bold);">Refresh token</span>
+      <span class="pf-v6-c-form__label-required" aria-hidden="true">&#42;</span>
+    </label>
+    <div class="pf-v6-c-form__group-control">
+      <textarea class="pf-v6-c-form-control" id="refresh-token" name="refresh_token" rows="3"
+                placeholder="eyJhbGci..." required autocomplete="off" spellcheck="false"
+                style="font-family:var(--pf-t--global--font--family--mono);"></textarea>
+    </div>
+  </div>
+  <div class="pf-v6-c-form__group pf-m-action" style="margin-top:var(--pf-t--global--spacer--md);">
+    <div class="pf-v6-c-form__actions">
+      <button type="submit" class="pf-v6-c-button pf-m-primary">Save Credential</button>
+    </div>
+  </div>
+</form>
+
+<h2 class="pf-v6-c-title pf-m-lg" style="margin:var(--pf-t--global--spacer--xl) 0 var(--pf-t--global--spacer--md);">Actions</h2>
+<div style="display:flex; gap:var(--pf-t--global--spacer--sm);">
+  <form method="post" action="/admin/openshell-gateway/test">
+    <button type="submit" class="pf-v6-c-button pf-m-secondary pf-m-small">Test Connection</button>
+  </form>
+  {% if status.has_credential %}
+  <form method="post" action="/admin/openshell-gateway/clear"
+        onsubmit="return confirm('Clear the stored OpenShell OIDC credential? Sessions using this gateway will stop working until a new one is saved.')">
+    <button type="submit" class="pf-v6-c-button pf-m-danger pf-m-small">Clear Credential</button>
+  </form>
+  {% endif %}
+</div>
+
+{% else %}
+<div class="pf-v6-c-empty-state">
+  <div class="pf-v6-c-empty-state__content">
+    <h2 class="pf-v6-c-empty-state__title-text">You are not an admin</h2>
+    <div class="pf-v6-c-empty-state__body">
+      Ask an existing Swarmer admin to add you from the <a href="/admins">Admins</a> page.
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

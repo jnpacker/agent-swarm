@@ -578,6 +578,153 @@ class TestAdminCrud:
 
 
 # ===========================================================================
+# OpenShell Gateway admin config (ACM-41655)
+# ===========================================================================
+
+
+class TestOpenshellGatewayAdmin:
+    @pytest_asyncio.fixture(autouse=True)
+    async def _reset_oidc_state(self, tmp_path):
+        """openshell_oidc keeps a module-level singleton — reset it around
+        each test so state (and any captured event loop) doesn't leak.
+
+        openshell_oidc._persist_bundle()/_load_bundle() call the *real*
+        swarmer.database.get_db() directly (background-task style, same
+        pattern used by scheduler.py/main.py) rather than via FastAPI DI, so
+        app.dependency_overrides[get_db] never applies to them. Give the
+        real swarmer.database module a working (file-backed, so it persists
+        across connections — unlike ":memory:") engine so those direct calls
+        succeed, entirely separate from this file's `_TestSession`/`_engine`
+        used for DI-overridden API calls.
+
+        NB: monkeypatching `swarmer.database.get_db` instead would be
+        simpler in isolation, but races with the `client` fixture — which
+        does its own fresh `from swarmer.database import get_db` at fixture
+        setup time — depending on autouse-fixture instantiation order.
+        """
+        import swarmer.database as database_module
+        import swarmer.openshell_oidc as oidc
+        from swarmer.config import settings
+
+        database_module.init_db(f"sqlite+aiosqlite:///{tmp_path}/openshell_gateway_test.db")
+        await database_module.create_tables()
+
+        orig = (
+            settings.openshell_auth_mode,
+            settings.openshell_oidc_issuer,
+            settings.openshell_oidc_client_id,
+            settings.openshell_oidc_audience,
+        )
+        yield
+        oidc._instance = None
+        (
+            settings.openshell_auth_mode,
+            settings.openshell_oidc_issuer,
+            settings.openshell_oidc_client_id,
+            settings.openshell_oidc_audience,
+        ) = orig
+
+    @pytest.mark.asyncio
+    async def test_non_admin_cannot_access(self, client):
+        resp = await client.get("/api/v1/openshell-gateway")
+        assert resp.status_code == 403
+
+        resp = await client.post("/api/v1/openshell-gateway/credential", json={"refresh_token": "rt"})
+        assert resp.status_code == 403
+
+        resp = await client.delete("/api/v1/openshell-gateway/credential")
+        assert resp.status_code == 403
+
+        resp = await client.post("/api/v1/openshell-gateway/test")
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_admin_sees_default_status(self, client):
+        from swarmer.config import settings
+
+        settings.workspace_admin_users = "test-user"
+        settings.openshell_auth_mode = "mtls"
+        settings.openshell_oidc_issuer = ""
+        settings.openshell_oidc_client_id = ""
+
+        resp = await client.get("/api/v1/openshell-gateway")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["auth_mode"] == "mtls"
+        assert body["oidc_configured"] is False
+        assert body["has_credential"] is False
+        assert body["loaded_in_process"] is False
+
+    @pytest.mark.asyncio
+    async def test_admin_can_save_and_clear_credential(self, client):
+        from swarmer.config import settings
+
+        settings.workspace_admin_users = "test-user"
+
+        resp = await client.post(
+            "/api/v1/openshell-gateway/credential", json={"refresh_token": "rt-secret"}
+        )
+        assert resp.status_code == 200, resp.text
+
+        resp = await client.get("/api/v1/openshell-gateway")
+        assert resp.json()["has_credential"] is True
+
+        resp = await client.delete("/api/v1/openshell-gateway/credential")
+        assert resp.status_code == 200
+
+        resp = await client.get("/api/v1/openshell-gateway")
+        assert resp.json()["has_credential"] is False
+
+    @pytest.mark.asyncio
+    async def test_blank_refresh_token_rejected(self, client):
+        from swarmer.config import settings
+
+        settings.workspace_admin_users = "test-user"
+        resp = await client.post("/api/v1/openshell-gateway/credential", json={"refresh_token": "  "})
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_test_connection_requires_oidc_mode(self, client):
+        from swarmer.config import settings
+
+        settings.workspace_admin_users = "test-user"
+        settings.openshell_auth_mode = "mtls"
+
+        resp = await client.post("/api/v1/openshell-gateway/test")
+        assert resp.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_test_connection_success(self, client, monkeypatch):
+        from swarmer.config import settings
+
+        settings.workspace_admin_users = "test-user"
+        settings.openshell_auth_mode = "oidc"
+
+        async def _fake_health_check(client=None):
+            return None
+
+        monkeypatch.setattr("swarmer.openshell_client.health_check", _fake_health_check)
+
+        resp = await client.post("/api/v1/openshell-gateway/test")
+        assert resp.status_code == 200, resp.text
+
+    @pytest.mark.asyncio
+    async def test_test_connection_failure_surfaces_502(self, client, monkeypatch):
+        from swarmer.config import settings
+
+        settings.workspace_admin_users = "test-user"
+        settings.openshell_auth_mode = "oidc"
+
+        async def _fake_health_check(client=None):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr("swarmer.openshell_client.health_check", _fake_health_check)
+
+        resp = await client.post("/api/v1/openshell-gateway/test")
+        assert resp.status_code == 502
+
+
+# ===========================================================================
 # Session tests
 # ===========================================================================
 

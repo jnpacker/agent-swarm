@@ -724,3 +724,121 @@ async def test_exec_with_supervisor_retry_gives_up_after_max_attempts():
             await oc._exec_with_supervisor_retry(_fn, max_attempts=3, base_delay=0.001)
 
     assert call_count == 3  # initial + 2 retries = max_attempts
+
+
+# ---------------------------------------------------------------------------
+# _get_client() auth-mode branching (ACM-41655)
+# ---------------------------------------------------------------------------
+# These patch the real `openshell.SandboxClient`/`TlsConfig` module attributes
+# (rather than the stubbed sys.modules used at import time above) because
+# oc._get_client() does `from openshell import ...` inside the function body —
+# patching the module attribute is what call-time import picks up.
+
+
+@pytest.fixture
+def _oidc_settings(monkeypatch):
+    from swarmer.config import settings
+    monkeypatch.setattr(settings, "openshell_gateway_url", "gw.example.com:443")
+    monkeypatch.setattr(settings, "openshell_auth_mode", "oidc")
+    monkeypatch.setattr(settings, "openshell_tls_ca", "")
+    monkeypatch.setattr(settings, "openshell_bearer_token", "")
+    monkeypatch.setattr(settings, "openshell_oidc_tls_ca", "")
+    return settings
+
+
+def test_get_client_oidc_uses_token_provider_and_default_grpc_roots(_oidc_settings):
+    """No OIDC-specific CA configured — falls back to TlsConfig() with no
+    args, i.e. gRPC's own bundled default root bundle (NOT the OS/system
+    trust store — grpc-python does not read /etc/ssl/certs)."""
+    token_fn = MagicMock(return_value="at-1")
+    with patch("openshell.SandboxClient") as MockClient, \
+         patch("openshell.TlsConfig") as MockTls, \
+         patch("swarmer.openshell_oidc.get_token_provider", return_value=token_fn):
+        oc._get_client()
+
+    MockTls.assert_called_once_with()
+    _, kwargs = MockClient.call_args
+    assert kwargs["bearer_token"] is token_fn
+    assert kwargs["tls"] is MockTls.return_value
+
+
+def test_get_client_oidc_ignores_local_mtls_material_even_if_set(_oidc_settings, monkeypatch):
+    """OPENSHELL_TLS_CA/CERT/KEY are almost always the *local* in-cluster
+    OpenShell's self-signed CA (unconditionally mounted by
+    k8s/swarmer/deployment.yaml) — using it as root_certificates for a
+    *different* remote OIDC gateway would fail TLS verification against
+    that gateway's real certificate. auth_mode=oidc must always ignore it."""
+    from swarmer.config import settings
+    monkeypatch.setattr(settings, "openshell_tls_ca", "/tmp/ca.crt")
+    monkeypatch.setattr(settings, "openshell_tls_cert", "/tmp/tls.crt")
+    monkeypatch.setattr(settings, "openshell_tls_key", "/tmp/tls.key")
+    monkeypatch.setattr(settings, "openshell_oidc_tls_ca", "")
+    token_fn = MagicMock(return_value="at-1")
+
+    with patch("openshell.SandboxClient") as MockClient, \
+         patch("openshell.TlsConfig") as MockTls, \
+         patch("swarmer.openshell_oidc.get_token_provider", return_value=token_fn):
+        oc._get_client()
+
+    # gRPC default bundled roots (no args) — never the local ca_path.
+    MockTls.assert_called_once_with()
+    _, kwargs = MockClient.call_args
+    assert kwargs["bearer_token"] is token_fn
+    assert kwargs["tls"] is MockTls.return_value
+
+
+def test_get_client_oidc_uses_dedicated_oidc_ca_when_configured(_oidc_settings, monkeypatch):
+    """OPENSHELL_OIDC_TLS_CA is a separate setting from the local mTLS CA —
+    used when the remote gateway's cert chains to a private/internal CA not
+    in gRPC's bundled root list (e.g. an internal corporate CA)."""
+    from swarmer.config import settings
+    monkeypatch.setattr(settings, "openshell_oidc_tls_ca", "/tmp/oidc-ca.crt")
+    token_fn = MagicMock(return_value="at-1")
+
+    with patch("openshell.SandboxClient") as MockClient, \
+         patch("openshell.TlsConfig") as MockTls, \
+         patch("swarmer.openshell_oidc.get_token_provider", return_value=token_fn):
+        oc._get_client()
+
+    _, tls_kwargs = MockTls.call_args
+    assert str(tls_kwargs["ca_path"]) == "/tmp/oidc-ca.crt"
+    assert "cert_path" not in tls_kwargs and "key_path" not in tls_kwargs
+    _, kwargs = MockClient.call_args
+    assert kwargs["bearer_token"] is token_fn
+    assert kwargs["tls"] is MockTls.return_value
+
+
+def test_get_client_mtls_mode_unaffected_by_oidc_module(monkeypatch):
+    """Default (mtls) auth mode never touches openshell_oidc."""
+    from swarmer.config import settings
+    monkeypatch.setattr(settings, "openshell_gateway_url", "gw.example.com:8080")
+    monkeypatch.setattr(settings, "openshell_auth_mode", "mtls")
+    monkeypatch.setattr(settings, "openshell_tls_ca", "")
+    monkeypatch.setattr(settings, "openshell_bearer_token", "static-token")
+
+    with patch("openshell.SandboxClient") as MockClient, \
+         patch("openshell.TlsConfig") as MockTls, \
+         patch("swarmer.openshell_oidc.get_token_provider") as mock_get_provider:
+        oc._get_client()
+
+    mock_get_provider.assert_not_called()
+    MockTls.assert_not_called()
+    _, kwargs = MockClient.call_args
+    assert kwargs["bearer_token"] == "static-token"
+    assert kwargs["tls"] is None
+
+
+def test_get_client_bearer_mode_uses_static_token(monkeypatch):
+    from swarmer.config import settings
+    monkeypatch.setattr(settings, "openshell_gateway_url", "gw.example.com:8080")
+    monkeypatch.setattr(settings, "openshell_auth_mode", "bearer")
+    monkeypatch.setattr(settings, "openshell_tls_ca", "")
+    monkeypatch.setattr(settings, "openshell_bearer_token", "static-token")
+
+    with patch("openshell.SandboxClient") as MockClient, \
+         patch("swarmer.openshell_oidc.get_token_provider") as mock_get_provider:
+        oc._get_client()
+
+    mock_get_provider.assert_not_called()
+    _, kwargs = MockClient.call_args
+    assert kwargs["bearer_token"] == "static-token"

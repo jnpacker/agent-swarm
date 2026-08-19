@@ -6,6 +6,7 @@ from swarmer.api.v1 import (
     admins,
     env_vars,
     mcp_servers,
+    openshell_gateway,
     prompts,
     repos,
     secrets,
@@ -23,3 +24,4 @@ router.include_router(secrets.router)
 router.include_router(env_vars.router)
 router.include_router(mcp_servers.router)
 router.include_router(prompts.router)
+router.include_router(openshell_gateway.router)

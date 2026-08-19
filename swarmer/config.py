@@ -41,7 +41,32 @@ class Settings(BaseSettings):
     openshell_tls_cert: str = ""        # path to client TLS cert
     openshell_tls_key: str = ""         # path to client TLS key
     openshell_tls_ca: str = ""          # path to CA bundle
-    openshell_bearer_token: str = ""    # bearer token for gateway/supervisor auth
+    openshell_bearer_token: str = ""    # static bearer token for gateway/supervisor auth
+
+    # Gateway auth mode (ACM-41655) — "mtls" (default; in-cluster/local gateway
+    # installed via `make deploy`), "oidc" (remote/hosted gateway authenticated
+    # via a Keycloak-style IdP, e.g. the "swarm" gateway registered with the
+    # `openshell` CLI), or "bearer" (static OPENSHELL_BEARER_TOKEN above).
+    openshell_auth_mode: str = "mtls"
+    # OIDC settings (auth_mode == "oidc"). Mirrors the fields OpenShell's own
+    # CLI stores in ~/.config/openshell/gateways/<name>/metadata.json. The
+    # refresh token itself is intentionally NOT a Settings field — per the
+    # Sensitive Data Policy it is stored encrypted in the DB
+    # (openshell_gateway_credentials table, see
+    # swarmer/models/openshell_gateway_credential.py) and seeded via
+    # scripts/openshell_seed_oidc_credential.py, never in .env/K8s objects.
+    openshell_oidc_issuer: str = ""
+    openshell_oidc_client_id: str = ""
+    openshell_oidc_audience: str = ""
+    # Optional CA bundle (PEM) for validating the OIDC gateway's TLS
+    # certificate — distinct from openshell_tls_ca above, which is the
+    # *local* in-cluster gateway's self-signed mTLS CA and is always ignored
+    # in oidc mode (see _get_client()). Needed when the remote gateway's cert
+    # chains to a private/internal CA not present in gRPC's bundled Mozilla
+    # root list (e.g. an internal corporate CA) — leave unset to use gRPC's
+    # default bundled public-CA roots.
+    openshell_oidc_tls_ca: str = ""
+
     sandbox_gc_interval: int = 300      # seconds between sandbox GC sweeps
     log_level: str = "INFO"             # Python logging level: DEBUG, INFO, WARNING, ERROR
 

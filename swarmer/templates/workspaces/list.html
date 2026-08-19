@@ -6,6 +6,7 @@
   {% if admin_bootstrap_available %}
   <a href="/admins" class="pf-v6-c-button pf-m-warning pf-m-small">⚠ Set up the first Admin</a>
   {% elif is_admin %}
+  <a href="/admin/openshell-gateway" class="pf-v6-c-button pf-m-secondary pf-m-small">🔌 OpenShell Gateway</a>
   <a href="/admins" class="pf-v6-c-button pf-m-secondary pf-m-small">👑 Admins</a>
   {% endif %}
   {% if can_create_workspaces %}

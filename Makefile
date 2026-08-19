@@ -52,13 +52,33 @@ OPENSHELL_TLS_DIR        ?= auth/openshell
 # up a changed value.
 OPENSHELL_WORKSPACE_STORAGE ?= 10Gi
 
+# Remote/hosted OpenShell gateway auth (ACM-41655). Defaults ("mtls", empty
+# gateway URL) preserve today's behavior: `make deploy` installs OpenShell
+# in-cluster via Helm above and points Swarmer at it over mTLS — no action
+# needed. To instead connect Swarmer to a remote OIDC-authenticated gateway
+# (e.g. one registered as "swarm" via the `openshell` CLI), set these (in
+# .env or on the `make deploy` command line) to that gateway's values —
+# `openshell gateway list` / `~/.config/openshell/gateways/<name>/metadata.json`
+# has them. The in-cluster OpenShell install above still runs regardless
+# (harmless if unused) — this does not yet skip it (see ACM-41655 Phase 1,
+# "external deploy mode", still open). The OIDC refresh token itself is NEVER
+# set here — seed it via the /admin/openshell-gateway page (recommended) or
+# `make openshell-oidc-seed GATEWAY=<name>`, both of which write it encrypted
+# to Swarmer's DB, never to an env var.
+OPENSHELL_AUTH_MODE      ?= mtls
+OPENSHELL_GATEWAY_URL    ?=
+OPENSHELL_OIDC_ISSUER    ?=
+OPENSHELL_OIDC_CLIENT_ID ?=
+OPENSHELL_OIDC_AUDIENCE  ?=
+
 # ──────────────────────────────────────────────────────────────
 #  Phony targets
 # ──────────────────────────────────────────────────────────────
 .PHONY: setup-secret user-token grant-workspace grant-workspace-access grant-workspace-create \
         dev lint test smoke-test-jira \
         sync-images image-build image-push \
-        deploy delete connect openshell-register connect-openshell status \
+        deploy delete connect openshell-register connect-openshell \
+        openshell-gateway-connect openshell-oidc-seed openshell-oidc-ca status \
         kind-deploy kind-delete \
         help
 
@@ -401,11 +421,16 @@ and pinned version $(OPENSHELL_VERSION) (reusing other existing values)..."; \
 	MAX_VAL=$$(grep '^MAX_CONCURRENT_AGENTS=' .deploy-defaults 2>/dev/null | cut -d= -f2); \
 	MAX_VAL=$${MAX_VAL:-5}; \
 	\
-	OPENSHELL_GW=$$(kubectl get svc openshell -n $(OPENSHELL_NAMESPACE) \
-	  -o jsonpath='{.metadata.name}.{.metadata.namespace}.svc.cluster.local:{.spec.ports[?(@.appProtocol=="grpc")].port}' \
-	  2>/dev/null || true); \
+	OPENSHELL_GW="$(OPENSHELL_GATEWAY_URL)"; \
 	if [ -z "$$OPENSHELL_GW" ]; then \
-	  OPENSHELL_GW="openshell.$(OPENSHELL_NAMESPACE).svc.cluster.local:8080"; \
+	  OPENSHELL_GW=$$(kubectl get svc openshell -n $(OPENSHELL_NAMESPACE) \
+	    -o jsonpath='{.metadata.name}.{.metadata.namespace}.svc.cluster.local:{.spec.ports[?(@.appProtocol=="grpc")].port}' \
+	    2>/dev/null || true); \
+	  if [ -z "$$OPENSHELL_GW" ]; then \
+	    OPENSHELL_GW="openshell.$(OPENSHELL_NAMESPACE).svc.cluster.local:8080"; \
+	  fi; \
+	else \
+	  echo "Using explicit OPENSHELL_GATEWAY_URL=$$OPENSHELL_GW (skipping in-cluster Service auto-detect)"; \
 	fi; \
 	\
 	DEFAULT_TOOL="opencode"; \
@@ -457,7 +482,11 @@ and pinned version $(OPENSHELL_VERSION) (reusing other existing values)..."; \
 	     s|DEFAULT_AGENT_TOOL_VALUE|$$DEFAULT_TOOL|g; \
 	     s|AGENT_IMAGE_OPENCODE_VALUE|$(AGENT_IMAGE_OPENCODE)|g; \
 	     s|MAX_CONCURRENT_AGENTS_VALUE|$$MAX_VAL|g; \
-	     s|OPENSHELL_GATEWAY_URL_VALUE|$$OPENSHELL_GW|g" \
+	     s|OPENSHELL_GATEWAY_URL_VALUE|$$OPENSHELL_GW|g; \
+	     s|OPENSHELL_AUTH_MODE_VALUE|$(OPENSHELL_AUTH_MODE)|g; \
+	     s|OPENSHELL_OIDC_ISSUER_VALUE|$(OPENSHELL_OIDC_ISSUER)|g; \
+	     s|OPENSHELL_OIDC_CLIENT_ID_VALUE|$(OPENSHELL_OIDC_CLIENT_ID)|g; \
+	     s|OPENSHELL_OIDC_AUDIENCE_VALUE|$(OPENSHELL_OIDC_AUDIENCE)|g" \
 	  k8s/swarmer/deployment.yaml | kubectl apply -f -
 	@# ── 6. Wait for rollout ─────────────────────────────────────────────────
 	kubectl rollout status deployment/swarmer -n $(NAMESPACE) --timeout=120s
@@ -580,6 +609,110 @@ openshell-register:  ## Register (or refresh) the active cluster's OpenShell gat
 connect-openshell:  ## Refresh certs + port-forward every registered OpenShell gateway (Ctrl-C stops all)
 	$(MAKE) openshell-register
 	python3 scripts/openshell_connect.py --namespace $(OPENSHELL_NAMESPACE)
+
+# Fully configures Swarmer to talk to a remote OIDC gateway you've already
+# registered with the `openshell` CLI, e.g. via the exact command a gateway
+# operator hands you:
+#   openshell gateway add --name swarm --oidc-issuer <issuer> \
+#     --oidc-client-id <id> --oidc-audience <aud> https://<host>:<port>
+#   openshell gateway login swarm        (one-time, needs a browser)
+#   make openshell-gateway-connect GATEWAY=swarm
+# Reads that registration's cached metadata.json (issuer/client-id/audience/
+# endpoint) and applies it directly to the live Deployment via `kubectl set env`.
+openshell-gateway-connect:  ## One-shot: point a running Swarmer pod at a remote OIDC OpenShell gateway (GATEWAY=swarm)
+	@set -e; \
+	GW="$(GATEWAY)"; \
+	if [ -z "$$GW" ]; then \
+	  echo "Usage: make openshell-gateway-connect GATEWAY=<name>   (e.g. GATEWAY=swarm)"; \
+	  echo "Prerequisite: openshell gateway add ... <name> ...   (from your gateway operator)"; \
+	  echo "              openshell gateway login <name>          (one-time interactive login)"; \
+	  exit 1; \
+	fi; \
+	META_FILE="$(HOME)/.config/openshell/gateways/$$GW/metadata.json"; \
+	if [ ! -f "$$META_FILE" ]; then \
+	  echo "No registered gateway '$$GW' at $$META_FILE"; \
+	  echo "Run: openshell gateway add --name $$GW --oidc-issuer <issuer> --oidc-client-id <id> --oidc-audience <aud> https://<host>:<port>"; \
+	  exit 1; \
+	fi; \
+	GW_URL=$$(python3 -c "import json; from urllib.parse import urlparse; d=json.load(open('$$META_FILE')); p=urlparse(d['gateway_endpoint']); print(f'{p.hostname}:{p.port}')"); \
+	ISSUER=$$(python3 -c "import json; print(json.load(open('$$META_FILE')).get('oidc_issuer',''))"); \
+	CLIENT_ID=$$(python3 -c "import json; print(json.load(open('$$META_FILE')).get('oidc_client_id',''))"); \
+	AUDIENCE=$$(python3 -c "import json; print(json.load(open('$$META_FILE')).get('oidc_audience',''))"); \
+	if [ -z "$$ISSUER" ] || [ -z "$$CLIENT_ID" ]; then \
+	  echo "Error: '$$GW' is not registered with --oidc-issuer/--oidc-client-id (auth_mode != oidc?)."; \
+	  exit 1; \
+	fi; \
+	echo "Configuring swarmer deployment (namespace $(NAMESPACE)) for gateway '$$GW':"; \
+	echo "  OPENSHELL_GATEWAY_URL=$$GW_URL"; \
+	echo "  OPENSHELL_OIDC_ISSUER=$$ISSUER"; \
+	echo "  OPENSHELL_OIDC_CLIENT_ID=$$CLIENT_ID"; \
+	echo "  OPENSHELL_OIDC_AUDIENCE=$$AUDIENCE"; \
+	kubectl set env deployment/swarmer -n $(NAMESPACE) \
+	  OPENSHELL_AUTH_MODE=oidc \
+	  OPENSHELL_GATEWAY_URL="$$GW_URL" \
+	  OPENSHELL_OIDC_ISSUER="$$ISSUER" \
+	  OPENSHELL_OIDC_CLIENT_ID="$$CLIENT_ID" \
+	  OPENSHELL_OIDC_AUDIENCE="$$AUDIENCE"; \
+	kubectl rollout status deployment/swarmer -n $(NAMESPACE) --timeout=120s; \
+	$(MAKE) openshell-oidc-seed GATEWAY=$$GW; \
+	echo ""; \
+	echo "✓ Swarmer is configured for gateway '$$GW'. Test it at /admin/openshell-gateway."
+
+# Orchestrates connecting a remote Swarmer pod to an OIDC-authenticated
+# OpenShell gateway (ACM-41655, OPENSHELL_AUTH_MODE=oidc), e.g. the "swarm"
+# gateway. Reads the locally-cached refresh token and pipes it over stdin to
+# `kubectl exec` which writes it encrypted into the pod's DB.
+openshell-oidc-seed:  ## Seed/rotate the remote OIDC gateway credential into a running Swarmer pod (GATEWAY=swarm)
+	@set -e; \
+	GW="$(GATEWAY)"; \
+	if [ -z "$$GW" ]; then \
+	  echo "Usage: make openshell-oidc-seed GATEWAY=<name>   (e.g. GATEWAY=swarm)"; \
+	  echo "Prerequisite: openshell gateway login <name>   (one-time interactive login)"; \
+	  exit 1; \
+	fi; \
+	TOKEN_FILE="$(HOME)/.config/openshell/gateways/$$GW/oidc_token.json"; \
+	if [ ! -f "$$TOKEN_FILE" ]; then \
+	  echo "No cached OIDC token at $$TOKEN_FILE"; \
+	  echo "Run: openshell gateway login $$GW"; \
+	  exit 1; \
+	fi; \
+	REFRESH=$$(python3 -c "import json; print(json.load(open('$$TOKEN_FILE'))['refresh_token'])"); \
+	if [ -z "$$REFRESH" ]; then \
+	  echo "Error: $$TOKEN_FILE has no refresh_token."; \
+	  exit 1; \
+	fi; \
+	POD=$$(kubectl get pod -n $(NAMESPACE) -l app=swarmer -o jsonpath='{.items[0].metadata.name}' 2>/dev/null); \
+	if [ -z "$$POD" ]; then \
+	  echo "Error: no running swarmer pod found in namespace $(NAMESPACE)."; \
+	  exit 1; \
+	fi; \
+	echo "Seeding OIDC credential for gateway '$$GW' into pod $$POD (namespace $(NAMESPACE))..."; \
+	printf '%s\n' "$$REFRESH" | kubectl exec -i -n $(NAMESPACE) "$$POD" -- \
+	  python3 scripts/openshell_seed_oidc_credential.py --refresh-token-stdin; \
+	echo "✓ Done — no restart needed; picked up on the pod's next OpenShell API call."
+
+# Mounts a custom CA bundle to validate an OIDC gateway behind a private/internal CA.
+openshell-oidc-ca:  ## Mount a custom CA bundle to validate an OIDC gateway behind a private/internal CA (CA_FILE=path/to/ca.pem)
+	@set -e; \
+	CA="$(CA_FILE)"; \
+	if [ -z "$$CA" ] || [ ! -f "$$CA" ]; then \
+	  echo "Usage: make openshell-oidc-ca CA_FILE=<path-to-ca-bundle.pem>"; \
+	  exit 1; \
+	fi; \
+	kubectl create secret generic openshell-oidc-ca -n $(NAMESPACE) \
+	  --from-file=ca.crt="$$CA" --dry-run=client -o yaml | kubectl apply -f -; \
+	if ! kubectl get deployment swarmer -n $(NAMESPACE) \
+	    -o jsonpath='{.spec.template.spec.volumes[?(@.name=="openshell-oidc-ca")].name}' \
+	    2>/dev/null | grep -q openshell-oidc-ca; then \
+	  kubectl patch deployment swarmer -n $(NAMESPACE) --type=json -p='[ \
+	    {"op":"add","path":"/spec/template/spec/volumes/-","value":{"name":"openshell-oidc-ca","secret":{"secretName":"openshell-oidc-ca"}}}, \
+	    {"op":"add","path":"/spec/template/spec/containers/0/volumeMounts/-","value":{"name":"openshell-oidc-ca","mountPath":"/auth/openshell-oidc","readOnly":true}} \
+	  ]'; \
+	else \
+	  echo "  Volume/mount already present — updated Secret only (existing pods pick it up via kubelet's periodic secret sync, ~1min; restart for immediate effect)."; \
+	fi; \
+	kubectl set env deployment/swarmer -n $(NAMESPACE) OPENSHELL_OIDC_TLS_CA=/auth/openshell-oidc/ca.crt; \
+	echo "✓ Custom OIDC CA mounted; OPENSHELL_OIDC_TLS_CA set. Deployment will roll automatically."
 
 status:  ## Show OpenShell and swarmer deployment status
 	@echo "=== Helm release ==="

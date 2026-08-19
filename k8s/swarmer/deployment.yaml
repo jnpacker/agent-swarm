@@ -65,6 +65,23 @@ spec:
               value: "/auth/openshell/tls.crt"
             - name: OPENSHELL_TLS_KEY
               value: "/auth/openshell/tls.key"
+            # ACM-41655 — remote/hosted OpenShell gateway auth (e.g. the "swarm"
+            # gateway). Defaults to "mtls" (local in-cluster gateway, uses the
+            # certs above); set to "oidc" + the three OIDC_* values below to
+            # connect to a remote Keycloak-backed gateway instead — see
+            # k8s/swarmer/deployment.yaml Makefile substitution (OPENSHELL_AUTH_MODE
+            # / OPENSHELL_OIDC_ISSUER / OPENSHELL_OIDC_CLIENT_ID / OPENSHELL_OIDC_AUDIENCE
+            # in .env or `make deploy` args). The OIDC refresh token itself is never
+            # an env var — seed it via the /admin/openshell-gateway page or
+            # `make openshell-oidc-seed`.
+            - name: OPENSHELL_AUTH_MODE
+              value: "OPENSHELL_AUTH_MODE_VALUE"
+            - name: OPENSHELL_OIDC_ISSUER
+              value: "OPENSHELL_OIDC_ISSUER_VALUE"
+            - name: OPENSHELL_OIDC_CLIENT_ID
+              value: "OPENSHELL_OIDC_CLIENT_ID_VALUE"
+            - name: OPENSHELL_OIDC_AUDIENCE
+              value: "OPENSHELL_OIDC_AUDIENCE_VALUE"
 
           # Model preset mappings (ACM-37232) — see k8s/swarmer/configmap.yaml.
           # Edit that file directly and re-apply + restart the deployment

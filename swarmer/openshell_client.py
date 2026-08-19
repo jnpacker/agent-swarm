@@ -58,17 +58,47 @@ def _get_client():
     from openshell import SandboxClient, TlsConfig  # noqa: F401 (optional dep)
     from swarmer.config import settings
 
+    auth_mode = (settings.openshell_auth_mode or "mtls").lower()
+
     tls = None
-    if settings.openshell_tls_ca:
+    if auth_mode == "oidc":
+        # Remote/hosted OIDC gateways (ACM-41655, e.g. the "swarm" gateway).
+        # Deliberately ignore OPENSHELL_TLS_CA/CERT/KEY here even if set:
+        # those are almost always the *local* in-cluster OpenShell's
+        # self-signed CA (mounted unconditionally by k8s/swarmer/deployment.yaml),
+        # which does not validate a *different* remote OIDC gateway's
+        # real-CA certificate — using it as root_certificates would make
+        # every RPC fail TLS verification against the actual target host.
+        if settings.openshell_oidc_tls_ca:
+            # The gateway's cert chains to a CA not in gRPC's bundled Mozilla
+            # root list — e.g. an internal corporate CA (common for
+            # *.corp-internal-domain gateways). CA-only trust, no client cert.
+            tls = TlsConfig(ca_path=pathlib.Path(settings.openshell_oidc_tls_ca))
+        else:
+            # None => gRPC's own compiled-in default root bundle (NOT the
+            # OS/system trust store — grpc-python does not read
+            # /etc/ssl/certs). Sufficient for gateways behind a public CA.
+            tls = TlsConfig()
+    elif settings.openshell_tls_ca:
         tls = TlsConfig(
             ca_path=pathlib.Path(settings.openshell_tls_ca),
             cert_path=pathlib.Path(settings.openshell_tls_cert),
             key_path=pathlib.Path(settings.openshell_tls_key),
         )
-    # When mTLS is configured, use certificate auth for gateway admin operations
-    # (provider create/update, sandbox create). Bearer tokens in 0.0.55+ use a
-    # sandbox-scoped format that doesn't authorize admin RPCs.
-    bearer = None if tls else (settings.openshell_bearer_token or None)
+
+    if auth_mode == "oidc":
+        # Zero-arg callable — the SDK calls it before every RPC and it
+        # transparently refreshes against the IdP when the cached access
+        # token is near expiry (see swarmer/openshell_oidc.py).
+        from swarmer import openshell_oidc
+        bearer = openshell_oidc.get_token_provider()
+    else:
+        # When mTLS is configured, use certificate auth for gateway admin
+        # operations (provider create/update, sandbox create). Bearer tokens
+        # in 0.0.55+ use a sandbox-scoped format that doesn't authorize admin
+        # RPCs.
+        bearer = None if tls else (settings.openshell_bearer_token or None)
+
     return SandboxClient(
         settings.openshell_gateway_url,
         tls=tls,
@@ -435,6 +465,23 @@ async def set_cluster_inference(
         stub.SetClusterInference(req, timeout=client._timeout)
 
     await asyncio.to_thread(_do_set)
+
+
+async def health_check(client=None) -> None:
+    """Exercise the configured gateway auth path end-to-end (used by the
+    OpenShell Gateway admin config page's "Test Connection" action).
+
+    A plain gRPC Health RPC — raises on any transport/auth failure (e.g. an
+    OIDC token that fails to refresh, or bad mTLS material); returns None on
+    success. Deliberately does not create/touch any sandbox.
+    """
+    if client is None:
+        client = _get_client()
+
+    def _do():
+        client.health()
+
+    await asyncio.to_thread(_do)
 
 
 async def enable_providers_v2(client=None) -> None:

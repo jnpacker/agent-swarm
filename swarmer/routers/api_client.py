@@ -275,6 +275,24 @@ class APIClient:
         return list(result.get("users", []))
 
     # ==================================================================
+    # OpenShell Gateway admin config (ACM-41655)
+    # ==================================================================
+
+    async def get_openshell_gateway_status(self) -> dict:
+        return await self._get("/api/v1/openshell-gateway")
+
+    async def set_openshell_gateway_credential(self, refresh_token: str) -> dict:
+        return await self._post(
+            "/api/v1/openshell-gateway/credential", json={"refresh_token": refresh_token}
+        )
+
+    async def clear_openshell_gateway_credential(self) -> dict:
+        return await self._delete("/api/v1/openshell-gateway/credential")
+
+    async def test_openshell_gateway_connection(self) -> dict:
+        return await self._post("/api/v1/openshell-gateway/test")
+
+    # ==================================================================
     # Sessions
     # ==================================================================
 

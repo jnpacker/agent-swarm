@@ -252,6 +252,16 @@ async def migrate_db() -> None:
             created_by TEXT NOT NULL DEFAULT '',
             created_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
         )""",
+        # ACM-41655: encrypted OIDC token bundle for a remote/hosted OpenShell
+        # gateway (singleton row — see swarmer/models/openshell_gateway_credential.py).
+        """CREATE TABLE IF NOT EXISTS openshell_gateway_credentials (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            refresh_token_enc TEXT NOT NULL DEFAULT '',
+            access_token_enc TEXT NOT NULL DEFAULT '',
+            access_token_expires_at DATETIME,
+            created_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
+            updated_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
+        )""",
     ]
     async with _engine.begin() as conn:
         for stmt in migrations:

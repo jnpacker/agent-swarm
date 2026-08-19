@@ -445,6 +445,30 @@ class PromptSourceOut(BaseModel):
 
 
 # ============================================================
+# OpenShell Gateway (ACM-41655) — admin-only config page
+# ============================================================
+
+
+class OpenshellGatewayStatusOut(BaseModel):
+    auth_mode: str
+    gateway_url: str
+    oidc_issuer: str
+    oidc_client_id: str
+    oidc_audience: str
+    oidc_tls_ca: str
+    oidc_configured: bool
+    has_credential: bool
+    access_token_expires_at: int | None = None
+    loaded_in_process: bool
+
+
+class OpenshellGatewayCredentialIn(BaseModel):
+    refresh_token: str = Field(..., min_length=1)
+    access_token: str = ""
+    expires_at: int | None = None
+
+
+# ============================================================
 # Generic
 # ============================================================
 
