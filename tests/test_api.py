@@ -306,6 +306,88 @@ class TestWorkspaceRbac:
             settings.k8s_namespace = ""
 
 
+class TestWorkspaceGatewayAPI:
+    @pytest.mark.asyncio
+    async def test_parse_command_endpoint(self, client):
+        cmd = "openshell gateway add https://gw-stage.example.com:443 --name test-gw --oidc-issuer https://idp.example.com --oidc-client-id client-123"
+        resp = await client.post("/api/v1/workspaces/gateway/parse-command", json={"command": cmd})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["gateway_url"] == "https://gw-stage.example.com:443"
+        assert data["auth_mode"] == "oidc"
+        assert data["oidc_issuer"] == "https://idp.example.com"
+        assert data["oidc_client_id"] == "client-123"
+        assert data["suggested_name"] == "test-gw"
+
+    @pytest.mark.asyncio
+    async def test_parse_token_endpoint(self, client):
+        token_input = json.dumps({"refresh_token": "rt-secret-12345", "expires_at": 1755000000})
+        resp = await client.post("/api/v1/workspaces/gateway/parse-token", json={"token_input": token_input})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "valid"
+        assert data["refresh_token"] == "rt-secret-12345"
+        assert data["expires_at"] == 1755000000
+
+    @pytest.mark.asyncio
+    async def test_create_workspace_with_custom_gateway(self, client):
+        payload = {
+            "display_name": "Dedicated Gateway WS",
+            "description": "WS with custom gateway",
+            "gateway": {
+                "gateway_url": "https://gw-custom.example.com:443",
+                "auth_mode": "oidc",
+                "oidc_issuer": "https://idp.example.com/realm",
+                "oidc_client_id": "client-abc",
+                "refresh_token": "initial-rt-token",
+            },
+        }
+        resp = await client.post("/api/v1/workspaces", json=payload)
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["gateway"] is not None
+        assert data["gateway"]["gateway_url"] == "https://gw-custom.example.com:443"
+        assert data["gateway"]["auth_mode"] == "oidc"
+        assert data["gateway"]["has_refresh_token"] is True
+        # Plaintext refresh token must NOT be exposed in response
+        assert "refresh_token" not in data["gateway"]
+
+        # Fetch via GET
+        get_resp = await client.get(f"/api/v1/workspaces/{data['id']}/gateway")
+        assert get_resp.status_code == 200
+        gw_data = get_resp.json()
+        assert gw_data["gateway_url"] == "https://gw-custom.example.com:443"
+        assert gw_data["has_refresh_token"] is True
+
+    @pytest.mark.asyncio
+    async def test_update_and_delete_workspace_gateway(self, client):
+        ws = await _create_workspace(client, "Gateway WS")
+
+        # Initially no custom gateway -> 404
+        resp = await client.get(f"/api/v1/workspaces/{ws['id']}/gateway")
+        assert resp.status_code == 404
+
+        # Set gateway
+        set_resp = await client.post(
+            f"/api/v1/workspaces/{ws['id']}/gateway",
+            json={
+                "gateway_url": "https://gw-new.example.com:443",
+                "auth_mode": "bearer",
+                "bearer_token": "my-secret-bearer",
+            },
+        )
+        assert set_resp.status_code == 200
+        assert set_resp.json()["has_bearer_token"] is True
+
+        # Delete gateway (revert to cluster default)
+        del_resp = await client.delete(f"/api/v1/workspaces/{ws['id']}/gateway")
+        assert del_resp.status_code == 200
+
+        # Now 404 again
+        resp2 = await client.get(f"/api/v1/workspaces/{ws['id']}/gateway")
+        assert resp2.status_code == 404
+
+
 class TestWorkspaceMembers:
     @pytest.mark.asyncio
     async def test_add_list_remove_member_round_trip(self, client):

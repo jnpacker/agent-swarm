@@ -85,10 +85,36 @@ async def workspace_create(
     request: Request,
     display_name: str = Form(...),
     description: str = Form(""),
+    gateway_mode: str = Form("default"),
+    gateway_url: str = Form(""),
+    gateway_auth_mode: str = Form("oidc"),
+    gateway_oidc_issuer: str = Form(""),
+    gateway_oidc_client_id: str = Form(""),
+    gateway_oidc_audience: str = Form(""),
+    gateway_refresh_token: str = Form(""),
+    gateway_bearer_token: str = Form(""),
+    gateway_tls_ca: str = Form(""),
+    gateway_tls_verify: str = Form("1"),
 ):
+    gateway_payload = None
+    if gateway_mode == "custom" and gateway_url.strip():
+        gateway_payload = {
+            "gateway_url": gateway_url.strip(),
+            "auth_mode": gateway_auth_mode or "oidc",
+            "oidc_issuer": gateway_oidc_issuer.strip() or None,
+            "oidc_client_id": gateway_oidc_client_id.strip() or None,
+            "oidc_audience": gateway_oidc_audience.strip() or None,
+            "refresh_token": gateway_refresh_token.strip() or None,
+            "bearer_token": gateway_bearer_token.strip() or None,
+            "tls_ca": gateway_tls_ca.strip() or None,
+            "tls_verify": gateway_tls_verify in ("1", "true", "on", "yes"),
+        }
+
     async with get_api_client(request) as api:
         try:
-            ws = await api.create_workspace(display_name, description)
+            ws = await api.create_workspace(
+                display_name, description, gateway=gateway_payload
+            )
         except APIError as exc:
             return templates.TemplateResponse(
                 request,
@@ -97,12 +123,77 @@ async def workspace_create(
                     "error": exc.detail,
                     "display_name": display_name,
                     "description": description,
+                    "gateway_mode": gateway_mode,
+                    "gateway_url": gateway_url,
+                    "gateway_auth_mode": gateway_auth_mode,
+                    "gateway_oidc_issuer": gateway_oidc_issuer,
+                    "gateway_oidc_client_id": gateway_oidc_client_id,
+                    "gateway_oidc_audience": gateway_oidc_audience,
+                    "gateway_refresh_token": gateway_refresh_token,
+                    "gateway_bearer_token": gateway_bearer_token,
+                    "gateway_tls_ca": gateway_tls_ca,
+                    "gateway_tls_verify": gateway_tls_verify,
                 },
                 status_code=exc.status_code,
             )
 
     flash(request, f"Workspace '{ws['display_name']}' created.", "success")
     return RedirectResponse(url=f"/workspaces/{ws['id']}", status_code=302)
+
+
+# ---------- Gateway Test Connection & Helpers (HTMX) ----------
+
+@router.post(
+    "/workspaces/test-gateway",
+    dependencies=[Depends(require_auth)],
+    response_class=HTMLResponse,
+)
+async def test_gateway_htmx(
+    request: Request,
+    gateway_url: str = Form(""),
+    gateway_auth_mode: str = Form("oidc"),
+    gateway_oidc_issuer: str = Form(""),
+    gateway_oidc_client_id: str = Form(""),
+    gateway_oidc_audience: str = Form(""),
+    gateway_refresh_token: str = Form(""),
+    gateway_bearer_token: str = Form(""),
+    gateway_tls_ca: str = Form(""),
+    gateway_tls_verify: str = Form("1"),
+):
+    if not gateway_url.strip():
+        return HTMLResponse(
+            '<div class="pf-v6-c-alert pf-m-danger pf-m-inline" role="alert">'
+            '<p class="pf-v6-c-alert__title">Please provide a Gateway URL first.</p>'
+            '</div>'
+        )
+
+    payload = {
+        "gateway_url": gateway_url.strip(),
+        "auth_mode": gateway_auth_mode or "oidc",
+        "oidc_issuer": gateway_oidc_issuer.strip() or None,
+        "oidc_client_id": gateway_oidc_client_id.strip() or None,
+        "oidc_audience": gateway_oidc_audience.strip() or None,
+        "refresh_token": gateway_refresh_token.strip() or None,
+        "bearer_token": gateway_bearer_token.strip() or None,
+        "tls_ca": gateway_tls_ca.strip() or None,
+        "tls_verify": gateway_tls_verify in ("1", "true", "on", "yes"),
+    }
+
+    async with get_api_client(request) as api:
+        try:
+            res = await api.test_gateway_connection(payload)
+            count = res.get("sandboxes_count", 0)
+            return HTMLResponse(
+                f'<div class="pf-v6-c-alert pf-m-success pf-m-inline" role="alert">'
+                f'<p class="pf-v6-c-alert__title">✓ Connected successfully to OpenShell gateway ({count} active sandboxes)</p>'
+                f'</div>'
+            )
+        except APIError as exc:
+            return HTMLResponse(
+                f'<div class="pf-v6-c-alert pf-m-danger pf-m-inline" role="alert">'
+                f'<p class="pf-v6-c-alert__title">✗ Connection failed: {exc.detail}</p>'
+                f'</div>'
+            )
 
 
 # ---------- Detail ----------
@@ -134,12 +225,42 @@ async def workspace_update(
     request: Request,
     display_name: str = Form(...),
     description: str = Form(""),
+    gateway_mode: str = Form("default"),
+    gateway_url: str = Form(""),
+    gateway_auth_mode: str = Form("oidc"),
+    gateway_oidc_issuer: str = Form(""),
+    gateway_oidc_client_id: str = Form(""),
+    gateway_oidc_audience: str = Form(""),
+    gateway_refresh_token: str = Form(""),
+    gateway_bearer_token: str = Form(""),
+    gateway_tls_ca: str = Form(""),
+    gateway_tls_verify: str = Form("1"),
 ):
     async with get_api_client(request) as api:
         try:
             await api.update_workspace(ws_id, display_name, description)
-        except APIError:
-            return RedirectResponse(url="/workspaces", status_code=302)
+            if gateway_mode == "custom" and gateway_url.strip():
+                gw_payload = {
+                    "gateway_url": gateway_url.strip(),
+                    "auth_mode": gateway_auth_mode or "oidc",
+                    "oidc_issuer": gateway_oidc_issuer.strip() or None,
+                    "oidc_client_id": gateway_oidc_client_id.strip() or None,
+                    "oidc_audience": gateway_oidc_audience.strip() or None,
+                    "refresh_token": gateway_refresh_token.strip() or None,
+                    "bearer_token": gateway_bearer_token.strip() or None,
+                    "tls_ca": gateway_tls_ca.strip() or None,
+                    "tls_verify": gateway_tls_verify in ("1", "true", "on", "yes"),
+                }
+                await api.set_workspace_gateway(ws_id, gw_payload)
+            elif gateway_mode == "default":
+                try:
+                    await api.delete_workspace_gateway(ws_id)
+                except APIError:
+                    pass
+        except APIError as exc:
+            flash(request, f"Error saving workspace: {exc.detail}", "danger")
+            return RedirectResponse(url=f"/workspaces/{ws_id}/edit", status_code=302)
+
     flash(request, "Workspace updated.", "success")
     return RedirectResponse(url=f"/workspaces/{ws_id}", status_code=302)
 

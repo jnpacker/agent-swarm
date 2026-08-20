@@ -90,16 +90,8 @@ async def _collect_orphaned_sandboxes(db) -> None:
     """
     from swarmer import openshell_client
     from swarmer.models.session import Session
+    from swarmer.models.workspace_gateway import WorkspaceGateway
     from datetime import datetime
-
-    try:
-        live_names = await openshell_client.list_sandboxes()
-    except Exception:
-        log.exception("sandbox-gc: failed to list sandboxes")
-        return
-
-    if not live_names:
-        return
 
     # Skip GC entirely if any session is pending AND has a sandbox_name already set
     # (mid-setup: sandbox exists but sandbox_name not yet committed to DB — deleting
@@ -135,77 +127,115 @@ async def _collect_orphaned_sandboxes(db) -> None:
             active[sname] = sid
     known = {**active, **zombies}  # all sandbox_names tracked in DB
 
-    # Only delete sandboxes that have been around long enough — grace period covers
-    # the race window where sandbox_name isn't yet committed to DB after creation.
-    import time as _time
-    from openshell._proto import openshell_pb2 as _pb
-    now_ms = int(_time.time() * 1000)
-    _grace_ms = 5 * 60 * 1000  # 5 minutes — covers sandbox creation race window
+    # Collect all distinct GatewayConfigs (default + any workspace-specific gateways)
+    configs = [openshell_client.default_gateway_config()]
+    gw_rows = (await db.execute(select(WorkspaceGateway))).scalars().all()
+    for gw in gw_rows:
+        if gw.gateway_url:
+            configs.append(await openshell_client.resolve_gateway_config(gw.workspace_id, db))
+
+    unique_configs: dict[tuple[str, str], openshell_client.GatewayConfig] = {}
+    for c in configs:
+        key = (c.gateway_url or "", c.auth_mode)
+        if key not in unique_configs:
+            unique_configs[key] = c
+
+    all_live_names: set[str] = set()
 
     def _get_client_local():
         from swarmer import openshell_client as _oc
         return _oc._get_client()
 
-    def _sandbox_age_ok(name: str) -> bool:
+    for cfg in unique_configs.values():
         try:
-            client = _get_client_local()
-            resp = client._stub.GetSandbox(
-                _pb.GetSandboxRequest(name=name), timeout=10
-            )
-            created_ms = resp.sandbox.metadata.created_at_ms if resp.sandbox.metadata else 0
-            age_ms = now_ms - created_ms
-            return age_ms >= _grace_ms
+            if cfg.workspace_id is not None:
+                client = openshell_client.get_client_for_config(cfg)
+                live_names = await openshell_client.list_sandboxes(client=client)
+            else:
+                client = None
+                live_names = await openshell_client.list_sandboxes()
         except Exception:
-            return True  # if we can't check, assume old enough
+            log.warning("sandbox-gc: failed to list sandboxes for gateway %s", cfg.gateway_url, exc_info=True)
+            continue
 
-    # --- Orphans: live sandboxes with no matching session at all ---
-    orphaned = [name for name in live_names if name not in known]
-    if orphaned:
-        stale_orphans = [name for name in orphaned if await asyncio.to_thread(_sandbox_age_ok, name)]
-        young_orphans = [name for name in orphaned if name not in stale_orphans]
-        if young_orphans:
-            log.debug("sandbox-gc: skipping %d young orphan(s) (< 5min): %s", len(young_orphans), young_orphans)
-        if stale_orphans:
-            log.warning("sandbox-gc: found %d orphaned sandbox(es): %s", len(stale_orphans), stale_orphans)
-            for name in stale_orphans:
-                try:
-                    await openshell_client.delete_sandbox(name)
-                    log.info("sandbox-gc: deleted orphaned sandbox %s", name)
-                except Exception:
-                    log.warning("sandbox-gc: failed to delete orphan %s", name, exc_info=True)
+        if not live_names:
+            continue
 
-    # --- Zombies: live sandboxes whose session is in a terminal phase ---
-    live_zombies = [name for name in live_names if name in zombies]
-    if live_zombies:
-        stale_zombies = [name for name in live_zombies if await asyncio.to_thread(_sandbox_age_ok, name)]
-        young_zombies = [name for name in live_zombies if name not in stale_zombies]
-        if young_zombies:
-            log.debug("sandbox-gc: skipping %d young zombie(s) (< 5min): %s", len(young_zombies), young_zombies)
-        if stale_zombies:
-            log.warning("sandbox-gc: found %d zombie sandbox(es) from terminal sessions: %s", len(stale_zombies), stale_zombies)
-            db_dirty = False
-            for name in stale_zombies:
-                session_id = zombies[name]
-                try:
-                    await openshell_client.delete_sandbox(name)
-                    log.info("sandbox-gc: deleted zombie sandbox %s (session %d)", name, session_id)
-                    session = await db.get(Session, session_id)
-                    if session:
-                        session.sandbox_name = None
-                        db_dirty = True
-                        # Clean up per-session GitHub App IAT and PAT providers.
-                        from swarmer.routers.sessions import _delete_github_app_provider, _delete_pat_provider
-                        await _delete_github_app_provider(session.workspace_id, session_id)
-                        await _delete_pat_provider(session.workspace_id, session.github_pat_id, session_id)
-                except Exception:
-                    log.warning("sandbox-gc: failed to delete zombie %s", name, exc_info=True)
-            if db_dirty:
-                await db.commit()
+        all_live_names.update(live_names)
+
+        # Only delete sandboxes that have been around long enough — grace period covers
+        # the race window where sandbox_name isn't yet committed to DB after creation.
+        import time as _time
+        from openshell._proto import openshell_pb2 as _pb
+        now_ms = int(_time.time() * 1000)
+        _grace_ms = 5 * 60 * 1000  # 5 minutes — covers sandbox creation race window
+
+        def _sandbox_age_ok(name: str) -> bool:
+            try:
+                c = client or _get_client_local()
+                resp = c._stub.GetSandbox(
+                    _pb.GetSandboxRequest(name=name), timeout=10
+                )
+                created_ms = resp.sandbox.metadata.created_at_ms if resp.sandbox.metadata else 0
+                age_ms = now_ms - created_ms
+                return age_ms >= _grace_ms
+            except Exception:
+                return True  # if we can't check, assume old enough
+
+        # --- Orphans: live sandboxes with no matching session at all ---
+        orphaned = [name for name in live_names if name not in known]
+        if orphaned:
+            stale_orphans = [name for name in orphaned if await asyncio.to_thread(_sandbox_age_ok, name)]
+            young_orphans = [name for name in orphaned if name not in stale_orphans]
+            if young_orphans:
+                log.debug("sandbox-gc: skipping %d young orphan(s) (< 5min): %s", len(young_orphans), young_orphans)
+            if stale_orphans:
+                log.warning("sandbox-gc: found %d orphaned sandbox(es): %s", len(stale_orphans), stale_orphans)
+                for name in stale_orphans:
+                    try:
+                        if client is not None:
+                            await openshell_client.delete_sandbox(name, client=client)
+                        else:
+                            await openshell_client.delete_sandbox(name)
+                        log.info("sandbox-gc: deleted orphaned sandbox %s", name)
+                    except Exception:
+                        log.warning("sandbox-gc: failed to delete orphan %s", name, exc_info=True)
+
+        # --- Zombies: live sandboxes whose session is in a terminal phase ---
+        live_zombies = [name for name in live_names if name in zombies]
+        if live_zombies:
+            stale_zombies = [name for name in live_zombies if await asyncio.to_thread(_sandbox_age_ok, name)]
+            young_zombies = [name for name in live_zombies if name not in stale_zombies]
+            if young_zombies:
+                log.debug("sandbox-gc: skipping %d young zombie(s) (< 5min): %s", len(young_zombies), young_zombies)
+            if stale_zombies:
+                log.warning("sandbox-gc: found %d zombie sandbox(es) from terminal sessions: %s", len(stale_zombies), stale_zombies)
+                db_dirty = False
+                for name in stale_zombies:
+                    session_id = zombies[name]
+                    try:
+                        if client is not None:
+                            await openshell_client.delete_sandbox(name, client=client)
+                        else:
+                            await openshell_client.delete_sandbox(name)
+                        log.info("sandbox-gc: deleted zombie sandbox %s (session %d)", name, session_id)
+                        session = await db.get(Session, session_id)
+                        if session:
+                            session.sandbox_name = None
+                            db_dirty = True
+                            # Clean up per-session GitHub App IAT and PAT providers.
+                            from swarmer.routers.sessions import _delete_github_app_provider, _delete_pat_provider
+                            await _delete_github_app_provider(session.workspace_id, session_id)
+                            await _delete_pat_provider(session.workspace_id, session.github_pat_id, session_id)
+                    except Exception:
+                        log.warning("sandbox-gc: failed to delete zombie %s", name, exc_info=True)
+                if db_dirty:
+                    await db.commit()
 
     # --- Deleted externally: session has sandbox_name but sandbox no longer exists ---
     # This runs unconditionally (not gated on orphans/zombies) so reconciliation always
     # happens even when all live sandboxes are accounted for.
-    deleted_externally = [name for name in known if name not in live_names]
+    deleted_externally = [name for name in known if name not in all_live_names]
     if deleted_externally:
         db_dirty = False
         for sandbox_name in deleted_externally:

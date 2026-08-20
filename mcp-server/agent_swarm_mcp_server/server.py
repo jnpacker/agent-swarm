@@ -100,9 +100,67 @@ class AgentSwarmMCPServer:
                 "display_name": ws.get("display_name"),
                 "namespace": ws.get("namespace"),
                 "description": ws.get("description"),
+                "gateway": ws.get("gateway"),
             }
             for ws in workspaces
         ]
+
+    async def _get_workspace_gateway(self, workspace_id: int) -> dict:
+        return await self.client.get_workspace_gateway(workspace_id)
+
+    async def _set_workspace_gateway(
+        self,
+        workspace_id: int,
+        gateway_url: str,
+        auth_mode: str = "oidc",
+        oidc_issuer: Optional[str] = None,
+        oidc_client_id: Optional[str] = None,
+        oidc_audience: Optional[str] = None,
+        refresh_token: Optional[str] = None,
+        bearer_token: Optional[str] = None,
+        tls_ca: Optional[str] = None,
+        tls_verify: bool = True,
+    ) -> dict:
+        payload = {
+            "gateway_url": gateway_url,
+            "auth_mode": auth_mode,
+            "oidc_issuer": oidc_issuer,
+            "oidc_client_id": oidc_client_id,
+            "oidc_audience": oidc_audience,
+            "refresh_token": refresh_token,
+            "bearer_token": bearer_token,
+            "tls_ca": tls_ca,
+            "tls_verify": tls_verify,
+        }
+        return await self.client.set_workspace_gateway(workspace_id, payload)
+
+    async def _delete_workspace_gateway(self, workspace_id: int) -> dict:
+        return await self.client.delete_workspace_gateway(workspace_id)
+
+    async def _test_workspace_gateway(
+        self,
+        gateway_url: str,
+        auth_mode: str = "oidc",
+        oidc_issuer: Optional[str] = None,
+        oidc_client_id: Optional[str] = None,
+        oidc_audience: Optional[str] = None,
+        refresh_token: Optional[str] = None,
+        bearer_token: Optional[str] = None,
+        tls_ca: Optional[str] = None,
+        tls_verify: bool = True,
+    ) -> dict:
+        payload = {
+            "gateway_url": gateway_url,
+            "auth_mode": auth_mode,
+            "oidc_issuer": oidc_issuer,
+            "oidc_client_id": oidc_client_id,
+            "oidc_audience": oidc_audience,
+            "refresh_token": refresh_token,
+            "bearer_token": bearer_token,
+            "tls_ca": tls_ca,
+            "tls_verify": tls_verify,
+        }
+        return await self.client.test_gateway_connection(payload)
 
     async def _list_sessions(
         self,
@@ -397,6 +455,101 @@ class AgentSwarmMCPServer:
             Use the workspace id in subsequent calls.
             """
             return await self._list_workspaces()
+
+        @mcp.tool()
+        async def get_workspace_gateway(workspace_id: int) -> dict:
+            """Get dedicated OpenShell gateway configuration for a workspace.
+
+            Args:
+                workspace_id: The workspace id.
+            """
+            return await self._get_workspace_gateway(workspace_id)
+
+        @mcp.tool()
+        async def set_workspace_gateway(
+            workspace_id: int,
+            gateway_url: str,
+            auth_mode: str = "oidc",
+            oidc_issuer: Optional[str] = None,
+            oidc_client_id: Optional[str] = None,
+            oidc_audience: Optional[str] = None,
+            refresh_token: Optional[str] = None,
+            bearer_token: Optional[str] = None,
+            tls_ca: Optional[str] = None,
+            tls_verify: bool = True,
+        ) -> dict:
+            """Configure a dedicated OpenShell gateway for a workspace.
+
+            Args:
+                workspace_id: The workspace id.
+                gateway_url: The gateway endpoint URL (e.g. https://gw-xyz.example.com:443).
+                auth_mode: Authentication mode ('oidc', 'bearer', 'none').
+                oidc_issuer: OIDC issuer URL (when auth_mode is 'oidc').
+                oidc_client_id: OIDC client ID (when auth_mode is 'oidc').
+                oidc_audience: Optional OIDC audience.
+                refresh_token: Optional OIDC refresh token.
+                bearer_token: Optional static bearer token.
+                tls_ca: Optional CA cert content/path.
+                tls_verify: Whether to verify TLS certificate (default True).
+            """
+            return await self._set_workspace_gateway(
+                workspace_id=workspace_id,
+                gateway_url=gateway_url,
+                auth_mode=auth_mode,
+                oidc_issuer=oidc_issuer,
+                oidc_client_id=oidc_client_id,
+                oidc_audience=oidc_audience,
+                refresh_token=refresh_token,
+                bearer_token=bearer_token,
+                tls_ca=tls_ca,
+                tls_verify=tls_verify,
+            )
+
+        @mcp.tool()
+        async def delete_workspace_gateway(workspace_id: int) -> dict:
+            """Revert a workspace to use the cluster default OpenShell gateway.
+
+            Args:
+                workspace_id: The workspace id.
+            """
+            return await self._delete_workspace_gateway(workspace_id)
+
+        @mcp.tool()
+        async def test_workspace_gateway(
+            gateway_url: str,
+            auth_mode: str = "oidc",
+            oidc_issuer: Optional[str] = None,
+            oidc_client_id: Optional[str] = None,
+            oidc_audience: Optional[str] = None,
+            refresh_token: Optional[str] = None,
+            bearer_token: Optional[str] = None,
+            tls_ca: Optional[str] = None,
+            tls_verify: bool = True,
+        ) -> dict:
+            """Test connection and authentication to an OpenShell gateway.
+
+            Args:
+                gateway_url: The gateway endpoint URL.
+                auth_mode: Authentication mode ('oidc', 'bearer', 'none').
+                oidc_issuer: Optional OIDC issuer URL.
+                oidc_client_id: Optional OIDC client ID.
+                oidc_audience: Optional OIDC audience.
+                refresh_token: Optional OIDC refresh token.
+                bearer_token: Optional bearer token.
+                tls_ca: Optional CA cert.
+                tls_verify: Whether to verify TLS.
+            """
+            return await self._test_workspace_gateway(
+                gateway_url=gateway_url,
+                auth_mode=auth_mode,
+                oidc_issuer=oidc_issuer,
+                oidc_client_id=oidc_client_id,
+                oidc_audience=oidc_audience,
+                refresh_token=refresh_token,
+                bearer_token=bearer_token,
+                tls_ca=tls_ca,
+                tls_verify=tls_verify,
+            )
 
         @mcp.tool()
         async def list_sessions(

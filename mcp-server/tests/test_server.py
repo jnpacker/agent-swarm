@@ -38,6 +38,11 @@ EXPECTED_TOOLS = {
     "add_session_schedule",
     "update_session_schedule",
     "delete_session_schedule",
+    # ACM-41655: dedicated gateway tools
+    "get_workspace_gateway",
+    "set_workspace_gateway",
+    "delete_workspace_gateway",
+    "test_workspace_gateway",
 }
 
 
