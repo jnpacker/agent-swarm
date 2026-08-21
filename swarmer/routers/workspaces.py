@@ -6,6 +6,7 @@ All data access goes through the REST API client (/api/v1/).
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from markupsafe import escape
 
 from swarmer.deps import require_auth
 from swarmer.config import settings
@@ -189,9 +190,12 @@ async def test_gateway_htmx(
                 f'</div>'
             )
         except APIError as exc:
+            # exc.detail carries user-influenced content (the submitted gateway
+            # URL and the remote server's response text), so HTML-escape it
+            # before interpolating into this raw HTMX fragment (prevents XSS).
             return HTMLResponse(
                 f'<div class="pf-v6-c-alert pf-m-danger pf-m-inline" role="alert">'
-                f'<p class="pf-v6-c-alert__title">✗ Connection failed: {exc.detail}</p>'
+                f'<p class="pf-v6-c-alert__title">✗ Connection failed: {escape(exc.detail)}</p>'
                 f'</div>'
             )
 

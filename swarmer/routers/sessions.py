@@ -1826,6 +1826,7 @@ async def _setup_openshell_sandbox(
                 app_id = iat_app_id
                 installation_id = iat_installation_id
                 private_key = iat_private_key
+                workspace_id = workspace_id
 
             asyncio.create_task(
                 start_token_refresh_loop(
@@ -1833,6 +1834,8 @@ async def _setup_openshell_sandbox(
                     session_id=session_id,
                     provider_name=iat_provider_name,
                     repo_names=iat_repo_names or None,
+                    workspace_id=workspace_id,
+                    client=client,
                 ),
                 name=f"iat-refresh-{session_id}",
             )

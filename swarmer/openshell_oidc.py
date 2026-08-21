@@ -127,6 +127,13 @@ class OidcGatewayAuth:
                 self._loop = asyncio.get_running_loop()
         if self._loop is None:
             return False
+        # If running directly on the event loop thread, blocking on .result() would deadlock.
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is not None and current_loop is self._loop:
+            return False
         try:
             fut = asyncio.run_coroutine_threadsafe(
                 _load_workspace_bundle(self._workspace_id), self._loop
@@ -220,10 +227,16 @@ class OidcGatewayAuth:
             log.warning("OIDC token refreshed but no event loop registered — not persisted to DB")
             return
         try:
-            fut = asyncio.run_coroutine_threadsafe(
-                _persist_workspace_bundle(self._workspace_id, bundle), self._loop
-            )
-            fut.result(timeout=_WRITE_BACK_TIMEOUT)
+            current_loop = None
+            with contextlib.suppress(RuntimeError):
+                current_loop = asyncio.get_running_loop()
+            if current_loop is not None and current_loop is self._loop:
+                self._loop.create_task(_persist_workspace_bundle(self._workspace_id, bundle))
+            else:
+                fut = asyncio.run_coroutine_threadsafe(
+                    _persist_workspace_bundle(self._workspace_id, bundle), self._loop
+                )
+                fut.result(timeout=_WRITE_BACK_TIMEOUT)
         except Exception:
             log.warning(
                 "Failed to persist refreshed OpenShell OIDC token for ws %s to DB",

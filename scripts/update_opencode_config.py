@@ -45,6 +45,10 @@ def update_opencode_json(api_url: str, config_path: str = "opencode.json") -> No
         if "AGENT_SWARM_VERIFY_SSL" not in as_m["environment"]:
             as_m["environment"]["AGENT_SWARM_VERIFY_SSL"] = "false"
 
+    parent_dir = os.path.dirname(config_path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+
     with open(config_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
         f.write("\n")

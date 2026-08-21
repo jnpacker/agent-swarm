@@ -31,31 +31,31 @@
       </div>
       <div class="pf-v6-c-card__body">
         <div class="pf-v6-c-form__group">
-          <label class="pf-v6-c-form__label">
+          <label class="pf-v6-c-form__label" for="display_name">
             <span class="pf-v6-c-form__label-text">Workspace Name</span>
             <span class="pf-v6-c-form__label-required" aria-hidden="true">&#42;</span>
           </label>
           <div class="pf-v6-c-form__group-control">
-            <input type="text" class="pf-v6-c-form-control" name="display_name"
+            <input type="text" class="pf-v6-c-form-control" id="display_name" name="display_name"
                    value="{{ ws.display_name }}" required>
           </div>
         </div>
 
         <div class="pf-v6-c-form__group" style="margin-top:var(--pf-t--global--spacer--md);">
-          <label class="pf-v6-c-form__label">
+          <label class="pf-v6-c-form__label" for="description">
             <span class="pf-v6-c-form__label-text">Description</span>
           </label>
           <div class="pf-v6-c-form__group-control">
-            <textarea class="pf-v6-c-form-control" name="description" rows="2">{{ ws.description }}</textarea>
+            <textarea class="pf-v6-c-form-control" id="description" name="description" rows="2">{{ ws.description }}</textarea>
           </div>
         </div>
 
         <div class="pf-v6-c-form__group" style="margin-top:var(--pf-t--global--spacer--md);">
-          <label class="pf-v6-c-form__label">
+          <label class="pf-v6-c-form__label" for="namespace">
             <span class="pf-v6-c-form__label-text" style="color:var(--pf-t--global--text--color--subtle);">Namespace (immutable)</span>
           </label>
           <div class="pf-v6-c-form__group-control">
-            <input type="text" class="pf-v6-c-form-control" value="{{ ws.namespace }}" disabled>
+            <input type="text" class="pf-v6-c-form-control" id="namespace" value="{{ ws.namespace }}" disabled>
           </div>
         </div>
       </div>

@@ -31,6 +31,12 @@ An MCP server that exposes Agent Swarm session management as tools for AI agents
 | `get_session_output` | Retrieve captured output |
 | `wait_for_session` | Poll until terminal state, return output |
 | `list_github_pats` | List GitHub PATs for private repo access |
+| `get_workspace_gateway` | Get a workspace's dedicated OpenShell gateway config |
+| `set_workspace_gateway` | Configure a dedicated/remote OpenShell gateway for a workspace |
+| `delete_workspace_gateway` | Revert a workspace to the cluster default OpenShell gateway |
+| `test_workspace_gateway` | Test connectivity/auth to an OpenShell gateway |
+| `parse_gateway_command` | Parse a pasted `openshell gateway add ...` command or JSON metadata |
+| `parse_gateway_token` | Parse a pasted OIDC token/credential payload |
 
 ## Installation
 

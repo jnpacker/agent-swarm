@@ -114,9 +114,12 @@ def test_workspace_gateway_encryption():
         gateway_url="https://gw.example.com",
         auth_mode="oidc",
     )
+    # Use obviously-fake, non-secret-shaped placeholders so this fixture does
+    # not trip automated secret scanners (no PEM headers / real token prefixes).
+    fake_tls_key = "test-placeholder-tls-key-not-a-real-key"
     gw.refresh_token = "my-secret-refresh-token"
     gw.bearer_token = "my-secret-bearer-token"
-    gw.tls_key = "-----BEGIN PRIVATE KEY-----\nMIIE..."
+    gw.tls_key = fake_tls_key
 
     assert gw.refresh_token_enc is not None
     assert gw.refresh_token_enc != "my-secret-refresh-token"
@@ -127,5 +130,5 @@ def test_workspace_gateway_encryption():
     assert gw.bearer_token == "my-secret-bearer-token"
 
     assert gw.tls_key_enc is not None
-    assert gw.tls_key_enc != "-----BEGIN PRIVATE KEY-----\nMIIE..."
-    assert gw.tls_key == "-----BEGIN PRIVATE KEY-----\nMIIE..."
+    assert gw.tls_key_enc != fake_tls_key
+    assert gw.tls_key == fake_tls_key

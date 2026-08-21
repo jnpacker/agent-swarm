@@ -162,6 +162,12 @@ class AgentSwarmMCPServer:
         }
         return await self.client.test_gateway_connection(payload)
 
+    async def _parse_gateway_command(self, command: str) -> dict:
+        return await self.client.parse_gateway_command(command)
+
+    async def _parse_gateway_token(self, token_input: str) -> dict:
+        return await self.client.parse_gateway_token(token_input)
+
     async def _list_sessions(
         self,
         workspace_id: int,
@@ -550,6 +556,29 @@ class AgentSwarmMCPServer:
                 tls_ca=tls_ca,
                 tls_verify=tls_verify,
             )
+
+        @mcp.tool()
+        async def parse_gateway_command(command: str) -> dict:
+            """Parse a pasted OpenShell CLI command or JSON metadata blob into
+            structured gateway fields for use with set_workspace_gateway /
+            test_workspace_gateway.
+
+            Args:
+                command: Raw text — an 'openshell gateway add ...' command line,
+                    or a JSON metadata snippet describing the gateway.
+            """
+            return await self._parse_gateway_command(command)
+
+        @mcp.tool()
+        async def parse_gateway_token(token_input: str) -> dict:
+            """Parse a pasted OIDC token/credential payload (raw token string,
+            an oidc_token.json bundle, or a REFRESH_TOKEN=... line) into
+            structured fields for use with set_workspace_gateway.
+
+            Args:
+                token_input: Raw pasted token text.
+            """
+            return await self._parse_gateway_token(token_input)
 
         @mcp.tool()
         async def list_sessions(

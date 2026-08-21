@@ -24,9 +24,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import pathlib
 import queue
 import shlex
+import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -90,28 +92,86 @@ def default_gateway_config() -> GatewayConfig:
     )
 
 
+def _tls_material_path(value: str) -> tuple[pathlib.Path, bool]:
+    """Resolve a TLS material value to a filesystem path the SDK can read.
+
+    `GatewayConfig.tls_ca/tls_cert/tls_key` carry two different shapes
+    depending on the source: the global env-var settings
+    (`default_gateway_config()`) already point at real files on disk, but
+    per-workspace `WorkspaceGateway.tls_ca/tls_cert/tls_key` store raw PEM
+    *content* in the encrypted database (ACM-41655/41656) — there is no
+    filesystem path to give the openshell SDK's path-only `TlsConfig`.
+
+    If *value* names an existing file, use it as-is. Otherwise treat it as
+    inline PEM content and spool it to a private (0600) temp file so
+    `TlsConfig`/`SandboxClient` can read it; the caller deletes the temp
+    file once the (synchronous, constructor-time) read is done.
+
+    Returns (path, is_temp_file).
+    """
+    try:
+        existing = pathlib.Path(value)
+        if existing.exists():
+            return existing, False
+    except OSError:
+        pass  # e.g. ENAMETOOLONG for inline PEM content — fall through
+
+    fd, tmp_path = tempfile.mkstemp(prefix="swarmer-tls-", suffix=".pem")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(value)
+        os.chmod(tmp_path, 0o600)
+    except Exception:
+        os.unlink(tmp_path)
+        raise
+    return pathlib.Path(tmp_path), True
+
+
 def get_client_for_config(config: GatewayConfig):
     """Factory — builds a SandboxClient from a GatewayConfig."""
     from openshell import SandboxClient, TlsConfig  # noqa: F401 (optional dep)
 
     tls = None
-    if config.tls_cert and config.tls_key:
-        tls = TlsConfig(
-            ca_path=pathlib.Path(config.tls_ca) if config.tls_ca else None,
-            cert_path=pathlib.Path(config.tls_cert),
-            key_path=pathlib.Path(config.tls_key),
-        )
-    elif config.tls_ca:
-        tls = TlsConfig(ca_path=pathlib.Path(config.tls_ca))
-    elif config.auth_mode == "oidc" or (config.gateway_url and config.gateway_url.startswith("https://")):
-        tls = TlsConfig()
+    temp_paths: list[pathlib.Path] = []
+    try:
+        if config.tls_cert and config.tls_key:
+            ca_path = None
+            if config.tls_ca:
+                ca_path, ca_is_tmp = _tls_material_path(config.tls_ca)
+                if ca_is_tmp:
+                    temp_paths.append(ca_path)
+            cert_path, cert_is_tmp = _tls_material_path(config.tls_cert)
+            if cert_is_tmp:
+                temp_paths.append(cert_path)
+            key_path, key_is_tmp = _tls_material_path(config.tls_key)
+            if key_is_tmp:
+                temp_paths.append(key_path)
+            tls = TlsConfig(ca_path=ca_path, cert_path=cert_path, key_path=key_path)
+        elif config.tls_ca:
+            ca_path, ca_is_tmp = _tls_material_path(config.tls_ca)
+            if ca_is_tmp:
+                temp_paths.append(ca_path)
+            tls = TlsConfig(ca_path=ca_path)
+        elif config.auth_mode == "oidc" or (config.gateway_url and config.gateway_url.startswith("https://")):
+            tls = TlsConfig()
 
-    bearer = config.bearer_callable or (config.bearer_token if config.auth_mode == "bearer" else None)
-    return SandboxClient(
-        config.gateway_url,
-        tls=tls,
-        bearer_token=bearer,
-    )
+        bearer = config.bearer_callable or (config.bearer_token if config.auth_mode == "bearer" else None)
+        # SandboxClient reads tls.*_path files synchronously in its
+        # constructor (grpc.ssl_channel_credentials(...read_bytes())), so it
+        # is safe to delete any temp files in `finally` below once this
+        # returns — the credential bytes are already copied into the gRPC
+        # channel by then.
+        return SandboxClient(
+            config.gateway_url,
+            tls=tls,
+            bearer_token=bearer,
+        )
+    finally:
+        for p in temp_paths:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 async def resolve_gateway_config(

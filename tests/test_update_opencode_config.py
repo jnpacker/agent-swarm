@@ -52,3 +52,15 @@ def test_update_opencode_json_updates_existing_file(tmp_path):
     assert data["mcp"]["agent-swarm"]["enabled"] is True
     assert data["mcp"]["agent-swarm"]["environment"]["AGENT_SWARM_API_URL"] == new_url
     assert data["mcp"]["agent-swarm"]["environment"]["AGENT_SWARM_VERIFY_SSL"] == "false"
+
+
+def test_update_opencode_json_creates_parent_directory(tmp_path):
+    target_file = tmp_path / "nested" / "subdir" / "opencode.json"
+    url = "https://swarmer.test.internal:8080"
+    update_opencode_json(url, str(target_file))
+
+    assert os.path.exists(target_file)
+    with open(target_file) as f:
+        data = json.load(f)
+
+    assert data["mcp"]["agent-swarm"]["environment"]["AGENT_SWARM_API_URL"] == url

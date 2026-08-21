@@ -71,7 +71,11 @@ def _parse_json_metadata(json_str: str) -> ParsedGatewayCommand:
         return ParsedGatewayCommand(errors=["JSON payload must be an object."])
 
     endpoint = data.get("gateway_endpoint") or data.get("endpoint") or data.get("gateway_url") or data.get("url") or ""
-    auth_mode = (data.get("auth_mode") or "oidc").lower()
+    # Coerce to str: JSON values for these keys may be non-string (e.g. a number
+    # or null), and downstream .startswith()/DB storage assume a string.
+    if not isinstance(endpoint, str):
+        endpoint = str(endpoint) if endpoint is not None else ""
+    auth_mode = str(data.get("auth_mode") or "oidc").lower()
     if endpoint.startswith("http://") and auth_mode not in ("bearer", "mtls"):
         auth_mode = "none"
 

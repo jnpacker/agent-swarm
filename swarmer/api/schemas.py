@@ -27,21 +27,6 @@ class WorkspaceGatewayCreate(BaseModel):
     tls_verify: bool = True
 
 
-class WorkspaceGatewayUpdate(BaseModel):
-    gateway_url: str | None = None
-    auth_mode: str | None = None
-    oidc_issuer: str | None = None
-    oidc_client_id: str | None = None
-    oidc_audience: str | None = None
-    refresh_token: str | None = None
-    access_token: str | None = None
-    bearer_token: str | None = None
-    tls_ca: str | None = None
-    tls_cert: str | None = None
-    tls_key: str | None = None
-    tls_verify: bool | None = None
-
-
 class WorkspaceGatewayOut(BaseModel):
     workspace_id: int
     gateway_url: str

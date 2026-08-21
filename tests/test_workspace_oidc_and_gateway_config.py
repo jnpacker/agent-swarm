@@ -88,3 +88,84 @@ async def test_probe_gateway_connectivity_mock():
         res = await probe_gateway_connectivity(cfg)
         assert res["status"] == "ok"
         assert res["sandboxes_count"] == 2
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_oidc_auth_refresh_inside_event_loop():
+    """Verify current_access_token() does not deadlock when executed on the event loop thread."""
+    issuer = "https://keycloak.example.com/realms/test"
+    client_id = "test-client"
+
+    respx.get(f"{issuer}/.well-known/openid-configuration").respond(
+        200,
+        json={"issuer": issuer, "token_endpoint": f"{issuer}/protocol/openid-connect/token"},
+    )
+    respx.post(f"{issuer}/protocol/openid-connect/token").respond(
+        200,
+        json={
+            "access_token": "loop-access-token",
+            "refresh_token": "loop-refresh-token",
+            "expires_in": 300,
+        },
+    )
+
+    auth = OidcGatewayAuth(issuer=issuer, client_id=client_id, workspace_id=99)
+    auth.seed(refresh_token="initial-loop-token")
+
+    token = auth.current_access_token()
+    assert token == "loop-access-token"
+    auth.close()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_gc_isolates_gateway_outage():
+    """Verify an unreachable gateway does not cause active sessions on it to be marked stopped."""
+    from unittest.mock import AsyncMock
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+    from swarmer.database import Base
+    from swarmer.models.session import Session
+    from swarmer.scheduler import _collect_orphaned_sandboxes
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with session_maker() as db:
+        ws1 = Workspace(id=1, display_name="WS Default", namespace="ws-default")
+        ws2 = Workspace(id=2, display_name="WS Custom", namespace="ws-custom")
+        gw2 = WorkspaceGateway(
+            workspace_id=2,
+            gateway_url="https://gw2.example.com:443",
+            auth_mode="bearer",
+        )
+        gw2.bearer_token = "token-gw2"
+        ws2.gateway = gw2
+
+        s1 = Session(id=1, workspace_id=1, name="sess-1", agent_tool="opencode", sandbox_name="sb-ws1", phase="running")
+        s2 = Session(id=2, workspace_id=2, name="sess-2", agent_tool="opencode", sandbox_name="sb-ws2", phase="running")
+
+        db.add_all([ws1, ws2, gw2, s1, s2])
+        await db.commit()
+
+        async def fake_list_sandboxes(client=None):
+            if client is not None:
+                raise RuntimeError("Gateway 2 unreachable")
+            return ["sb-ws1"]
+
+        with patch("swarmer.openshell_client.list_sandboxes", side_effect=fake_list_sandboxes):
+            with patch("swarmer.openshell_client.delete_sandbox", new=AsyncMock()):
+                await _collect_orphaned_sandboxes(db)
+
+        # Reload sessions from DB
+        sess1 = await db.get(Session, 1)
+        sess2 = await db.get(Session, 2)
+
+        assert sess1.phase == "running"
+        assert sess1.sandbox_name == "sb-ws1"
+
+        # Session 2 on unreachable gateway 2 must NOT be marked stopped
+        assert sess2.phase == "running"
+        assert sess2.sandbox_name == "sb-ws2"

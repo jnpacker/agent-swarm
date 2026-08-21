@@ -304,7 +304,13 @@ async def _chat_http_proxy(
     fwd_headers["host"] = virtual_host
     if gw_config.bearer_callable:
         try:
-            fwd_headers["authorization"] = f"Bearer {gw_config.bearer_callable()}"
+            # bearer_callable is a synchronous callable (the OpenShell SDK's
+            # gRPC interceptor contract) that may perform a blocking HTTP
+            # refresh against the OIDC IdP when the cached access token is
+            # stale. Off-load it so a slow/stale refresh can't stall the
+            # asyncio event loop for every other in-flight request.
+            token = await asyncio.to_thread(gw_config.bearer_callable)
+            fwd_headers["authorization"] = f"Bearer {token}"
         except Exception:
             pass
     elif gw_config.bearer_token:
@@ -494,7 +500,10 @@ async def chat_ws_proxy(
     _ws_extra_headers = {"Host": virtual_host} if virtual_host else {}
     if gw_config.bearer_callable:
         try:
-            _ws_extra_headers["Authorization"] = f"Bearer {gw_config.bearer_callable()}"
+            # See the HTTP proxy path above: bearer_callable() can block on a
+            # synchronous OIDC refresh, so run it off the event loop.
+            token = await asyncio.to_thread(gw_config.bearer_callable)
+            _ws_extra_headers["Authorization"] = f"Bearer {token}"
         except Exception:
             pass
     elif gw_config.bearer_token:

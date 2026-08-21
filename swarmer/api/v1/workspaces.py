@@ -58,9 +58,8 @@ def _derive_namespace(display_name: str) -> str:
     return slug.strip("-")[:63]
 
 
-def _to_gateway_out(gw: WorkspaceGateway | None) -> WorkspaceGatewayOut | None:
-    if gw is None or not gw.gateway_url:
-        return None
+def _serialize_gateway(gw: WorkspaceGateway) -> WorkspaceGatewayOut:
+    """Build a WorkspaceGatewayOut, exposing only has_* booleans for secrets."""
     return WorkspaceGatewayOut(
         workspace_id=gw.workspace_id,
         gateway_url=gw.gateway_url,
@@ -79,6 +78,12 @@ def _to_gateway_out(gw: WorkspaceGateway | None) -> WorkspaceGatewayOut | None:
         created_at=gw.created_at,
         updated_at=gw.updated_at,
     )
+
+
+def _to_gateway_out(gw: WorkspaceGateway | None) -> WorkspaceGatewayOut | None:
+    if gw is None or not gw.gateway_url:
+        return None
+    return _serialize_gateway(gw)
 
 
 def _to_workspace_out(ws: Workspace, gw: WorkspaceGateway | None = None) -> WorkspaceOut:
@@ -142,6 +147,7 @@ async def test_gateway_connection_endpoint(body: TestGatewayConnectionIn):
     from swarmer.openshell_client import GatewayConfig, probe_gateway_connectivity
     from swarmer.openshell_oidc import OidcGatewayAuth
 
+    temp_auth = None
     bearer_callable = None
     if body.auth_mode == "oidc" and body.oidc_issuer and body.oidc_client_id:
         temp_auth = OidcGatewayAuth(
@@ -177,6 +183,9 @@ async def test_gateway_connection_endpoint(body: TestGatewayConnectionIn):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Connection test failed: {exc}",
         )
+    finally:
+        if temp_auth is not None:
+            temp_auth.close()
 
 
 # ============================================================
@@ -322,6 +331,9 @@ async def delete_workspace(
     name = ws.display_name
     k8s_ns = ws.k8s_namespace
 
+    # Invalidate cached in-memory OIDC gateway auth manager
+    oidc_manager.invalidate(ws.id)
+
     # Delete DB row first to avoid orphaned rows if K8s cleanup fails
     await db.delete(ws)
     await db.commit()
@@ -354,24 +366,7 @@ async def get_workspace_gateway(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="This workspace uses the default cluster OpenShell gateway.",
         )
-    return WorkspaceGatewayOut(
-        workspace_id=gw.workspace_id,
-        gateway_url=gw.gateway_url,
-        auth_mode=gw.auth_mode,
-        oidc_issuer=gw.oidc_issuer,
-        oidc_client_id=gw.oidc_client_id,
-        oidc_audience=gw.oidc_audience,
-        has_refresh_token=bool(gw.refresh_token_enc),
-        has_access_token=bool(gw.access_token_enc),
-        access_token_expires_at=gw.access_token_expires_at,
-        has_bearer_token=bool(gw.bearer_token_enc),
-        has_tls_cert=bool(gw.tls_cert),
-        has_tls_key=bool(gw.tls_key_enc),
-        tls_ca=gw.tls_ca,
-        tls_verify=gw.tls_verify,
-        created_at=gw.created_at,
-        updated_at=gw.updated_at,
-    )
+    return _serialize_gateway(gw)
 
 
 @router.post("/{ws_id}/gateway", response_model=WorkspaceGatewayOut)
@@ -411,24 +406,7 @@ async def set_workspace_gateway(
     oidc_manager.invalidate(ws.id)
     await db.commit()
     await db.refresh(gw)
-    return WorkspaceGatewayOut(
-        workspace_id=gw.workspace_id,
-        gateway_url=gw.gateway_url,
-        auth_mode=gw.auth_mode,
-        oidc_issuer=gw.oidc_issuer,
-        oidc_client_id=gw.oidc_client_id,
-        oidc_audience=gw.oidc_audience,
-        has_refresh_token=bool(gw.refresh_token_enc),
-        has_access_token=bool(gw.access_token_enc),
-        access_token_expires_at=gw.access_token_expires_at,
-        has_bearer_token=bool(gw.bearer_token_enc),
-        has_tls_cert=bool(gw.tls_cert),
-        has_tls_key=bool(gw.tls_key_enc),
-        tls_ca=gw.tls_ca,
-        tls_verify=gw.tls_verify,
-        created_at=gw.created_at,
-        updated_at=gw.updated_at,
-    )
+    return _serialize_gateway(gw)
 
 
 @router.delete("/{ws_id}/gateway", response_model=MessageOut)

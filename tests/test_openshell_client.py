@@ -724,3 +724,87 @@ async def test_exec_with_supervisor_retry_gives_up_after_max_attempts():
             await oc._exec_with_supervisor_retry(_fn, max_attempts=3, base_delay=0.001)
 
     assert call_count == 3  # initial + 2 retries = max_attempts
+
+
+# ---------------------------------------------------------------------------
+# 5. TLS material resolution (ACM-41655/41656 per-workspace gateway mTLS)
+#
+# WorkspaceGateway.tls_ca/tls_cert/tls_key store raw PEM *content* in the
+# encrypted database, but the openshell SDK's TlsConfig only accepts
+# filesystem paths (unlike the global env-var settings, which already point
+# at real files). _tls_material_path() bridges the two shapes.
+# ---------------------------------------------------------------------------
+
+
+def test_tls_material_path_returns_existing_file_path_unchanged(tmp_path):
+    """A value that names a real file on disk (the global-settings shape) is
+    used as-is and is not treated as inline content."""
+    real_file = tmp_path / "ca.pem"
+    real_file.write_text("-----BEGIN CERTIFICATE-----\nreal-file-content\n-----END CERTIFICATE-----\n")
+
+    path, is_temp = oc._tls_material_path(str(real_file))
+
+    assert path == real_file
+    assert is_temp is False
+
+
+def test_tls_material_path_spools_inline_pem_content_to_private_temp_file():
+    """Inline PEM content (the shape stored in WorkspaceGateway columns) is
+    written to a temp file with owner-only permissions since TlsConfig cannot
+    read raw content directly."""
+    pem_content = "-----BEGIN CERTIFICATE-----\nMIIC...fakedata...\n-----END CERTIFICATE-----\n"
+
+    path, is_temp = oc._tls_material_path(pem_content)
+
+    try:
+        assert is_temp is True
+        assert path.read_text() == pem_content
+        assert oct(path.stat().st_mode)[-3:] == "600"
+    finally:
+        path.unlink(missing_ok=True)
+
+
+def test_get_client_for_config_builds_mtls_from_inline_pem_content(sdk_client):
+    """Regression test: a per-workspace gateway with auth_mode='mtls' storing
+    raw PEM content (not filesystem paths) for tls_ca/tls_cert/tls_key must
+    not raise FileNotFoundError when building the SandboxClient — the SDK's
+    TlsConfig.__post_init__ / grpc credentials only ever see real paths."""
+    created_tls_configs = []
+
+    class _FakeTlsConfig:
+        def __init__(self, ca_path=None, cert_path=None, key_path=None):
+            self.ca_path = ca_path
+            self.cert_path = cert_path
+            self.key_path = key_path
+            created_tls_configs.append(self)
+            # Prove each path is a real, readable file — this is exactly what
+            # grpc.ssl_channel_credentials(...read_bytes()) does in the real
+            # SandboxClient constructor, and what raised FileNotFoundError
+            # before this fix when given raw PEM content instead of a path.
+            for p in (ca_path, cert_path, key_path):
+                if p is not None:
+                    p.read_bytes()
+
+    fake_module = MagicMock()
+    fake_module.SandboxClient = MagicMock(return_value=sdk_client)
+    fake_module.TlsConfig = _FakeTlsConfig
+
+    config = oc.GatewayConfig(
+        gateway_url="gw.example.com:443",
+        auth_mode="mtls",
+        tls_ca="-----BEGIN CERTIFICATE-----\nca-content\n-----END CERTIFICATE-----\n",
+        tls_cert="-----BEGIN CERTIFICATE-----\ncert-content\n-----END CERTIFICATE-----\n",
+        tls_key="-----BEGIN PRIVATE KEY-----\nkey-content\n-----END PRIVATE KEY-----\n",
+    )
+
+    with patch.dict(sys.modules, {"openshell": fake_module}):
+        client = oc.get_client_for_config(config)
+
+    assert client is sdk_client
+    assert len(created_tls_configs) == 1
+    # Temp files are cleaned up once the synchronous SandboxClient build
+    # (which already copied the credential bytes into the gRPC channel) returns.
+    tls_cfg = created_tls_configs[0]
+    assert not tls_cfg.ca_path.exists()
+    assert not tls_cfg.cert_path.exists()
+    assert not tls_cfg.key_path.exists()
