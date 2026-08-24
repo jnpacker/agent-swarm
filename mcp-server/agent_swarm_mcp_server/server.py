@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urlparse
 
 from fastmcp import Context, FastMCP
@@ -100,14 +100,71 @@ class AgentSwarmMCPServer:
                 "display_name": ws.get("display_name"),
                 "namespace": ws.get("namespace"),
                 "description": ws.get("description"),
+                "owner_id": ws.get("owner_id", ""),
             }
             for ws in workspaces
         ]
 
+    async def _get_workspace(self, workspace_id: int) -> dict:
+        return await self.client.get_workspace(workspace_id)
+
+    async def _create_workspace(self, display_name: str, description: str = "") -> dict:
+        return await self.client.create_workspace(display_name, description)
+
+    async def _update_workspace(self, workspace_id: int, display_name: str, description: str | None = None) -> dict:
+        return await self.client.update_workspace(workspace_id, display_name, description)
+
+    async def _delete_workspace(self, workspace_id: int) -> dict:
+        return await self.client.delete_workspace(workspace_id)
+
+    async def _list_workspace_members(self, workspace_id: int) -> list[dict]:
+        members = await self.client.list_workspace_members(workspace_id)
+        return [
+            {
+                "id": m.get("id"),
+                "workspace_id": m.get("workspace_id"),
+                "user_id": m.get("user_id"),
+                "role": m.get("role"),
+            }
+            for m in members
+        ]
+
+    async def _add_workspace_member(self, workspace_id: int, user_id: str, role: str = "member") -> dict:
+        return await self.client.add_workspace_member(workspace_id, user_id, role)
+
+    async def _remove_workspace_member(self, workspace_id: int, user_id: str) -> dict:
+        return await self.client.remove_workspace_member(workspace_id, user_id)
+
+    async def _get_me(self) -> dict:
+        return await self.client.get_me()
+
+    async def _list_known_users(self) -> list[str]:
+        return await self.client.list_known_users()
+
+    async def _list_admins(self) -> list[dict]:
+        admins = await self.client.list_admins()
+        return [
+            {
+                "id": a.get("id"),
+                "user_id": a.get("user_id"),
+                "created_by": a.get("created_by"),
+            }
+            for a in admins
+        ]
+
+    async def _add_admin(self, user_id: str) -> dict:
+        return await self.client.add_admin(user_id)
+
+    async def _remove_admin(self, user_id: str) -> dict:
+        return await self.client.remove_admin(user_id)
+
+    async def _bootstrap_admin(self) -> dict:
+        return await self.client.bootstrap_admin()
+
     async def _list_sessions(
         self,
         workspace_id: int,
-        phase: Optional[str] = None,
+        phase: str | None = None,
     ) -> list[dict]:
         sessions = await self.client.list_sessions(workspace_id)
         if phase:
@@ -153,8 +210,8 @@ class AgentSwarmMCPServer:
         persist: bool = False,
         working_branch: str = "",
         instruction_prompt: str = "",
-        github_pat_id: Optional[int] = None,
-        prompt_id: Optional[int] = None,
+        github_pat_id: int | None = None,
+        prompt_id: int | None = None,
     ) -> dict:
         session = await self.client.create_session(
             workspace_id,
@@ -174,15 +231,15 @@ class AgentSwarmMCPServer:
         self,
         workspace_id: int,
         session_id: int,
-        name: Optional[str] = None,
-        mode: Optional[str] = None,
-        provider: Optional[str] = None,
-        agent_tool: Optional[str] = None,
-        instruction_prompt: Optional[str] = None,
-        prompt_id: Optional[int] = None,
-        persist: Optional[bool] = None,
-        working_branch: Optional[str] = None,
-        github_pat_id: Optional[int] = None,
+        name: str | None = None,
+        mode: str | None = None,
+        provider: str | None = None,
+        agent_tool: str | None = None,
+        instruction_prompt: str | None = None,
+        prompt_id: int | None = None,
+        persist: bool | None = None,
+        working_branch: str | None = None,
+        github_pat_id: int | None = None,
     ) -> dict:
         fields: dict[str, Any] = {}
         if name is not None:
@@ -246,8 +303,8 @@ class AgentSwarmMCPServer:
         self,
         workspace_id: int,
         session_id: int,
-        prompt_id: Optional[int] = None,
-        instruction_prompt: Optional[str] = None,
+        prompt_id: int | None = None,
+        instruction_prompt: str | None = None,
     ) -> dict:
         fields: dict[str, Any] = {}
         if prompt_id is not None:
@@ -293,7 +350,7 @@ class AgentSwarmMCPServer:
         session_id: int,
         poll_interval: int = 10,
         timeout: int = 3600,
-        ctx: Optional[Context] = None,
+        ctx: Context | None = None,
     ) -> dict:
         poll = max(1, poll_interval)
         elapsed = 0
@@ -393,15 +450,125 @@ class AgentSwarmMCPServer:
         async def list_workspaces() -> list[dict]:
             """List all accessible Agent Swarm workspaces.
 
-            Returns workspace id, display_name, namespace, and description.
+            Returns workspace id, display_name, namespace, description, and owner_id.
             Use the workspace id in subsequent calls.
             """
             return await self._list_workspaces()
 
         @mcp.tool()
+        async def get_workspace(workspace_id: int) -> dict:
+            """Get details of a specific workspace by ID.
+
+            Args:
+                workspace_id: The workspace id.
+            """
+            return await self._get_workspace(workspace_id)
+
+        @mcp.tool()
+        async def create_workspace(display_name: str, description: str = "") -> dict:
+            """Create a new workspace.
+
+            Args:
+                display_name: Workspace display name.
+                description: Optional workspace description.
+            """
+            return await self._create_workspace(display_name, description)
+
+        @mcp.tool()
+        async def update_workspace(workspace_id: int, display_name: str, description: str | None = None) -> dict:
+            """Update a workspace's display name or description.
+
+            Args:
+                workspace_id: The workspace id.
+                display_name: New workspace display name.
+                description: New workspace description.
+            """
+            return await self._update_workspace(workspace_id, display_name, description)
+
+        @mcp.tool()
+        async def delete_workspace(workspace_id: int) -> dict:
+            """Delete a workspace.
+
+            Args:
+                workspace_id: The workspace id.
+            """
+            return await self._delete_workspace(workspace_id)
+
+        @mcp.tool()
+        async def list_workspace_members(workspace_id: int) -> list[dict]:
+            """List all members granted access to a workspace.
+
+            Args:
+                workspace_id: The workspace id.
+            """
+            return await self._list_workspace_members(workspace_id)
+
+        @mcp.tool()
+        async def add_workspace_member(workspace_id: int, user_id: str, role: str = "member") -> dict:
+            """Add a user as a member of a workspace.
+
+            Args:
+                workspace_id: The workspace id.
+                user_id: Username or ServiceAccount identity (e.g. 'system:serviceaccount:<NAMESPACE>:<USER>').
+                role: Member role (default 'member').
+            """
+            return await self._add_workspace_member(workspace_id, user_id, role)
+
+        @mcp.tool()
+        async def remove_workspace_member(workspace_id: int, user_id: str) -> dict:
+            """Remove a member from a workspace.
+
+            Args:
+                workspace_id: The workspace id.
+                user_id: Username or ServiceAccount identity to remove.
+            """
+            return await self._remove_workspace_member(workspace_id, user_id)
+
+        @mcp.tool()
+        async def get_me() -> dict:
+            """Get current authenticated user identity and permissions.
+
+            Returns username, is_admin, can_create_workspace, and admin_bootstrap_available.
+            """
+            return await self._get_me()
+
+        @mcp.tool()
+        async def list_known_users() -> list[str]:
+            """List known users and ServiceAccounts for member/admin autocomplete."""
+            return await self._list_known_users()
+
+        @mcp.tool()
+        async def list_admins() -> list[dict]:
+            """List all global Swarmer admins."""
+            return await self._list_admins()
+
+        @mcp.tool()
+        async def add_admin(user_id: str) -> dict:
+            """Add a user as a global Swarmer admin.
+
+            Args:
+                user_id: Username to grant global admin rights.
+            """
+            return await self._add_admin(user_id)
+
+        @mcp.tool()
+        async def remove_admin(user_id: str) -> dict:
+            """Remove a user from global Swarmer admins.
+
+            Args:
+                user_id: Username to revoke admin rights from.
+            """
+            return await self._remove_admin(user_id)
+
+        @mcp.tool()
+        async def bootstrap_admin() -> dict:
+            """Self-promote the current user to global admin when zero admins exist."""
+            return await self._bootstrap_admin()
+
+        @mcp.tool()
         async def list_sessions(
             workspace_id: int,
-            phase: Optional[str] = None,
+            phase: str | None = None,
         ) -> list[dict]:
             """List sessions in a workspace.
 
@@ -449,8 +616,8 @@ class AgentSwarmMCPServer:
             persist: bool = False,
             working_branch: str = "",
             instruction_prompt: str = "",
-            github_pat_id: Optional[int] = None,
-            prompt_id: Optional[int] = None,
+            github_pat_id: int | None = None,
+            prompt_id: int | None = None,
         ) -> dict:
             """Create a new agent session.
 
@@ -461,8 +628,8 @@ class AgentSwarmMCPServer:
                 mode: Execution mode. One of: prompt, tui, server. Default: prompt.
                 provider: AI provider preset. One of: claude, gemini. Empty string
                           uses the tool default (based on configured credentials).
-                persist: Keep workspace PVC between runs. Default: false.
-                working_branch: Git branch to create/checkout in the pod.
+                persist: Keep workspace volume between runs. Default: false.
+                working_branch: Git branch to create/checkout in the sandbox.
                 instruction_prompt: Additional instructions prepended to the base prompt (or raw command for shell).
                 github_pat_id: GitHub PAT id for private repos (from list_github_pats).
                 prompt_id: Base prompt id (from list_workspace_prompts).
@@ -476,15 +643,15 @@ class AgentSwarmMCPServer:
         async def update_session(
             workspace_id: int,
             session_id: int,
-            name: Optional[str] = None,
-            mode: Optional[str] = None,
-            provider: Optional[str] = None,
-            agent_tool: Optional[str] = None,
-            instruction_prompt: Optional[str] = None,
-            prompt_id: Optional[int] = None,
-            persist: Optional[bool] = None,
-            working_branch: Optional[str] = None,
-            github_pat_id: Optional[int] = None,
+            name: str | None = None,
+            mode: str | None = None,
+            provider: str | None = None,
+            agent_tool: str | None = None,
+            instruction_prompt: str | None = None,
+            prompt_id: int | None = None,
+            persist: bool | None = None,
+            working_branch: str | None = None,
+            github_pat_id: int | None = None,
         ) -> dict:
             """Update a non-running session's configuration (only changed fields needed).
 
@@ -526,7 +693,7 @@ class AgentSwarmMCPServer:
         ) -> dict:
             """Attach a git repository to a session.
 
-            The repo will be cloned into /workspace/<local_path> when the pod starts.
+            The repo will be cloned into /workspace/<local_path> when the sandbox starts.
             local_path is derived from the repo name if omitted.
 
             Args:
@@ -569,8 +736,8 @@ class AgentSwarmMCPServer:
         async def set_session_prompt(
             workspace_id: int,
             session_id: int,
-            prompt_id: Optional[int] = None,
-            instruction_prompt: Optional[str] = None,
+            prompt_id: int | None = None,
+            instruction_prompt: str | None = None,
         ) -> dict:
             """Set the prompt configuration for a session.
 
@@ -588,7 +755,7 @@ class AgentSwarmMCPServer:
 
         @mcp.tool()
         async def launch_session(workspace_id: int, session_id: int) -> dict:
-            """Launch a session pod.
+            """Launch a session sandbox.
 
             Starts the agent tool in the configured mode. For prompt mode, the session
             runs once and exits — use wait_for_session to block until completion.
@@ -644,7 +811,7 @@ class AgentSwarmMCPServer:
             session_id: int,
             poll_interval: int = 10,
             timeout: int = 3600,
-            ctx: Context = None,
+            ctx: Context | None = None,
         ) -> dict:
             """Poll a session until it reaches a terminal state, then return output.
 
@@ -686,7 +853,7 @@ class AgentSwarmMCPServer:
             session_id: int,
             cron_schedule: str,
             label: str = "",
-            prompt_id: Optional[int] = None,
+            prompt_id: int | None = None,
             instruction_prompt: str = "",
             enabled: bool = True,
         ) -> dict:
@@ -712,11 +879,11 @@ class AgentSwarmMCPServer:
             workspace_id: int,
             session_id: int,
             schedule_id: int,
-            cron_schedule: Optional[str] = None,
-            label: Optional[str] = None,
-            prompt_id: Optional[int] = None,
-            instruction_prompt: Optional[str] = None,
-            enabled: Optional[bool] = None,
+            cron_schedule: str | None = None,
+            label: str | None = None,
+            prompt_id: int | None = None,
+            instruction_prompt: str | None = None,
+            enabled: bool | None = None,
         ) -> dict:
             """Update an existing session schedule.
 
