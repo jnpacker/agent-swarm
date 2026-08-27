@@ -32,6 +32,7 @@ from swarmer.models.github_pat import GitHubPAT
 from swarmer.models.opencode_secret import OpencodeSecret
 from swarmer.models.session import CRON_PRESETS, Session
 from swarmer.models.session_repo import SessionRepo
+from swarmer.models.session_schedule import AUTHOR_SCOPES, EVENT_CONDITIONS
 from swarmer.models.workspace import Workspace
 from swarmer.models.workspace_prompt import WorkspacePrompt, WorkspacePromptSource
 
@@ -789,6 +790,8 @@ async def session_detail(
                 or session.custom_policies
             ),
             "schedules": session.schedules or [],
+            "event_conditions": EVENT_CONDITIONS,
+            "author_scopes": AUTHOR_SCOPES,
         },
     )
 
@@ -1907,9 +1910,9 @@ async def _run_openshell_agent(
                 sa_select(McpServer).where(McpServer.workspace_id == workspace_id)
             )
             for row in _mcp_res.scalars().all():
-                if row.api_token and isinstance(row.api_token, str) and row.api_token.strip():
-                    injected_secrets.add(row.api_token)
-                if row.access_token and isinstance(row.access_token, str) and row.access_token.strip():
+                if hasattr(row, "jira_access_token") and row.jira_access_token and isinstance(row.jira_access_token, str) and row.jira_access_token.strip():
+                    injected_secrets.add(row.jira_access_token)
+                if hasattr(row, "access_token") and row.access_token and isinstance(row.access_token, str) and row.access_token.strip():
                     injected_secrets.add(row.access_token)
             break
     except Exception:
@@ -2159,6 +2162,16 @@ async def session_launch(
     if session.is_active:
         return RedirectResponse(url=f"/workspaces/{ws_id}/sessions/{sid}", status_code=302)
 
+    # This is a manual UI-triggered launch, never a cron/event dispatch (those
+    # go through scheduler.py / pr_watcher.py which set their own context) —
+    # clear any stale event_context left over from a prior event-triggered run
+    # on this session so Run History doesn't mislabel this run as event-driven
+    # (ACM-42674 follow-up; mirrors the REST API launch_session behavior).
+    # Committed immediately rather than left pending on `session` so the
+    # clear is durable even if _do_launch fails before its own next commit.
+    session.event_context = ""
+    await db.commit()
+
     if save_config:
         if name.strip():
             session.name = name.strip()
@@ -2397,7 +2410,11 @@ async def session_unschedule(
 
 async def _get_schedule_items_context(ws_id: int, sid: int, db: AsyncSession) -> dict:
     """Return context dict for the _schedule_items.html partial."""
-    from swarmer.models.session_schedule import SessionSchedule
+    from swarmer.models.session_schedule import (
+        AUTHOR_SCOPES,
+        EVENT_CONDITIONS,
+        SessionSchedule,
+    )
     result = await db.execute(
         select(SessionSchedule)
         .where(SessionSchedule.session_id == sid)
@@ -2409,6 +2426,8 @@ async def _get_schedule_items_context(ws_id: int, sid: int, db: AsyncSession) ->
         "schedules": schedules,
         "prompt_sources": prompt_sources,
         "cron_presets": CRON_PRESETS,
+        "event_conditions": EVENT_CONDITIONS,
+        "author_scopes": AUTHOR_SCOPES,
     }
 
 
@@ -2443,6 +2462,10 @@ async def schedule_create(
     ws_id: int,
     sid: int,
     request: Request,
+    trigger_type: str = Form("cron"),
+    event_condition: str = Form(""),
+    author_scope: str = Form("all"),
+    fix_authors: str = Form(""),
     cron_expr: str = Form(""),
     label: str = Form(""),
     prompt_id: str = Form(""),
@@ -2458,15 +2481,28 @@ async def schedule_create(
     if ws is None or session is None or session.workspace_id != ws_id:
         return HTMLResponse("", status_code=404)
 
-    cron_expr = cron_expr.strip()
-    if not cron_expr or not _croniter.is_valid(cron_expr):
-        return HTMLResponse("", status_code=422, headers={"HX-Trigger": "scheduleFormError"})
+    trigger_type = trigger_type.strip().lower()
+    if trigger_type not in ("cron", "event"):
+        trigger_type = "cron"
+
+    cron_schedule = ""
+    cron_next_run = None
+    if trigger_type == "cron":
+        cron_expr = cron_expr.strip()
+        if not cron_expr or not _croniter.is_valid(cron_expr):
+            return HTMLResponse("", status_code=422, headers={"HX-Trigger": "scheduleFormError"})
+        cron_schedule = cron_expr
+        cron_next_run = _croniter(cron_expr, datetime.now(timezone.utc)).get_next(datetime)
 
     pid = int(prompt_id) if prompt_id.strip().isdigit() else None
     sched = SessionSchedule(
         session_id=sid,
-        cron_schedule=cron_expr,
-        cron_next_run=_croniter(cron_expr, datetime.now(timezone.utc)).get_next(datetime),
+        trigger_type=trigger_type,
+        event_condition=event_condition.strip() if trigger_type == "event" else "",
+        author_scope=author_scope.strip() if trigger_type == "event" else "all",
+        fix_authors=fix_authors.strip() if trigger_type == "event" else "",
+        cron_schedule=cron_schedule,
+        cron_next_run=cron_next_run,
         label=label.strip(),
         prompt_id=pid,
         instruction_prompt=instruction_prompt,
@@ -2486,6 +2522,10 @@ async def schedule_edit(
     sid: int,
     sched_id: int,
     request: Request,
+    trigger_type: str = Form("cron"),
+    event_condition: str = Form(""),
+    author_scope: str = Form("all"),
+    fix_authors: str = Form(""),
     cron_expr: str = Form(""),
     label: str = Form(""),
     prompt_id: str = Form(""),
@@ -2501,12 +2541,27 @@ async def schedule_edit(
     if ws is None or session is None or session.workspace_id != ws_id or sched is None or sched.session_id != sid:
         return HTMLResponse("", status_code=404)
 
-    cron_expr = cron_expr.strip()
-    if not cron_expr or not _croniter.is_valid(cron_expr):
-        return HTMLResponse("", status_code=422, headers={"HX-Trigger": "scheduleFormError"})
+    trigger_type = trigger_type.strip().lower()
+    if trigger_type not in ("cron", "event"):
+        trigger_type = "cron"
 
-    sched.cron_schedule = cron_expr
-    sched.cron_next_run = _croniter(cron_expr, datetime.now(timezone.utc)).get_next(datetime)
+    sched.trigger_type = trigger_type
+    if trigger_type == "event":
+        sched.event_condition = event_condition.strip()
+        sched.author_scope = author_scope.strip() or "all"
+        sched.fix_authors = fix_authors.strip()
+        sched.cron_schedule = ""
+        sched.cron_next_run = None
+    else:
+        cron_expr = cron_expr.strip()
+        if not cron_expr or not _croniter.is_valid(cron_expr):
+            return HTMLResponse("", status_code=422, headers={"HX-Trigger": "scheduleFormError"})
+        sched.cron_schedule = cron_expr
+        sched.cron_next_run = _croniter(cron_expr, datetime.now(timezone.utc)).get_next(datetime)
+        sched.event_condition = ""
+        sched.author_scope = "all"
+        sched.fix_authors = ""
+
     sched.label = label.strip()
     sched.prompt_id = int(prompt_id) if prompt_id.strip().isdigit() else None
     sched.instruction_prompt = instruction_prompt

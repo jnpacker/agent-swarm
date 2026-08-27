@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     sandbox_gc_interval: int = 300      # seconds between sandbox GC sweeps
     log_level: str = "INFO"             # Python logging level: DEBUG, INFO, WARNING, ERROR
 
+    # Swarm PR Events Watcher & Session Dispatcher (ACM-42674)
+    pr_watcher_enabled: bool = True
+    pr_watcher_poll_interval: int = 30
+    pr_watcher_sweep_interval: int = 1800
+    pr_watcher_debounce_seconds: int = 90
+    pr_watcher_max_fix_attempts: int = 3
+
     # Model preset mappings (ACM-37232) — configurable without code changes.
     # Each preset maps a role (plan/build/small) to a provider/model@version ID.
     # "plan" = interactive/stronger-reasoning model (used by the opencode plan agent)
@@ -53,8 +60,8 @@ class Settings(BaseSettings):
     claude_preset_plan_model: str = "google-vertex-anthropic/claude-opus-4-6@default"
     claude_preset_build_model: str = "google-vertex-anthropic/claude-sonnet-5@default"
     claude_preset_small_model: str = "google-vertex-anthropic/claude-haiku-4-5@20251001"
-    gemini_preset_plan_model: str = "google/gemini-3.1-pro-preview"
-    gemini_preset_build_model: str = "google/gemini-3.6-flash"
+    gemini_preset_plan_model: str = "google/gemini-3.7-flash"
+    gemini_preset_build_model: str = "google/gemini-3.7-flash"
     gemini_preset_small_model: str = "google/gemini-3.5-flash-lite"
     # Enables the opencode plan agent so the preset "plan" model is actually used
     # by `opencode run` (see docs/USER_GUIDE.md — Model Selection).

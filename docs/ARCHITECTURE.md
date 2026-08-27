@@ -20,9 +20,24 @@ agent-swarm/
 ├── docs/                       # Documentation
 │   ├── USER_GUIDE.md           # Full user-facing guide
 │   └── ARCHITECTURE.md         # This file
+├── practices/                  # Operational best practices
+│   └── autonomous-sdlc/        # Autonomous agent workflows
+│       └── swarm-pr-watcher.md # In-process PR watcher operations & troubleshooting
+├── prompts/                    # Headless autonomous agent prompts
+│   └── auto-pr-fix-agent.md    # Autonomous prompt for fixing conflicts, CI, comments
+├── scripts/                    # Automation, smoke tests, and CLI helpers
+│   ├── mcp_setup.py            # CLI setup for opencode.json + token discovery
+│   ├── openshell_connect.py    # Multi-cluster OpenShell port-forward helper
+│   ├── openshell_smoke_test.py # Sandbox runtime e2e verification
+│   └── openshell_jira_smoke_test.py # Jira MCP server e2e policy verification
 ├── mcp-server/                 # Standalone MCP server for session orchestration
-├── tests/                      # Test suite
+│   ├── pyproject.toml          # MCP server packaging
+│   ├── agent_swarm_mcp_server/ # FastMCP server, REST API client, auth resolution
+│   └── tests/                  # Client & tool unit tests (respx mocked)
+├── tests/                      # Swarmer test suite
 │   ├── test_api.py              # REST API unit tests (in-memory SQLite, no server)
+│   ├── test_token_page.py       # /token UI and mcp_setup script unit tests
+│   ├── test_k8s_auth.py         # TokenReview & OpenShift OAuth fallback tests
 │   ├── test_list_repos_for_pat.py  # GitHub API helpers (respx mocking)
 │   ├── test_openshell_client.py # OpenShell client wrapper tests (mocked SDK, no package required)
 │   └── test_ui_patternfly.py   # Playwright e2e tests (requires running server at :8091)
@@ -31,7 +46,7 @@ agent-swarm/
     ├── config.py               # pydantic-settings Settings singleton
     ├── database.py             # SQLAlchemy async engine + session factory + migrations
     ├── crypto.py               # Fernet encrypt/decrypt from secret key file or env var
-    ├── k8s_auth.py             # K8s TokenReview validation — identity (username/groups) only
+    ├── k8s_auth.py             # K8s TokenReview validation & OpenShift OAuth fallback
     ├── workspace_acl.py        # Database-backed workspace ACL (owner/member/admin) — ACM-41659
     ├── deps.py                 # FastAPI dependencies (require_auth, get_user_token)
     ├── k8s.py                  # Kubernetes utility functions (namespace, pull secrets, image check, extra env vars)
@@ -59,7 +74,7 @@ agent-swarm/
     │   ├── github_app.py       # Fernet-encrypted GitHub App credentials (one per workspace)
     │   └── mcp_server.py       # MCP server configs with Fernet-encrypted OAuth tokens
     ├── routers/                # FastAPI route handlers
-    │   ├── auth.py             # /login (token paste + OpenShift OAuth), /logout, /auth/callback
+    │   ├── auth.py             # /login (token paste + OpenShift OAuth), /logout, /token, /auth/callback
     │   ├── workspaces.py       # CRUD for workspaces
     │   ├── sessions.py         # CRUD + launch/stop/schedule/patch generation + repo management
     │   ├── secrets.py          # OpenCode secrets, GitHub PATs, GitHub App, pull secrets
@@ -69,7 +84,9 @@ agent-swarm/
     ├── api/v1/                 # REST API — 51 endpoints under /api/v1/
     └── templates/              # Jinja2 HTML templates (PatternFly 6 dark theme + HTMX)
         ├── base.html           # Layout with masthead, flash messages, PatternFly CDN
-        ├── workspaces/         # list, detail, new, edit, _delete_confirm
+        ├── token.html          # Active bearer token, opencode.json snippet, 1-click copy
+        ├── workspaces/         # list, detail, new, edit, _delete_confirm, members
+        ├── admins/             # list, bootstrap
         ├── sessions/           # list, detail, new, _status_badge, _last_output, _repo_list, etc.
         ├── secrets/            # tabs, opencode_form, github_pat_form, github_pat_list
         └── mcp_servers/        # list (catalog + configured servers with OAuth status)
@@ -91,7 +108,10 @@ agent-swarm/
   - `server` — persistent: runs the agent in server mode, exposes a service via OpenShell `expose_service()`, dashboard proxies HTTP/WS/SSE to it
   - `tui` — persistent: runs `sleep infinity`; user connects via xterm.js WebSocket → OpenShell `exec_interactive()` PTY
 - **Session phases**: `idle` → `pending` → `running` → `succeeded`/`failed`/`stopped`
-- **Cron scheduling** — sessions of any mode can have a cron schedule (`cron_schedule` field). A background asyncio loop (`scheduler.py`) checks every 30s, uses an atomic `UPDATE … RETURNING` to claim due rows (prevents duplicates), sets `session.mode = "prompt"` before calling `_do_launch()` (scheduled runs always execute in prompt mode regardless of the session's configured mode), then calls the shared `_do_launch()` helper in `sessions.py`.
+- **Multi-Trigger Model (`SessionSchedule`)** — sessions can have multiple execution triggers (ACM-35377, ACM-42674) with `trigger_type` set to either `"cron"` or `"event"`:
+  - `"cron"`: Scheduled time triggers (`cron_schedule`, `cron_next_run`). A background loop (`scheduler.py`) evaluates due schedules every 30s, atomically claims rows, sets `session.mode = "prompt"`, and launches the session.
+  - `"event"`: GitHub PR event triggers (`event_condition`, `author_scope`, `fix_authors`). Evaluated and dispatched by the in-process Swarm PR Watcher loop (`swarmer/pr_watcher.py`) upon receiving actionable GitHub events (CI failures, conflicts, new commits, review comments).
+- **SessionRun** — historical record of completed executions (`session_runs` table). Captures phase, duration, dual outputs (`last_output`, `raw_output`), `trigger_type` (`"manual"`, `"cron"`, `"event"`), `schedule_label`, and serialized `event_context` (PR metadata for event-driven runs).
 - **OpencodeSecret** — per-workspace storage for GCP project and Vertex location (plain, non-secret SQLite `Text` columns — not Fernet-encrypted, since they carry no sensitive material). Despite the legacy name, used by OpenCode. The ADC JSON and the Google AI Studio (Gemini) API key are **not** persisted here via the UI — both are pushed directly to OpenShell gateway providers at save time (`swarmer-ws-{id}-google-cloud` and `swarmer-ws-{id}-google-ai-studio` respectively) and checked at launch/display time via `provider_exists()` (ACM-37263 completed the Gemini side of this pattern, mirroring the pre-existing ADC behavior). The model's `application_default_credentials_enc` / `google_api_key_enc` columns are retained only for backward compatibility with rows written before each migration and via the raw `POST /api/v1/.../secrets/credentials` API, which still accepts and stores them encrypted. Multiple rows per workspace are tolerated (one per `user_id`); read paths use `.scalars().first()` to avoid `MultipleResultsFound` when users share a workspace. A `UNIQUE (workspace_id, user_id)` constraint prevents future duplicates, with a deduplication migration that keeps the newest row per pair.
 - **GitHubPAT** — per-workspace encrypted GitHub personal access tokens with optional org scope for HTTPS git auth. Injected into OpenShell sandboxes via Gateway credential providers. Acts as fallback when no GitHub App is configured.
 - **GitHubApp** — one GitHub App installation per workspace, storing `app_id`, `installation_id`, and a Fernet-encrypted RSA private key (`private_key_enc`). At session launch, Swarmer mints a short-lived Installation Access Token (IAT) server-side using PyJWT + GitHub's REST API and injects it into the sandbox via the OpenShell Gateway provider — the raw PEM key never enters the sandbox. For TUI and server-mode sessions that may exceed the 1-hour token lifetime, a background asyncio task (`github_auth.start_token_refresh_loop`) re-mints and re-registers the provider every 50 minutes. See [docs/GITHUB_APP_SETUP.md](GITHUB_APP_SETUP.md) for setup steps and required permissions.
@@ -264,8 +284,8 @@ Deployment; `make delete` removes it.
 | `claude_preset_plan_model` | `CLAUDE_PRESET_PLAN_MODEL` | `google-vertex-anthropic/claude-opus-4-6@default` | Claude preset's PLAN-role model |
 | `claude_preset_build_model` | `CLAUDE_PRESET_BUILD_MODEL` | `google-vertex-anthropic/claude-sonnet-5@default` | Claude preset's BUILD-role model |
 | `claude_preset_small_model` | `CLAUDE_PRESET_SMALL_MODEL` | `google-vertex-anthropic/claude-haiku-4-5@20251001` | Claude preset's small/housekeeping model |
-| `gemini_preset_plan_model` | `GEMINI_PRESET_PLAN_MODEL` | `google/gemini-3.1-pro-preview` | Gemini preset's PLAN-role model |
-| `gemini_preset_build_model` | `GEMINI_PRESET_BUILD_MODEL` | `google/gemini-3.6-flash` | Gemini preset's BUILD-role model |
+| `gemini_preset_plan_model` | `GEMINI_PRESET_PLAN_MODEL` | `google/gemini-3.7-flash` | Gemini preset's PLAN-role model |
+| `gemini_preset_build_model` | `GEMINI_PRESET_BUILD_MODEL` | `google/gemini-3.7-flash` | Gemini preset's BUILD-role model |
 | `gemini_preset_small_model` | `GEMINI_PRESET_SMALL_MODEL` | `google/gemini-3.5-flash-lite` | Gemini preset's small/housekeeping model |
 | `opencode_experimental_plan_mode` | `OPENCODE_EXPERIMENTAL_PLAN_MODE` | `true` | Enables the opencode plan agent so the PLAN-role model above is actually used |
 
@@ -417,7 +437,152 @@ Swarmer uses branded, styled interactive pills across the UI for tool selection,
   - Color escalates dynamically: outline (0 active) → green (healthy) → gold (near/at capacity: `active >= max-1` for `max > 2`, `active == max` for `max ≤ 2`) → red (any queued). Rendered in both `detail.html` and `_list_rows.html`.
 
 - **History Source Pills**:
-  - Denormalized source pills in Run History rows: purple schedule pills for cron runs (`[📅 schedule-name · prompt-name]`), green `[TERM.UI]` / `[CHAT]` pills for interactive runs, and prompt name pills for manual prompt runs.
+  - Denormalized source pills in Run History rows: purple schedule pills for cron runs (`[📅 schedule-name · prompt-name]`), gold event pills for event-driven runs (`[⚡ Event: PR #104 (pr-fix)]`), green `[TERM.UI]` / `[CHAT]` pills for interactive runs, and prompt name pills for manual prompt runs.
+
+## Event-Driven PR Events Watcher & Session Dispatcher
+
+The **Swarm PR Events Watcher** (`swarmer/pr_watcher.py`) is an in-process, firewall-safe asynchronous background loop that runs inside the Swarmer pod's FastAPI lifespan, alongside `scheduler.py`. It monitors GitHub repositories for Pull Request state changes and dispatches Swarm sessions only when actionable work is needed from trusted contributors.
+
+There is **no standalone CLI or static JSON configuration** — all triggers, repositories, conditions, and author scopes are discovered directly from `swarmer.db` (configured entirely via the Web UI's Scheduling section). Dispatches happen in-process via `_do_launch()`, inheriting capacity limiting and `MAX_CONCURRENT_AGENTS` queueing automatically.
+
+```text
+GitHub Events API (Outbound ETag Polling)
+                 │
+  ┌──────────────┴──────────────┐
+  ▼                             ▼
+304 Not Modified              200 OK (New Events Detected)
+(0 rate-limit cost)             │
+                                ▼
+                       Scan Open PRs for Repo
+                                │
+                                ▼
+               ┌────────────────────────────────┐
+               │    Author & Trust Filtering    │
+               │  - Resolve author scope        │
+               │  - Enforce 3-layer trust model │
+               └────────────────┬───────────────┘
+                                │
+                                ▼
+               ┌────────────────────────────────┐
+               │  CI Completion & Debounce Bar  │
+               │  - 0 IN_PROGRESS / QUEUED      │
+               │  - 90–120s quiet period        │
+               └────────────────┬───────────────┘
+                                │
+                                ▼
+               ┌────────────────────────────────┐
+               │   Circuit Breaker & Dedup DB   │
+               │  - SQLite (repo, pr, sha, act) │
+               │  - Max 3 attempts per SHA      │
+               └────────────────┬───────────────┘
+                                │
+                                ▼
+                    Dispatch Swarm Session
+               (In-Process via _do_launch())
+```
+
+### 1. Fast Path vs. Slow Path Architecture
+
+- **Fast Path (Event-Driven Polling):** Polls `GET https://api.github.com/repos/{owner}/{repo}/events` with `If-None-Match: <etag>`. When no activity occurred, GitHub returns `304 Not Modified` consuming **0 rate-limit cost**. On `200 OK`, the daemon wakes up and scans open PRs for that repo.
+- **Slow Path (Hybrid Safety Net):** Runs a full periodic sweep every 30–60 minutes across event-scoped repos to catch untracked backend state transitions such as merge conflicts (`mergeable: dirty` generates no GitHub event stream payload).
+
+### 2. Scoped Watched-Repo Resolution
+
+To minimize API consumption and avoid unnecessary network calls:
+- **Rule:** The watcher **only polls repositories that have at least one enabled `event` trigger**.
+- Repositories configured with cron schedules (e.g. daily CVE audits or weekly package updates) are handled in-process by Swarmer's internal `swarmer/scheduler.py` loop and are **never polled** by the watcher daemon.
+- The watched-repo set is dynamically refreshed on an interval; stale ETags are purged when a repository is removed.
+
+### 3. Author Routing Taxonomy & "My PRs" Resolution
+
+Each trigger defines an **Author Scope** and **Event Condition**:
+
+| Author Scope | Who Matches | Target Action | Default Behavior & Prompts |
+|---|---|---|---|
+| **`My PRs` (`self`)** | Configured `fix_authors` (comma-separated logins in schedule) | `pr-fix` | Resolves conflicts, reproduces & fixes CI failures, addresses review comments, pushes to PR branch, and tags `@coderabbitai review and approve`. Fork PRs require maintainer edit permissions. |
+| **`Team PRs` (`team`)** | Trusted collaborators (`OWNER`, `MEMBER`, `COLLABORATOR`, or on allowlist) | `pr-review` | Detached worktree analysis, scored multi-lens review, inline feedback. Read-only on PR branches. |
+| **`Bot PRs` (`bots`)** | Automated bot logins (`dependabot[bot]`, `renovate[bot]`, `cve-*`, `app/*`) | `auto-merge-defer` | Defers to repo's GitHub Actions (`auto-merge-approved.yaml`) or triggers autonomous bot fix prompts. |
+| **`All PRs` (`all`)** | **My PRs + Team PRs + Bot PRs + External PRs** | Context-dependent | Evaluates any matching author against the trigger condition while strictly enforcing the 3-layer trust model. |
+
+### 4. 3-Layer Team-PR Trust Model & Security Guardrails
+
+To prevent arbitrary code execution, compute/token exhaustion, and prompt injection attacks from untrusted external contributors:
+
+1. **Layer 1: Native GitHub Author Association (Default)**
+   - Automatically trusts PR authors with `OWNER`, `MEMBER`, or `COLLABORATOR` associations.
+   - Treats `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, and `NONE` as **untrusted** by default.
+2. **Layer 2: Workspace Trust Policy**
+   - Configurable explicit allowlist of logins or GitHub organization team memberships (`GET /orgs/{org}/teams/{slug}/members`).
+3. **Layer 3: The `ok-to-review` Label Gate**
+   - Untrusted external PRs remain ignored until a repository collaborator applies the `ok-to-review` label (Kubernetes/Prow convention).
+   - **RBAC Protected:** Applying labels on GitHub requires Triage, Write, or Admin permissions on the base repository; external fork authors cannot self-apply this label. When label timeline events are available, the watcher verifies the label applier's identity and falls back to base repository RBAC when timeline data is unavailable.
+   - **Invalidation:** New commits pushed to an external PR automatically invalidate prior approval and require re-evaluation.
+
+### 5. Resilience, Circuit Breaker & Concurrency
+
+- **CI Completion Barrier & Debounce:** Check runs must show 0 `IN_PROGRESS` or `QUEUED` checks, plus a 90–120s quiet-period debounce before dispatching `pr-fix`.
+- **Circuit Breaker:** Maximum 3 fix attempts per `head_sha`. If the agent fails to resolve CI after 3 attempts, the status is marked `blocked`. A new human commit to the branch resets the counter.
+- **Self-Trigger Guard:** Events generated by the bot agent's own commits are ignored to prevent feedback loops.
+- **Capacity Back-pressure:** Dispatches automatically inherit Swarmer's `MAX_CONCURRENT_AGENTS` queueing.
+
+### 6. UI & Observability
+
+- **Trigger Type Selector:** Available in both Add Schedule and inline Edit forms (`_schedule_items.html`), supporting live conversion between Cron and Event triggers.
+- **Visual Pills:** Gold `⚡ Event: <label>` pills render in the Session List, Status Badges, and Run History table.
+- **Drawer Context Logging:** Expanding a run record in Run History displays full triggering metadata (`repo`, `PR #`, `head_sha`, `action`, `title`).
+
+---
+
+## Debugging & Log Retrieval Reference
+
+When diagnosing system behavior, Swarmer provides multiple layers of logs and state observability:
+
+### 1. Swarmer Server & In-Process Watcher Logs
+- **In-Cluster Pod Logs:**
+  ```sh
+  kubectl logs -n swarmer -l app=swarmer -f --tail=200
+  ```
+- **Log Level Adjustment:** Set `LOG_LEVEL=DEBUG` in `swarmer-extra-env` or `.env` to enable verbose logging for `swarmer.pr_watcher`, `swarmer.scheduler`, `swarmer.openshell_client`, and `swarmer.routers.sessions`.
+- **Local Dev Server:** Look at terminal stdout where `make dev` is running.
+
+### 2. Agent Execution Outputs (Processed vs. Raw Logs)
+- **Web UI:**
+  - On the **Output Tab** of any session: use the toggle button (`[Output] | [Raw Log]`) to switch between the clean assistant response and the raw ANSI console log.
+  - On the **History Tab**: click the expand chevron on any past run to open the execution drawer. Use the `[Output]` and `[Raw Log]` pills to view logs from that specific run.
+- **REST API:**
+  ```sh
+  # Get latest run output (clean + raw)
+  curl -s -H "Authorization: Bearer $TOKEN" "$SWARMER_URL/api/v1/workspaces/$WS_ID/sessions/$SID/output"
+  
+  # List all historical runs with metadata
+  curl -s -H "Authorization: Bearer $TOKEN" "$SWARMER_URL/api/v1/workspaces/$WS_ID/sessions/$SID/runs"
+  ```
+
+### 3. Watcher State & Circuit Breaker Inspection
+All watcher dispatch history, attempt counters, and cached ETags are stored in the SQLite database (`$SWARMER_DB_PATH`):
+```sh
+# Inspect circuit breaker and dispatch status
+sqlite3 "$SWARMER_DB_PATH" "SELECT repo, pr_number, head_sha, action, status, attempts, last_dispatched_at, last_error FROM pr_action_state ORDER BY updated_at DESC LIMIT 20;"
+
+# Inspect cached GitHub Events ETags
+sqlite3 "$SWARMER_DB_PATH" "SELECT repo, etag, last_checked_at FROM repo_etags;"
+```
+
+### 4. OpenShell Sandbox & Gateway Logs
+- **Gateway Logs (Credential Injection & Proxy Routing):**
+  ```sh
+  kubectl logs -n openshell -l app.kubernetes.io/component=gateway -f --tail=100
+  ```
+- **Supervisor Logs (Sandbox Lifecycle & gRPC Exec):**
+  ```sh
+  kubectl logs -n openshell -l app.kubernetes.io/component=supervisor -f --tail=100
+  ```
+- **Active Sandbox Pod Logs (Raw container logs):**
+  ```sh
+  # Find sandbox pod
+  kubectl get pods -n openshell-sandboxes
+  kubectl logs -n openshell-sandboxes <sandbox-pod-name> -f
+  ```
 
 ## Adding New Features
 
@@ -551,3 +716,54 @@ path OPA reports.
 
 **Reference implementation:** `scripts/openshell_jira_smoke_test.py` + `_JIRA_MCP_BLOCK`
 in `swarmer/openshell_policy.py` — worked through the full sub-bump loop to reach 18/18.
+
+## Agent Swarm MCP Server (`mcp-server/`)
+
+The standalone Agent Swarm MCP Server (`agent-swarm-mcp-server`) exposes Swarmer's full REST API (`/api/v1/`) as Model Context Protocol tools for AI agent orchestration. This enables developer-agent interfaces (OpenCode, Claude Code) or agent-in-sandbox workloads to launch, monitor, configure, and orchestrate other Swarmer sessions programmatically.
+
+### Architecture & Data Flow
+
+```text
+AI Coding Agent (OpenCode / Claude Code)
+         │
+         ▼  (stdio / SSE MCP transport)
+Agent Swarm MCP Server (`mcp-server/`)
+  ├── FastMCP Server (`agent_swarm_mcp_server/server.py`)
+  ├── API Client (`agent_swarm_mcp_server/client.py`)
+  └── Auth Token Resolver (`agent_swarm_mcp_server/auth.py`)
+         │
+         ▼  (HTTPS Bearer Token Authorization)
+Swarmer REST API (`/api/v1/`)
+  ├── Workspaces & ACL Memberships
+  ├── Global Admin & User Identity (/me)
+  ├── Agent Sessions (Launch / Stop / Monitor / History)
+  └── Prompts, Repositories, PATs, & Schedules
+```
+
+### Available Tool Capabilities
+
+| Domain | MCP Tools | Description |
+|---|---|---|
+| **Workspaces & ACL** | `list_workspaces`, `get_workspace`, `create_workspace`, `update_workspace`, `delete_workspace`, `list_workspace_members`, `add_workspace_member`, `remove_workspace_member` | Full workspace CRUD and explicit member access management (ACM-41659 database ACL). |
+| **Identity & Admins** | `get_me`, `list_known_users`, `list_admins`, `add_admin`, `remove_admin`, `bootstrap_admin` | Query authenticated caller identity and permissions; manage global Swarmer admins. |
+| **Session Lifecycle** | `list_sessions`, `find_sessions_by_repo`, `get_session`, `create_session`, `update_session`, `delete_session`, `launch_session`, `stop_session`, `get_session_status`, `get_session_output`, `wait_for_session` | Launch, stop, monitor, and await agent execution runs across OpenCode and Shell tools. |
+| **Repos & Prompts** | `add_repo_to_session`, `remove_repo_from_session`, `list_workspace_prompts`, `set_session_prompt`, `list_github_pats` | Attach git repositories and configure prompts or private git PAT credentials. |
+| **Schedules** | `list_session_schedules`, `add_session_schedule`, `update_session_schedule`, `delete_session_schedule` | Manage automated cron schedules and schedule-specific prompt overrides. |
+
+### Authentication & Token Resolution
+
+The MCP server resolves Kubernetes bearer tokens in `agent_swarm_mcp_server/auth.py` in priority order:
+
+1. **`AGENT_SWARM_API_TOKEN`** env var (explicit token override; always wins).
+2. **In-cluster ServiceAccount token** at `/var/run/secrets/kubernetes.io/serviceaccount/token` (used when deployed as a sidecar or in-pod agent).
+3. **Kubeconfig Context** (`$KUBECONFIG` or default kubeconfig file):
+   - Direct `token` field on current user.
+   - Exec credential provider output (common with `oc login` and cloud IAM providers).
+   - Validated against Swarmer's `/api/v1/` endpoints with fallback resolution for OpenShift OAuth tokens.
+
+### Setup & CLI Automation
+
+- **Web UI (`/token`):** Authenticated users can visit `/token` directly from the masthead navigation to view their active token, API endpoint URL, and a ready-to-copy `opencode.json` configuration block.
+- **CLI Automation (`make mcp-setup` / `make api-info`):**
+  - `make mcp-setup`: Configures the local `opencode.json` file in the project with the detected Swarmer route and token.
+  - `make api-info`: Prints current API endpoint, decoded user identity, and the MCP JSON snippet.
