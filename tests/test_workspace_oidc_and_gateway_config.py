@@ -1,4 +1,5 @@
 import os
+import ssl
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -81,13 +82,14 @@ async def test_resolve_gateway_config_custom_workspace():
 @pytest.mark.asyncio
 async def test_probe_gateway_connectivity_mock():
     cfg = GatewayConfig(gateway_url="https://gw.example.com", auth_mode="none")
-    mock_client = MagicMock()
-    mock_client.list_sandboxes.return_value = ["sb-1", "sb-2"]
+    mock_client = MagicMock(spec_set=["list"])
+    mock_client.list.return_value = ["sb-1", "sb-2"]
 
     with patch("swarmer.openshell_client.get_client_for_config", return_value=mock_client):
         res = await probe_gateway_connectivity(cfg)
         assert res["status"] == "ok"
         assert res["sandboxes_count"] == 2
+        mock_client.list.assert_called_once_with()
 
 
 @respx.mock
@@ -169,3 +171,24 @@ async def test_scheduler_gc_isolates_gateway_outage():
         # Session 2 on unreachable gateway 2 must NOT be marked stopped
         assert sess2.phase == "running"
         assert sess2.sandbox_name == "sb-ws2"
+
+
+def test_oidc_gateway_auth_inline_tls_ca_uses_ssl_context():
+    """Inline PEM CA content should not be passed to httpx as a file path."""
+    pem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
+    with patch("swarmer.openshell_oidc.ssl.create_default_context") as create_ctx, patch(
+        "swarmer.openshell_oidc.httpx.Client"
+    ) as http_client:
+        ctx = MagicMock(spec=ssl.SSLContext)
+        create_ctx.return_value = ctx
+
+        auth = OidcGatewayAuth(
+            issuer="https://idp.example.com/realms/test",
+            client_id="client-123",
+            tls_ca=pem,
+        )
+        auth.close()
+
+    create_ctx.assert_called_once_with()
+    ctx.load_verify_locations.assert_called_once_with(cadata=pem.strip())
+    assert http_client.call_args.kwargs["verify"] is ctx

@@ -100,6 +100,7 @@
 
         {# ── Custom Gateway Panel ── #}
         <div id="custom-gateway-panel" style="display:{% if ws.gateway and ws.gateway.gateway_url %}block{% else %}none{% endif %}; margin-top:var(--pf-t--global--spacer--md); border-top:1px solid var(--pf-t--global--border--color--subtle); padding-top:var(--pf-t--global--spacer--md);">
+          <input type="hidden" name="workspace_id" value="{{ ws.id }}">
           
           {# Quick Setup Paste Box #}
           <div class="pf-v6-c-card pf-m-plain" style="background:var(--pf-t--global--background--color--secondary--default); border:1px dashed var(--pf-t--global--color--brand--default); padding:var(--pf-t--global--spacer--md); border-radius:var(--pf-t--global--border--radius--md); margin-bottom:var(--pf-t--global--spacer--md);">
@@ -297,7 +298,7 @@ async function parseCommandBox() {
     return;
   }
   try {
-    const res = await fetch('/api/v1/workspaces/gateway/parse-command', {
+    const res = await fetch('/workspaces/gateway/parse-command', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({command: text})
@@ -330,7 +331,7 @@ async function formatTokenInput(val) {
     return;
   }
   try {
-    const res = await fetch('/api/v1/workspaces/gateway/parse-token', {
+    const res = await fetch('/workspaces/gateway/parse-token', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({token_input: val})

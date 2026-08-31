@@ -34,6 +34,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timezone
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -131,6 +132,7 @@ def get_client_for_config(config: GatewayConfig):
     """Factory — builds a SandboxClient from a GatewayConfig."""
     from openshell import SandboxClient, TlsConfig  # noqa: F401 (optional dep)
 
+    endpoint = _normalize_gateway_endpoint(config.gateway_url)
     tls = None
     temp_paths: list[pathlib.Path] = []
     try:
@@ -162,7 +164,7 @@ def get_client_for_config(config: GatewayConfig):
         # returns — the credential bytes are already copied into the gRPC
         # channel by then.
         return SandboxClient(
-            config.gateway_url,
+            endpoint,
             tls=tls,
             bearer_token=bearer,
         )
@@ -275,7 +277,7 @@ async def probe_gateway_connectivity(config: GatewayConfig) -> dict:
     """Test connection and auth to an OpenShell gateway."""
     def _do_test() -> dict:
         client = get_client_for_config(config)
-        sandboxes = client.list_sandboxes()
+        sandboxes = client.list()
         return {
             "status": "ok",
             "gateway_url": config.gateway_url,
@@ -294,6 +296,7 @@ def get_client(
     """Public factory for e2e tests and direct usage."""
     from openshell import SandboxClient, TlsConfig  # noqa: F401 (optional dep)
 
+    endpoint = _normalize_gateway_endpoint(gateway_url)
     tls = None
     if tls_ca_path:
         tls = TlsConfig(
@@ -301,7 +304,35 @@ def get_client(
             cert_path=pathlib.Path(tls_cert_path),
             key_path=pathlib.Path(tls_key_path),
         )
-    return SandboxClient(gateway_url, tls=tls)
+    return SandboxClient(endpoint, tls=tls)
+
+
+def _normalize_gateway_endpoint(gateway_url: str) -> str:
+    """Normalize a gateway URL into gRPC endpoint form `host:port`.
+
+    SandboxClient expects a gRPC target endpoint, not a full URL. We keep the
+    original gateway URL elsewhere for HTTP proxying, but strip scheme and
+    validate format here before constructing the client.
+    """
+    raw = (gateway_url or "").strip()
+    if not raw:
+        raise ValueError("Gateway URL is required.")
+
+    if "://" in raw:
+        parsed = urlparse(raw)
+        if not parsed.hostname:
+            raise ValueError("Gateway URL must include a hostname.")
+        if parsed.path not in ("", "/") or parsed.params or parsed.query or parsed.fragment:
+            raise ValueError("Gateway URL must not include a path, query, or fragment.")
+        if parsed.username or parsed.password:
+            raise ValueError("Gateway URL must not include user info.")
+        if parsed.port is not None:
+            return f"{parsed.hostname}:{parsed.port}"
+        return parsed.hostname
+
+    if any(c in raw for c in ("/", "?", "#")):
+        raise ValueError("Gateway URL must be host[:port] without path, query, or fragment.")
+    return raw
 
 
 async def create_provider(

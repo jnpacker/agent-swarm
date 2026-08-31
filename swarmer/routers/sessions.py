@@ -250,11 +250,7 @@ async def _delete_pat_provider(workspace_id: int, pat_id: int | None, session_id
         return
     from swarmer import openshell_client
 
-    client = None
-    try:
-        client = await openshell_client.get_client_for_workspace(workspace_id)
-    except Exception:
-        pass
+    client = await openshell_client.get_client_for_workspace(workspace_id)
 
     # Session-scoped name (current format).
     if session_id:
@@ -1847,7 +1843,11 @@ async def _setup_openshell_sandbox(
         raise
     except Exception:
         log.exception("_setup_openshell_sandbox failed for session %d", session_id)
-        await _update_db(phase="failed", run_completed_at=datetime.now(timezone.utc))
+        await _update_db(
+            phase="failed",
+            status_detail="OpenShell sandbox setup failed",
+            run_completed_at=datetime.now(timezone.utc),
+        )
 
 
 async def _run_openshell_agent(

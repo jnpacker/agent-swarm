@@ -82,6 +82,7 @@ class ParseTokenOut(BaseModel):
 
 
 class TestGatewayConnectionIn(BaseModel):
+    workspace_id: int | None = None
     gateway_url: str = Field(..., min_length=1)
     auth_mode: str = "oidc"
     oidc_issuer: str | None = None

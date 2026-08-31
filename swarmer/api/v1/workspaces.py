@@ -143,21 +143,63 @@ async def parse_gateway_token_endpoint(body: ParseTokenIn):
 
 
 @router.post("/gateway/test-connection", response_model=TestGatewayConnectionOut)
-async def test_gateway_connection_endpoint(body: TestGatewayConnectionIn):
+async def test_gateway_connection_endpoint(
+    body: TestGatewayConnectionIn,
+    db: AsyncSession = Depends(get_db),
+    identity: TokenIdentity = Depends(require_api_auth),
+):
     from swarmer.openshell_client import GatewayConfig, probe_gateway_connectivity
     from swarmer.openshell_oidc import OidcGatewayAuth
 
+    stored_gw: WorkspaceGateway | None = None
+    if body.workspace_id is not None:
+        ws = (
+            (
+                await db.execute(
+                    select(Workspace)
+                    .where(Workspace.id == body.workspace_id)
+                    .options(selectinload(Workspace.gateway))
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if ws is None or not await workspace_acl.user_can_access_workspace(
+            db, ws, identity.username, identity.groups
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Workspace {body.workspace_id} not found",
+            )
+        if not await workspace_acl.can_manage_members(
+            db, ws, identity.username, identity.groups
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only the workspace owner or an admin can test stored gateway credentials.",
+            )
+        stored_gw = ws.gateway
+
+    oidc_issuer = body.oidc_issuer or (stored_gw.oidc_issuer if stored_gw else None)
+    oidc_client_id = body.oidc_client_id or (stored_gw.oidc_client_id if stored_gw else None)
+    oidc_audience = body.oidc_audience or (stored_gw.oidc_audience if stored_gw else None)
+    refresh_token = body.refresh_token
+    if not refresh_token and stored_gw is not None and stored_gw.auth_mode == "oidc":
+        refresh_token = stored_gw.refresh_token or None
+    bearer_token = body.bearer_token
+    if not bearer_token and stored_gw is not None and stored_gw.auth_mode == "bearer":
+        bearer_token = stored_gw.bearer_token or None
+
     temp_auth = None
     bearer_callable = None
-    if body.auth_mode == "oidc" and body.oidc_issuer and body.oidc_client_id:
+    if body.auth_mode == "oidc" and oidc_issuer and oidc_client_id and refresh_token:
         temp_auth = OidcGatewayAuth(
-            issuer=body.oidc_issuer,
-            client_id=body.oidc_client_id,
-            audience=body.oidc_audience or "",
+            issuer=oidc_issuer,
+            client_id=oidc_client_id,
+            audience=oidc_audience or "",
             tls_ca=body.tls_ca,
         )
-        if body.refresh_token:
-            temp_auth.seed(body.refresh_token)
+        temp_auth.seed(refresh_token)
         bearer_callable = temp_auth.current_access_token
 
     config = GatewayConfig(
@@ -167,7 +209,7 @@ async def test_gateway_connection_endpoint(body: TestGatewayConnectionIn):
         tls_cert=body.tls_cert,
         tls_key=body.tls_key,
         tls_verify=body.tls_verify,
-        bearer_token=body.bearer_token if body.auth_mode == "bearer" else None,
+        bearer_token=bearer_token if body.auth_mode == "bearer" else None,
         bearer_callable=bearer_callable,
     )
     try:
@@ -511,4 +553,3 @@ async def remove_workspace_member(
     await db.delete(member)
     await db.commit()
     return MessageOut(detail=f"'{user_id}' removed from workspace.")
-

@@ -306,7 +306,7 @@ async function parseCommandBox() {
     return;
   }
   try {
-    const res = await fetch('/api/v1/workspaces/gateway/parse-command', {
+    const res = await fetch('/workspaces/gateway/parse-command', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({command: text})
@@ -344,7 +344,7 @@ async function formatTokenInput(val) {
     return;
   }
   try {
-    const res = await fetch('/api/v1/workspaces/gateway/parse-token', {
+    const res = await fetch('/workspaces/gateway/parse-token', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({token_input: val})

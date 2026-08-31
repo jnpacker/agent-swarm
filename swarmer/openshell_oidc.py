@@ -19,6 +19,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import pathlib
+import ssl
 import threading
 import time
 from datetime import datetime, timezone
@@ -61,7 +63,11 @@ class OidcGatewayAuth:
         self._lock = threading.Lock()
         self._bundle: dict[str, Any] | None = None
         self._token_endpoint: str | None = None
-        self._http = httpx.Client(follow_redirects=False, timeout=15.0, verify=tls_ca or True)
+        self._http = httpx.Client(
+            follow_redirects=False,
+            timeout=15.0,
+            verify=_httpx_verify_arg(tls_ca),
+        )
         self._loop: asyncio.AbstractEventLoop | None = None
 
     def close(self) -> None:
@@ -306,6 +312,31 @@ class WorkspaceOidcAuthManager:
 
 
 oidc_manager = WorkspaceOidcAuthManager()
+
+
+def _httpx_verify_arg(tls_ca: str | None) -> bool | str | ssl.SSLContext:
+    """Build a safe httpx verify argument from workspace CA settings.
+
+    Workspace gateway rows can store `tls_ca` either as a filesystem path
+    (global/default shape) or as inline PEM content (per-workspace DB shape).
+    httpx accepts a bool, a CA bundle path, or an SSLContext. Passing inline
+    PEM directly as a string makes httpx treat it as a path and fail.
+    """
+    if not tls_ca:
+        return True
+    ca = tls_ca.strip()
+    if not ca:
+        return True
+    try:
+        p = pathlib.Path(ca)
+        if p.exists():
+            return str(p)
+    except OSError:
+        pass
+
+    ctx = ssl.create_default_context()
+    ctx.load_verify_locations(cadata=ca)
+    return ctx
 
 
 async def _load_workspace_bundle(workspace_id: int | None) -> dict | None:

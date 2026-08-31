@@ -512,7 +512,7 @@ connect:  ## Port-forward the swarmer dashboard to localhost:$(LOCAL_PORT)
 	@echo "Forwarding http://localhost:$(LOCAL_PORT) → swarmer service..."
 	kubectl port-forward -n $(NAMESPACE) service/swarmer $(LOCAL_PORT):8080
 
-mcp-setup:  ## Resolve Swarmer API URL and update opencode.json MCP config
+mcp-url:  ## Resolve Swarmer API URL and update opencode.json MCP config
 	@set -e; \
 	if ! command -v kubectl >/dev/null 2>&1; then \
 	  echo "Error: kubectl is not installed or not in PATH" >&2; \
@@ -593,8 +593,7 @@ mcp-setup:  ## Resolve Swarmer API URL and update opencode.json MCP config
 	python3 scripts/update_opencode_config.py "$$RESOLVED_URL" "opencode.json"
 
 mcp-api: mcp-setup  ## Alias for mcp-setup
-mcp-url: mcp-setup  ## Alias for mcp-setup
-api-url: mcp-setup  ## Alias for mcp-setup
+api-url: mcp-url  ## Alias for mcp-url
 
 openshell-register:  ## Register (or refresh) the active cluster's OpenShell gateway in the local CLI
 	@# Derive a stable gateway name from the current kubectl context
@@ -714,6 +713,9 @@ kind-deploy:  ## One-shot local dev: create kind cluster + build + load image + 
 	fi
 	@echo "✓ Image loaded."
 	$(MAKE) deploy SILENT=1
+	@echo "Restarting swarmer deployment to ensure latest loaded image is running..."
+	kubectl rollout restart deployment/swarmer -n $(NAMESPACE)
+	kubectl rollout status deployment/swarmer -n $(NAMESPACE) --timeout=120s
 	@echo ""
 	@echo "╔══════════════════════════════════════════════════════╗"
 	@echo "║  Swarmer is running in kind!                         ║"

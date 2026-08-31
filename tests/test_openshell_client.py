@@ -808,3 +808,42 @@ def test_get_client_for_config_builds_mtls_from_inline_pem_content(sdk_client):
     assert not tls_cfg.ca_path.exists()
     assert not tls_cfg.cert_path.exists()
     assert not tls_cfg.key_path.exists()
+
+
+def test_get_client_for_config_normalizes_https_url_endpoint(sdk_client):
+    """SandboxClient endpoint must be host:port, not https:// URL."""
+    fake_module = MagicMock()
+    fake_module.SandboxClient = MagicMock(return_value=sdk_client)
+    fake_module.TlsConfig = MagicMock()
+
+    config = oc.GatewayConfig(gateway_url="https://gw.example.com:443", auth_mode="none")
+
+    with patch.dict(sys.modules, {"openshell": fake_module}):
+        oc.get_client_for_config(config)
+
+    assert fake_module.SandboxClient.call_args.args[0] == "gw.example.com:443"
+
+
+def test_get_client_for_config_rejects_endpoint_with_path():
+    """Misformatted gateway URLs should fail fast with actionable errors."""
+    fake_module = MagicMock()
+    fake_module.SandboxClient = MagicMock()
+    fake_module.TlsConfig = MagicMock()
+
+    config = oc.GatewayConfig(gateway_url="https://gw.example.com:443/api")
+
+    with patch.dict(sys.modules, {"openshell": fake_module}):
+        with pytest.raises(ValueError, match="must not include a path"):
+            oc.get_client_for_config(config)
+
+
+def test_get_client_normalizes_https_url_endpoint(sdk_client):
+    """Public get_client factory uses the same endpoint normalization."""
+    fake_module = MagicMock()
+    fake_module.SandboxClient = MagicMock(return_value=sdk_client)
+    fake_module.TlsConfig = MagicMock()
+
+    with patch.dict(sys.modules, {"openshell": fake_module}):
+        oc.get_client("https://gw.example.com:443")
+
+    assert fake_module.SandboxClient.call_args.args[0] == "gw.example.com:443"
