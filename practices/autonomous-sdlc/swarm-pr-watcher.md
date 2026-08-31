@@ -75,8 +75,8 @@ Triggers are modeled as first-class items supporting both `event` and `cron` typ
 To prevent arbitrary code execution and resource exhaustion from malicious or drive-by external pull requests, the watcher enforces a 3-layer trust model:
 
 1. **Layer 1: Native GitHub Author Association (Default)**
-   - Automatically trusts PR authors with `OWNER`, `MEMBER`, or `COLLABORATOR` associations.
-   - Treats `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, and `NONE` as untrusted.
+   - Automatically trusts PR authors with `OWNER`, `MEMBER`, `COLLABORATOR`, or `CONTRIBUTOR` associations.
+   - Treats first-time and unknown associations (`FIRST_TIME_CONTRIBUTOR`, `FIRST_TIMER`, `MANNEQUIN`, `NONE`) as untrusted.
 2. **Layer 2: Workspace Policy**
    - Configurable explicit allowlists or GitHub organization team memberships (`GET /orgs/{org}/teams/{slug}/members`).
 3. **Layer 3: The `ok-to-review` Label Gate**

@@ -487,7 +487,7 @@ Each trigger defines an **Author Scope** and **Event Condition**:
 | Author Scope | Who Matches | Target Action | Default Behavior & Prompts |
 |---|---|---|---|
 | **`My PRs` (`self`)** | Configured `fix_authors` (comma-separated logins in schedule) | `pr-fix` | Resolves conflicts, reproduces & fixes CI failures, addresses review comments, pushes to PR branch, and tags `@coderabbitai review and approve`. Fork PRs require maintainer edit permissions. |
-| **`Team PRs` (`team`)** | Trusted collaborators (`OWNER`, `MEMBER`, `COLLABORATOR`, or on allowlist) | `pr-review` | Detached worktree analysis, scored multi-lens review, inline feedback. Read-only on PR branches. |
+| **`Team PRs` (`team`)** | Trusted collaborators (`OWNER`, `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, or on allowlist) | `pr-review` | Detached worktree analysis, scored multi-lens review, inline feedback. Read-only on PR branches. |
 | **`Bot PRs` (`bots`)** | Automated bot logins (`dependabot[bot]`, `renovate[bot]`, `cve-*`, `app/*`) | `auto-merge-defer` | Defers to repo's GitHub Actions (`auto-merge-approved.yaml`) or triggers autonomous bot fix prompts. |
 | **`All PRs` (`all`)** | **My PRs + Team PRs + Bot PRs + External PRs** | Context-dependent | Evaluates any matching author against the trigger condition while strictly enforcing the 3-layer trust model. |
 
@@ -496,8 +496,8 @@ Each trigger defines an **Author Scope** and **Event Condition**:
 To prevent arbitrary code execution, compute/token exhaustion, and prompt injection attacks from untrusted external contributors:
 
 1. **Layer 1: Native GitHub Author Association (Default)**
-   - Automatically trusts PR authors with `OWNER`, `MEMBER`, or `COLLABORATOR` associations.
-   - Treats `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, and `NONE` as **untrusted** by default.
+   - Automatically trusts PR authors with `OWNER`, `MEMBER`, `COLLABORATOR`, or `CONTRIBUTOR` associations.
+   - Treats first-time and unknown associations (`FIRST_TIME_CONTRIBUTOR`, `FIRST_TIMER`, `MANNEQUIN`, `NONE`) as **untrusted** by default.
 2. **Layer 2: Workspace Trust Policy**
    - Configurable explicit allowlist of logins or GitHub organization team memberships (`GET /orgs/{org}/teams/{slug}/members`).
 3. **Layer 3: The `ok-to-review` Label Gate**
