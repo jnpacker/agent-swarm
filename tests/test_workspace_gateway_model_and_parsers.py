@@ -79,6 +79,26 @@ def test_parse_json_metadata():
     assert res.tls_verify is False
 
 
+def test_parse_json_metadata_non_string_values_are_safely_coerced_or_dropped():
+    metadata = {
+        "name": ["not", "a", "string"],
+        "gateway_endpoint": 443,
+        "auth_mode": "oidc",
+        "oidc_issuer": {"bad": "shape"},
+        "oidc_client_id": 123,
+        "oidc_audience": True,
+        "bearer_token": ["bad"],
+    }
+    res = parse_gateway_command_or_json(json.dumps(metadata))
+    assert not res.errors
+    assert res.gateway_url == "443"
+    assert res.oidc_issuer is None
+    assert res.oidc_client_id == "123"
+    assert res.oidc_audience == "True"
+    assert res.bearer_token is None
+    assert res.suggested_name is None
+
+
 def test_parse_token_json_bundle():
     bundle = {
         "refresh_token": "rt-1234567890abcdef",
@@ -106,6 +126,23 @@ def test_parse_token_raw_string():
     assert res.status == "valid"
     assert res.format_detected == "raw"
     assert res.refresh_token == "rt-rawtoken-1234567890"
+
+
+def test_parse_token_json_bundle_non_string_tokens_are_ignored():
+    bundle = {
+        "refresh_token": {"bad": "shape"},
+        "access_token": ["bad"],
+        "expires_at": "1755600000",
+        "issuer": ["bad"],
+        "client_id": 123,
+    }
+    res = parse_token_input(json.dumps(bundle))
+    assert res.status == "malformed"
+
+
+def test_parse_token_input_non_string_returns_malformed():
+    res = parse_token_input(12345)  # type: ignore[arg-type]
+    assert res.status == "malformed"
 
 
 def test_workspace_gateway_encryption():

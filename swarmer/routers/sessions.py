@@ -250,7 +250,18 @@ async def _delete_pat_provider(workspace_id: int, pat_id: int | None, session_id
         return
     from swarmer import openshell_client
 
-    client = await openshell_client.get_client_for_workspace(workspace_id)
+    try:
+        client = await openshell_client.get_client_for_workspace(workspace_id)
+    except Exception:
+        # Do not fall back to the default gateway when the workspace has a
+        # dedicated gateway but credential/client resolution fails. Also do not
+        # bubble this cleanup failure into run-state transitions.
+        log.warning(
+            "_delete_pat_provider: unable to resolve workspace gateway client for ws %d",
+            workspace_id,
+            exc_info=True,
+        )
+        return
 
     # Session-scoped name (current format).
     if session_id:
@@ -1865,7 +1876,6 @@ async def _run_openshell_agent(
     from swarmer.database import get_db as _get_db
     from swarmer.models.session import Session as _Session
 
-    client = await openshell_client.get_client_for_workspace(workspace_id)
     _TERMINAL_PHASES = frozenset(("succeeded", "failed", "stopped"))
 
     # Collect non-empty injected credential values so bare secret strings in shell output are redacted
@@ -1951,6 +1961,7 @@ async def _run_openshell_agent(
             break
 
     try:
+        client = await openshell_client.get_client_for_workspace(workspace_id)
         if mode != "server":
             # Server mode stays "pending" until expose_service succeeds and the
             # service_url is stored — the Chat tab only becomes accessible then.

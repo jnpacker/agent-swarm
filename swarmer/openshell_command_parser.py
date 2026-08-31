@@ -70,6 +70,15 @@ def _parse_json_metadata(json_str: str) -> ParsedGatewayCommand:
     if not isinstance(data, dict):
         return ParsedGatewayCommand(errors=["JSON payload must be an object."])
 
+    def _opt_str(value) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        return None
+
     endpoint = data.get("gateway_endpoint") or data.get("endpoint") or data.get("gateway_url") or data.get("url") or ""
     # Coerce to str: JSON values for these keys may be non-string (e.g. a number
     # or null), and downstream .startswith()/DB storage assume a string.
@@ -82,12 +91,12 @@ def _parse_json_metadata(json_str: str) -> ParsedGatewayCommand:
     return ParsedGatewayCommand(
         gateway_url=endpoint,
         auth_mode=auth_mode,
-        oidc_issuer=data.get("oidc_issuer"),
-        oidc_client_id=data.get("oidc_client_id"),
-        oidc_audience=data.get("oidc_audience"),
-        bearer_token=data.get("bearer_token") or data.get("token"),
+        oidc_issuer=_opt_str(data.get("oidc_issuer")),
+        oidc_client_id=_opt_str(data.get("oidc_client_id")),
+        oidc_audience=_opt_str(data.get("oidc_audience")),
+        bearer_token=_opt_str(data.get("bearer_token") or data.get("token")),
         tls_verify=not bool(data.get("insecure") or data.get("gateway_insecure")),
-        suggested_name=data.get("name"),
+        suggested_name=_opt_str(data.get("name")),
         raw_input=json_str,
     )
 

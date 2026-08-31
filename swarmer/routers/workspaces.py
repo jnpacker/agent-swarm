@@ -153,7 +153,7 @@ async def workspace_create(
 )
 async def workspace_parse_gateway_command(
     command: str = Body(..., embed=True),
-):
+) -> JSONResponse:
     res = parse_gateway_command_or_json(command)
     return JSONResponse(
         {
@@ -176,7 +176,7 @@ async def workspace_parse_gateway_command(
 )
 async def workspace_parse_gateway_token(
     token_input: str = Body(..., embed=True),
-):
+) -> JSONResponse:
     res = parse_token_input(token_input)
     return JSONResponse(
         {
@@ -209,7 +209,7 @@ async def test_gateway_htmx(
     gateway_bearer_token: str = Form(""),
     gateway_tls_ca: str = Form(""),
     gateway_tls_verify: str = Form("1"),
-):
+) -> HTMLResponse:
     if not gateway_url.strip():
         return HTMLResponse(
             '<div class="pf-v6-c-alert pf-m-danger pf-m-inline" role="alert">'
@@ -309,7 +309,9 @@ async def workspace_update(
             elif gateway_mode == "default":
                 try:
                     await api.delete_workspace_gateway(ws_id)
-                except APIError:
+                except APIError as gw_exc:
+                    if gw_exc.status_code != 404:
+                        raise
                     pass
         except APIError as exc:
             flash(request, f"Error saving workspace: {exc.detail}", "danger")

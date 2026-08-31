@@ -190,6 +190,22 @@ async def test_gateway_connection_endpoint(
     if not bearer_token and stored_gw is not None and stored_gw.auth_mode == "bearer":
         bearer_token = stored_gw.bearer_token or None
 
+    uses_stored_credential = (
+        (body.auth_mode == "oidc" and body.refresh_token is None and bool(refresh_token))
+        or (body.auth_mode == "bearer" and body.bearer_token is None and bool(bearer_token))
+    )
+    if uses_stored_credential and stored_gw is not None:
+        requested_url = body.gateway_url.strip()
+        stored_url = (stored_gw.gateway_url or "").strip()
+        if requested_url != stored_url:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "When reusing stored gateway credentials, gateway_url must match "
+                    "the workspace's saved gateway URL."
+                ),
+            )
+
     temp_auth = None
     bearer_callable = None
     if body.auth_mode == "oidc" and oidc_issuer and oidc_client_id and refresh_token:

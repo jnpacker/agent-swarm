@@ -188,11 +188,15 @@ async def opencode_secret_save(
 
     # Push Vertex AI credentials to OpenShell gateway if ADC was provided.
     # The gateway stores and auto-refreshes the credential; Swarmer never persists it.
-    oc_client = None
     try:
         oc_client = await openshell_client.get_client_for_workspace(ws_id)
-    except Exception:
-        pass
+    except Exception as exc:
+        flash(
+            request,
+            f"Failed to resolve workspace OpenShell gateway client: {exc}",
+            "danger",
+        )
+        return RedirectResponse(url=f"/workspaces/{ws_id}/secrets?tab=credentials", status_code=302)
 
     if adc_content and google_cloud_project and vertex_location:
         provider_name = f"swarmer-ws-{ws_id}-google-cloud"

@@ -277,13 +277,18 @@ async def probe_gateway_connectivity(config: GatewayConfig) -> dict:
     """Test connection and auth to an OpenShell gateway."""
     def _do_test() -> dict:
         client = get_client_for_config(config)
-        sandboxes = client.list()
-        return {
-            "status": "ok",
-            "gateway_url": config.gateway_url,
-            "auth_mode": config.auth_mode,
-            "sandboxes_count": len(sandboxes),
-        }
+        try:
+            sandboxes = client.list()
+            return {
+                "status": "ok",
+                "gateway_url": config.gateway_url,
+                "auth_mode": config.auth_mode,
+                "sandboxes_count": len(sandboxes),
+            }
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
     return await asyncio.to_thread(_do_test)
 
 
@@ -301,8 +306,8 @@ def get_client(
     if tls_ca_path:
         tls = TlsConfig(
             ca_path=pathlib.Path(tls_ca_path),
-            cert_path=pathlib.Path(tls_cert_path),
-            key_path=pathlib.Path(tls_key_path),
+            cert_path=pathlib.Path(tls_cert_path) if tls_cert_path else None,
+            key_path=pathlib.Path(tls_key_path) if tls_key_path else None,
         )
     return SandboxClient(endpoint, tls=tls)
 

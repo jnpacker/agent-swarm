@@ -45,6 +45,12 @@ class ParsedTokenResult:
 
 def parse_token_input(raw: str) -> ParsedTokenResult:
     """Parse and clean an OIDC token or credential bundle."""
+    if not isinstance(raw, str):
+        return ParsedTokenResult(
+            status="malformed",
+            message="Token input must be a string.",
+        )
+
     if not raw or not raw.strip():
         return ParsedTokenResult(status="empty", message="No token provided.")
 
@@ -55,8 +61,14 @@ def parse_token_input(raw: str) -> ParsedTokenResult:
         try:
             data = json.loads(cleaned)
             if isinstance(data, dict):
+                has_refresh_key = "refresh_token" in data or "refreshToken" in data
+                has_access_key = "access_token" in data or "accessToken" in data
                 refresh = data.get("refresh_token") or data.get("refreshToken") or ""
                 access = data.get("access_token") or data.get("accessToken") or ""
+                if not isinstance(refresh, str):
+                    refresh = ""
+                if not isinstance(access, str):
+                    access = ""
                 expires_at = data.get("expires_at") or data.get("expiresAt")
                 if expires_at is not None:
                     try:
@@ -64,19 +76,38 @@ def parse_token_input(raw: str) -> ParsedTokenResult:
                     except (ValueError, TypeError):
                         expires_at = None
 
+                issuer = data.get("issuer")
+                issuer = issuer if isinstance(issuer, str) else None
+                client_id = data.get("client_id") or data.get("clientId")
+                client_id = client_id if isinstance(client_id, str) else None
+
                 if refresh or access:
                     effective_token = refresh or access
                     return ParsedTokenResult(
                         refresh_token=refresh,
                         access_token=access,
                         expires_at=expires_at,
-                        issuer=data.get("issuer"),
-                        client_id=data.get("client_id") or data.get("clientId"),
+                        issuer=issuer,
+                        client_id=client_id,
                         format_detected="json_bundle",
                         status="valid",
                         message=f"Extracted from JSON bundle ({len(effective_token)} chars).",
                         char_count=len(effective_token),
                     )
+
+                if has_refresh_key or has_access_key:
+                    return ParsedTokenResult(
+                        format_detected="json_bundle",
+                        status="malformed",
+                        message=(
+                            "JSON bundle did not include a string refresh_token or access_token."
+                        ),
+                    )
+                return ParsedTokenResult(
+                    format_detected="json_bundle",
+                    status="malformed",
+                    message="JSON bundle missing refresh_token/access_token.",
+                )
         except json.JSONDecodeError:
             pass
 
