@@ -544,7 +544,7 @@ async def test_configure_google_cloud_provider_service_account(sdk_client):
     adc = {
         "type": "service_account",
         "client_email": "sa@project.iam.gserviceaccount.com",
-        "private_key": "-----BEGIN RSA PRIVATE KEY-----\nMIIE...\n-----END RSA PRIVATE KEY-----\n",
+        "private_key": "test-placeholder-private-key-material",
     }
     req_mock = MagicMock()
     req_mock.material = {}

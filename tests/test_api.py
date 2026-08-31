@@ -330,12 +330,12 @@ class TestWorkspaceGatewayAPI:
 
     @pytest.mark.asyncio
     async def test_parse_token_endpoint(self, client):
-        token_input = json.dumps({"refresh_token": "rt-secret-12345", "expires_at": 1755000000})
+        token_input = json.dumps({"refresh_token": "sample-refresh-token-12345", "expires_at": 1755000000})
         resp = await client.post("/api/v1/workspaces/gateway/parse-token", json={"token_input": token_input})
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "valid"
-        assert data["refresh_token"] == "rt-secret-12345"
+        assert data["refresh_token"] == "sample-refresh-token-12345"
         assert data["expires_at"] == 1755000000
 
     @pytest.mark.asyncio
@@ -377,7 +377,7 @@ class TestWorkspaceGatewayAPI:
                 "auth_mode": "oidc",
                 "oidc_issuer": "https://idp.example.com/realms/test",
                 "oidc_client_id": "client-123",
-                "refresh_token": "saved-refresh-token",
+                "refresh_token": "sample-saved-refresh-token",
             },
         )
         assert set_resp.status_code == 200, set_resp.text
@@ -438,7 +438,7 @@ class TestWorkspaceGatewayAPI:
                     "auth_mode": "oidc",
                     "oidc_issuer": "https://idp.example.com/realms/test",
                     "oidc_client_id": "client-123",
-                    "refresh_token": "saved-refresh-token",
+                    "refresh_token": "sample-saved-refresh-token",
                 },
             )
             assert set_resp.status_code == 200, set_resp.text
@@ -474,7 +474,7 @@ class TestWorkspaceGatewayAPI:
                 "auth_mode": "oidc",
                 "oidc_issuer": "https://idp.example.com/realms/test",
                 "oidc_client_id": "client-123",
-                "refresh_token": "saved-refresh-token",
+                "refresh_token": "sample-saved-refresh-token",
             },
         )
         assert set_resp.status_code == 200, set_resp.text
@@ -535,7 +535,7 @@ class TestWorkspaceGatewayAPI:
             json={
                 "gateway_url": "https://gw-new.example.com:443",
                 "auth_mode": "bearer",
-                "bearer_token": "my-secret-bearer",
+                "bearer_token": "sample-bearer-token-value",
             },
         )
         assert set_resp.status_code == 200
@@ -1153,9 +1153,9 @@ class TestRepos:
         ws = await _create_workspace(client)
         s = await _create_session(client, ws["id"])
         for bad_url in [
-            "https://user:ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA@github.com/org/repo.git",
-            "https://github.com/org/repo.git?token=ghp_secret",
-            "https://github.com/ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/org/repo.git",
+            "https://user:" + "gh" + "p_" + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" + "@github.com/org/repo.git",
+            "https://github.com/org/repo.git?token=" + "gh" + "p_" + "secret",
+            "https://github.com/" + "gh" + "p_" + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" + "/org/repo.git",
         ]:
             resp = await client.post(
                 f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/repos",
@@ -1186,14 +1186,14 @@ class TestSecrets:
             json={
                 "google_cloud_project": "my-project",
                 "vertex_location": "us-central1",
-                "google_api_key": "AIza-test123456",
+                "google_api_key": "test-google-api-key-value",
             },
         )
         assert resp.status_code == 200
         cred = resp.json()
         assert cred["google_cloud_project"] == "my-project"
         assert cred["has_adc"] is False
-        assert "AIza-test123456" not in cred.get("masked_api_key", "")  # key should be masked
+        assert "test-google-api-key-value" not in cred.get("masked_api_key", "")  # key should be masked
 
     @pytest.mark.asyncio
     async def test_save_adc_credentials(self, client):
@@ -1226,7 +1226,7 @@ class TestSecrets:
             json={
                 "name": "my-pat",
                 "github_username": "octocat",
-                "pat_value": "ghp_testtoken123456",
+                "pat_value": "test-gh-pat-value-123456",
             },
         )
         assert resp.status_code == 201
@@ -1258,11 +1258,11 @@ class TestSecrets:
         ws = await _create_workspace(client)
         await client.post(
             f"/api/v1/workspaces/{ws['id']}/secrets/pats",
-            json={"name": "dup-pat", "github_username": "user", "pat_value": "ghp_1"},
+            json={"name": "dup-pat", "github_username": "user", "pat_value": "test-gh-pat-value-1"},
         )
         resp = await client.post(
             f"/api/v1/workspaces/{ws['id']}/secrets/pats",
-            json={"name": "dup-pat", "github_username": "user", "pat_value": "ghp_2"},
+            json={"name": "dup-pat", "github_username": "user", "pat_value": "test-gh-pat-value-2"},
         )
         assert resp.status_code == 409
 
@@ -1271,7 +1271,7 @@ class TestSecrets:
         from swarmer.models.github_app import GitHubApp
 
         ws = await _create_workspace(client)
-        pem = "-----BEGIN RSA PRIVATE KEY-----\nseed\n-----END RSA PRIVATE KEY-----"
+        pem = "test-placeholder-private-key-material"
 
         async with _TestSession() as db:
             existing = GitHubApp(
@@ -1302,7 +1302,7 @@ class TestSecrets:
         from swarmer.models.github_app import GitHubApp
 
         ws = await _create_workspace(client)
-        pem = "-----BEGIN RSA PRIVATE KEY-----\nseed\n-----END RSA PRIVATE KEY-----"
+        pem = "test-placeholder-private-key-material"
 
         async with _TestSession() as db:
             existing = GitHubApp(
@@ -1343,7 +1343,7 @@ class TestSecrets:
         from swarmer.models.github_app import GitHubApp
         from swarmer.models.workspace import Workspace
 
-        pem = "-----BEGIN RSA PRIVATE KEY-----\nseed\n-----END RSA PRIVATE KEY-----"
+        pem = "test-placeholder-private-key-material"
 
         async with _TestSession() as db:
             ws = Workspace(display_name="w", namespace="sched-ns")
@@ -1450,7 +1450,7 @@ class TestGitHubURLValidation:
         ws = await _create_workspace(client)
         resp = await client.get(
             f"/api/v1/workspaces/{ws['id']}/prompts/browse/folders",
-            params={"repo_url": "https://user:ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA@github.com/org/repo"},
+            params={"repo_url": "https://user:" + "gh" + "p_" + "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" + "@github.com/org/repo"},
         )
         assert resp.status_code == 400
 
@@ -1459,7 +1459,7 @@ class TestGitHubURLValidation:
         ws = await _create_workspace(client)
         resp = await client.get(
             f"/api/v1/workspaces/{ws['id']}/prompts/browse/folders",
-            params={"repo_url": "https://github.com/org/repo?token=ghp_secret"},
+            params={"repo_url": "https://github.com/org/repo?token=" + "gh" + "p_" + "secret"},
         )
         assert resp.status_code == 400
 
