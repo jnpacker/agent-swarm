@@ -847,3 +847,23 @@ def test_get_client_normalizes_https_url_endpoint(sdk_client):
         oc.get_client("https://gw.example.com:443")
 
     assert fake_module.SandboxClient.call_args.args[0] == "gw.example.com:443"
+
+
+def test_get_client_builds_mtls_config_without_custom_ca(sdk_client):
+    """mTLS cert/key should be forwarded even when only system trust roots are used."""
+    fake_module = MagicMock()
+    fake_module.SandboxClient = MagicMock(return_value=sdk_client)
+    fake_module.TlsConfig = MagicMock()
+
+    with patch.dict(sys.modules, {"openshell": fake_module}):
+        oc.get_client(
+            "https://gw.example.com:443",
+            tls_cert_path="client.crt",
+            tls_key_path="client.key",
+        )
+
+    fake_module.TlsConfig.assert_called_once()
+    tls_kwargs = fake_module.TlsConfig.call_args.kwargs
+    assert tls_kwargs["ca_path"] is None
+    assert str(tls_kwargs["cert_path"]) == "client.crt"
+    assert str(tls_kwargs["key_path"]) == "client.key"

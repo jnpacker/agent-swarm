@@ -375,6 +375,7 @@ async def _restart_github_app_iat_refresh(session: Session, db: AsyncSession) ->
             start_token_refresh_loop(
                 app, session.id, provider_name, repo_names=repo_names or None,
                 workspace_id=session.workspace_id, client=oc_client,
+                resolve_workspace_client=False,
             ),
             name=f"iat-refresh-{session.id}",
         )

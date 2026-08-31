@@ -128,6 +128,7 @@ async def start_token_refresh_loop(
     repo_names: list[str] | None = None,
     workspace_id: int | None = None,
     client: Any | None = None,
+    resolve_workspace_client: bool = True,
 ) -> None:
     """Background task: re-mint an IAT and update the OpenShell provider on a fixed schedule.
 
@@ -144,6 +145,11 @@ async def start_token_refresh_loop(
                        scope as the initial token minted at launch).
         workspace_id:  Optional workspace ID to resolve the gateway client.
         client:        Optional pre-configured SandboxClient.
+        resolve_workspace_client:
+                       When True, and no explicit client is provided, resolve
+                       a workspace-specific gateway client at refresh time.
+                       Set False to preserve the launch-time/default-gateway
+                       selection and avoid re-resolving after config changes.
     """
     from swarmer import openshell_client
 
@@ -152,7 +158,9 @@ async def start_token_refresh_loop(
     app_id = app.app_id
     installation_id = app.installation_id
     private_key = app.private_key  # decrypts here; stored in local var
-    ws_id = workspace_id or getattr(app, "workspace_id", None)
+    ws_id = None
+    if resolve_workspace_client:
+        ws_id = workspace_id or getattr(app, "workspace_id", None)
 
     # Build a lightweight stand-in to avoid holding the ORM object.
     class _AppSnapshot:

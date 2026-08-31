@@ -303,9 +303,9 @@ def get_client(
 
     endpoint = _normalize_gateway_endpoint(gateway_url)
     tls = None
-    if tls_ca_path:
+    if tls_ca_path or (tls_cert_path and tls_key_path):
         tls = TlsConfig(
-            ca_path=pathlib.Path(tls_ca_path),
+            ca_path=pathlib.Path(tls_ca_path) if tls_ca_path else None,
             cert_path=pathlib.Path(tls_cert_path) if tls_cert_path else None,
             key_path=pathlib.Path(tls_key_path) if tls_key_path else None,
         )
