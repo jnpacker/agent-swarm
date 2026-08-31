@@ -25,9 +25,11 @@ TRUSTED_ASSOCIATIONS = {
     AuthorAssociation.OWNER,
     AuthorAssociation.MEMBER,
     AuthorAssociation.COLLABORATOR,
+    AuthorAssociation.CONTRIBUTOR,
     "OWNER",
     "MEMBER",
     "COLLABORATOR",
+    "CONTRIBUTOR",
 }
 
 DEFAULT_BOT_LOGINS = {
@@ -237,7 +239,7 @@ def evaluate_author_trust(
 ) -> AuthorTrustResult:
     """Evaluate whether a PR's author is trusted based on the 3-layer trust model.
 
-    Layer 1: Native GitHub author_association (OWNER, MEMBER, COLLABORATOR).
+    Layer 1: Native GitHub author_association (OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR).
     Layer 2: Explicit workspace allowlist or GitHub Team membership.
     Layer 3: Trusted label opt-in (e.g. 'ok-to-review') with RBAC applier check.
     """

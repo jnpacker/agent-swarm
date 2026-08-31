@@ -107,7 +107,7 @@ class TestAuthorTrustEvaluation(unittest.TestCase):
 
     def test_layer1_native_trusted_associations(self):
         policy = TrustPolicy(strategy=TrustStrategy.ORG_AND_COLLABORATORS)
-        for assoc in ("OWNER", "MEMBER", "COLLABORATOR"):
+        for assoc in ("OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR"):
             self.base_pr.author_association = assoc
             res = evaluate_author_trust(self.base_pr, policy)
             self.assertTrue(res.is_trusted)
@@ -115,11 +115,18 @@ class TestAuthorTrustEvaluation(unittest.TestCase):
 
     def test_layer1_native_untrusted_associations(self):
         policy = TrustPolicy(strategy=TrustStrategy.ORG_AND_COLLABORATORS)
-        for assoc in ("CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "NONE"):
+        for assoc in ("FIRST_TIME_CONTRIBUTOR", "NONE"):
             self.base_pr.author_association = assoc
             res = evaluate_author_trust(self.base_pr, policy)
             self.assertFalse(res.is_trusted)
             self.assertEqual(res.matched_layer, "untrusted")
+
+    def test_layer1_first_timer_is_untrusted(self):
+        policy = TrustPolicy(strategy=TrustStrategy.ORG_AND_COLLABORATORS)
+        self.base_pr.author_association = "FIRST_TIMER"
+        res = evaluate_author_trust(self.base_pr, policy)
+        self.assertFalse(res.is_trusted)
+        self.assertEqual(res.matched_layer, "untrusted")
 
     def test_layer2_explicit_allowlist(self):
         policy = TrustPolicy(strategy=TrustStrategy.EXPLICIT_ALLOWLIST, allowlist={"alice", "jnpacker"})
