@@ -512,8 +512,16 @@ connect:  ## Port-forward the swarmer dashboard to localhost:$(LOCAL_PORT)
 	@echo "Forwarding http://localhost:$(LOCAL_PORT) → swarmer service..."
 	kubectl port-forward -n $(NAMESPACE) service/swarmer $(LOCAL_PORT):8080
 
+mcp-url: export _URL := $(value URL)
 mcp-url:  ## Resolve Swarmer API URL and update opencode.json MCP config
 	@set -e; \
+	if [ -n "$$_URL" ]; then \
+	  RESOLVED_URL="$$_URL"; \
+	  echo "Using explicit URL override: $$RESOLVED_URL"; \
+	  echo "export AGENT_SWARM_API_URL=\"$$RESOLVED_URL\""; \
+	  python3 scripts/update_opencode_config.py "$$RESOLVED_URL" "opencode.json"; \
+	  exit 0; \
+	fi; \
 	if ! command -v kubectl >/dev/null 2>&1; then \
 	  echo "Error: kubectl is not installed or not in PATH" >&2; \
 	  exit 1; \
