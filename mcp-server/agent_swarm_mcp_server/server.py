@@ -43,6 +43,7 @@ def _fmt_schedule(sc: dict) -> dict:
         "label": sc.get("label", ""),
         "prompt_id": sc.get("prompt_id"),
         "instruction_prompt": sc.get("instruction_prompt", ""),
+        "include_event_context": sc.get("include_event_context", True),
         "enabled": sc.get("enabled", True),
     }
 
@@ -421,8 +422,9 @@ class AgentSwarmMCPServer:
         author_scope: str = "all",
         fix_authors: str = "",
         label: str = "",
-        prompt_id: int | None = None,
+        prompt_id: int,
         instruction_prompt: str = "",
+        include_event_context: bool = True,
         enabled: bool = True,
     ) -> dict:
         sc = await self.client.create_session_schedule(
@@ -430,7 +432,8 @@ class AgentSwarmMCPServer:
             trigger_type=trigger_type, event_condition=event_condition,
             author_scope=author_scope, fix_authors=fix_authors,
             label=label, prompt_id=prompt_id,
-            instruction_prompt=instruction_prompt, enabled=enabled,
+            instruction_prompt=instruction_prompt,
+            include_event_context=include_event_context, enabled=enabled,
         )
         return _fmt_schedule(sc)
 
@@ -861,14 +864,15 @@ class AgentSwarmMCPServer:
         async def add_session_schedule(
             workspace_id: int,
             session_id: int,
+            prompt_id: int,
             cron_schedule: str = "",
             trigger_type: str = "cron",
             event_condition: str = "",
             author_scope: str = "all",
             fix_authors: str = "",
             label: str = "",
-            prompt_id: int | None = None,
             instruction_prompt: str = "",
+            include_event_context: bool = True,
             enabled: bool = True,
         ) -> dict:
             """Add a new schedule or event trigger to a session.
@@ -882,8 +886,9 @@ class AgentSwarmMCPServer:
                 author_scope: PR author scope (e.g. 'self', 'team', 'bots', 'all').
                 fix_authors: Comma-separated GitHub logins for 'self' author scope.
                 label: Human-readable name for this trigger.
-                prompt_id: ID of a workspace prompt to use instead of the session default.
+                prompt_id: Required ID of the workspace prompt to run.
                 instruction_prompt: Additional instructions; overrides session default when set.
+                include_event_context: Include triggering event data in the agent prompt.
                 enabled: Whether the schedule is active. Default: True.
             """
             return await self._add_session_schedule(
@@ -891,7 +896,8 @@ class AgentSwarmMCPServer:
                 trigger_type=trigger_type, event_condition=event_condition,
                 author_scope=author_scope, fix_authors=fix_authors,
                 label=label, prompt_id=prompt_id,
-                instruction_prompt=instruction_prompt, enabled=enabled,
+                instruction_prompt=instruction_prompt,
+                include_event_context=include_event_context, enabled=enabled,
             )
 
         @mcp.tool()
@@ -907,6 +913,7 @@ class AgentSwarmMCPServer:
             label: str | None = None,
             prompt_id: int | None = None,
             instruction_prompt: str | None = None,
+            include_event_context: bool | None = None,
             enabled: bool | None = None,
         ) -> dict:
             """Update an existing session schedule or event trigger.
@@ -921,8 +928,9 @@ class AgentSwarmMCPServer:
                 author_scope: New author scope ('self', 'team', 'bots', 'all').
                 fix_authors: Comma-separated GitHub logins for 'self' author scope.
                 label: New label.
-                prompt_id: New prompt id (None clears the override).
+                prompt_id: New prompt id. Existing schedules retain their prompt when omitted.
                 instruction_prompt: New additional instructions.
+                include_event_context: Include triggering event data in the agent prompt.
                 enabled: Enable or disable the schedule.
             """
             fields: dict[str, Any] = {}
@@ -942,6 +950,8 @@ class AgentSwarmMCPServer:
                 fields["prompt_id"] = prompt_id
             if instruction_prompt is not None:
                 fields["instruction_prompt"] = instruction_prompt
+            if include_event_context is not None:
+                fields["include_event_context"] = include_event_context
             if enabled is not None:
                 fields["enabled"] = enabled
             return await self._update_session_schedule(workspace_id, session_id, schedule_id, **fields)

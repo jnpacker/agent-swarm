@@ -257,6 +257,7 @@ async def migrate_db() -> None:
         "ALTER TABLE session_schedules ADD COLUMN event_condition VARCHAR(64) NOT NULL DEFAULT ''",
         "ALTER TABLE session_schedules ADD COLUMN author_scope VARCHAR(32) NOT NULL DEFAULT 'all'",
         "ALTER TABLE session_schedules ADD COLUMN fix_authors VARCHAR(512) NOT NULL DEFAULT ''",
+        "ALTER TABLE session_schedules ADD COLUMN include_event_context BOOLEAN NOT NULL DEFAULT 1",
         "ALTER TABLE session_runs ADD COLUMN trigger_type VARCHAR(32) NOT NULL DEFAULT 'manual'",
         "ALTER TABLE session_runs ADD COLUMN event_context TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE sessions ADD COLUMN event_context TEXT NOT NULL DEFAULT ''",
@@ -275,8 +276,11 @@ async def migrate_db() -> None:
             created_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
             updated_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
         )""",
+        # ACM-43054: pr_action_state dispatch key includes session_id for multi-session fan-out
+        "ALTER TABLE pr_action_state ADD COLUMN session_id INTEGER DEFAULT NULL",
+        "DROP INDEX IF EXISTS uq_pr_action_state_key",
         """CREATE UNIQUE INDEX IF NOT EXISTS uq_pr_action_state_key
-           ON pr_action_state (repo, pr_number, head_sha, action)""",
+           ON pr_action_state (repo, pr_number, head_sha, action, session_id)""",
         # ACM-42978: queued PR watcher dispatches need serialized event context
         # so same-session fan-out can run reliably after the active session ends.
         "ALTER TABLE pr_action_state ADD COLUMN event_context TEXT NOT NULL DEFAULT ''",

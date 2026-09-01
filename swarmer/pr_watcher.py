@@ -14,12 +14,11 @@ from sqlalchemy.orm import selectinload
 from swarmer.config import settings
 from swarmer.pr_state import (
     DEFAULT_BOT_LOGINS,
-    PRAction,
     PRState,
     TrustPolicy,
     TrustStrategy,
     evaluate_author_trust,
-    evaluate_ci_completion_barrier,
+    evaluate_pr_conditions,
     is_bot_author,
     normalize_ci_checks,
     parse_iso_datetime,
@@ -237,38 +236,16 @@ async def _fetch_review_comments(
         return []
 
 
-async def _fetch_reviews_rest(
-    client: httpx.AsyncClient, repo: str, pr_number: int, token: str | None
-) -> list[dict[str, Any]]:
-    """Fetch PR reviews via REST."""
-    url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "Swarmer-PR-Watcher/1.0",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    try:
-        resp = await client.get(url, headers=headers, timeout=15)
-        if resp.is_success:
-            return resp.json()
-        return []
-    except Exception:
-        return []
-
-
 async def _fetch_reviews_and_threads(
-    client: httpx.AsyncClient, repo: str, pr_number: int, head_sha: str, token: str | None
-) -> tuple[int, int, bool]:
-    """Fetch review threads and reviews.
+    client: httpx.AsyncClient, repo: str, pr_number: int, token: str | None
+) -> tuple[int, int]:
+    """Fetch unresolved review-thread counts.
 
     Returns:
-        (unresolved_comments_count, coderabbit_unresolved_count, has_agent_review_on_head)
+        (unresolved_comments_count, coderabbit_unresolved_count)
     """
     if "/" not in repo:
-        return 0, 0, False
+        return 0, 0
     owner, name = repo.split("/", 1)
 
     if token:
@@ -286,13 +263,6 @@ async def _fetch_reviews_and_threads(
                       body
                     }
                   }
-                }
-              }
-              reviews(last: 20) {
-                nodes {
-                  author { login }
-                  state
-                  commit { oid }
                 }
               }
             }
@@ -321,16 +291,7 @@ async def _fetch_reviews_and_threads(
                             if any((c.get("author", {}).get("login") or "").lower().startswith("coderabbit") for c in comments):
                                 cr_count += 1
 
-                    has_agent_review = False
-                    for rev in pr_data.get("reviews", {}).get("nodes", []):
-                        rev_commit = (rev.get("commit", {}) or {}).get("oid", "")
-                        rev_author = ((rev.get("author", {}) or {}).get("login") or "").lower()
-                        rev_state = rev.get("state", "")
-                        if rev_commit == head_sha and rev_state in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED"):
-                            if is_bot_author(rev_author) or rev_author in DEFAULT_BOT_LOGINS:
-                                has_agent_review = True
-                                break
-                    return unresolved_count, cr_count, has_agent_review
+                    return unresolved_count, cr_count
         except Exception as exc:
             log.debug("pr-watcher: GraphQL review query failed for %s#%d: %s", repo, pr_number, exc)
 
@@ -339,13 +300,7 @@ async def _fetch_reviews_and_threads(
     unresolved_count = len(comments)
     cr_count = sum(1 for c in comments if (c.get("user", {}).get("login") or "").lower().startswith("coderabbit"))
 
-    reviews = await _fetch_reviews_rest(client, repo, pr_number, token)
-    has_agent_review = any(
-        r.get("commit_id") == head_sha and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED")
-        and (is_bot_author(r.get("user", {}).get("login", "")) or r.get("user", {}).get("login", "").lower() in DEFAULT_BOT_LOGINS)
-        for r in reviews
-    )
-    return unresolved_count, cr_count, has_agent_review
+    return unresolved_count, cr_count
 
 
 async def _fetch_label_events(
@@ -421,9 +376,7 @@ async def _build_pr_state(
     check_runs = await _fetch_check_runs(client, repo, head_sha, token)
     check_state = normalize_ci_checks(check_runs)
 
-    unresolved_count, cr_count, has_agent_review = await _fetch_reviews_and_threads(
-        client, repo, pr_number, head_sha, token
-    )
+    unresolved_count, cr_count = await _fetch_reviews_and_threads(client, repo, pr_number, token)
 
     label_events: list[dict[str, Any]] = []
     if "ok-to-review" in labels:
@@ -446,7 +399,6 @@ async def _build_pr_state(
         labels=labels,
         unresolved_review_comments=unresolved_count,
         coderabbit_unresolved_comments=cr_count,
-        has_agent_review_on_head=has_agent_review,
         created_at=parse_iso_datetime(full_pr.get("created_at")),
         updated_at=parse_iso_datetime(full_pr.get("updated_at")),
         check_state=check_state,
@@ -488,54 +440,12 @@ def _extract_event_pr_numbers(events: list[dict[str, Any]]) -> set[int]:
     return pr_numbers
 
 
-def _collect_pr_signals(
+def _schedule_matches_author_scope(
     pr: PRState,
-    *,
-    label_events: list[dict[str, Any]],
-) -> dict[str, str]:
-    """Collect actionable event signals for a PR with per-signal reasons."""
-    if pr.is_draft:
-        return {}
-
-    signals: dict[str, str] = {}
-
-    if pr.mergeable_state == "dirty":
-        signals["ci_fail_or_conflict"] = f"Merge conflict detected (mergeable_state={pr.mergeable_state})"
-    elif pr.check_state.has_failures:
-        ready, reason = evaluate_ci_completion_barrier(
-            pr.check_state,
-            quiet_period_seconds=float(settings.pr_watcher_debounce_seconds),
-        )
-        if ready:
-            failed_str = ", ".join(pr.check_state.failed_check_names[:3])
-            signals["ci_fail_or_conflict"] = f"CI failure detected ({failed_str})"
-        else:
-            log.debug(
-                "pr-watcher: PR %s#%d has CI failures but barrier not ready: %s",
-                pr.repo,
-                pr.pr_number,
-                reason,
-            )
-
-    if pr.unresolved_review_comments > 0 or pr.coderabbit_unresolved_comments > 0:
-        count = pr.coderabbit_unresolved_comments or pr.unresolved_review_comments
-        signals["review_comments"] = f"{count} unresolved review comment(s) found on PR"
-
-    if not is_bot_author(pr.author_login, set(DEFAULT_BOT_LOGINS)):
-        trust = evaluate_author_trust(
-            pr,
-            policy=TrustPolicy(strategy=TrustStrategy.ORG_AND_COLLABORATORS),
-            label_events=label_events,
-        )
-        if trust.is_trusted and not pr.has_agent_review_on_head:
-            signals["new_pr_or_commit"] = (
-                f"Trusted team PR by '{pr.author_login}' needs review on head SHA {pr.head_sha[:8]}"
-            )
-
-    return signals
-
-
-def _schedule_matches_author_scope(pr: PRState, sched: SessionSchedule) -> bool:
+    sched: SessionSchedule,
+    label_events: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Apply author routing after the event condition has matched."""
     author_lower = pr.author_login.lower()
     fix_logins = sched.fix_author_logins
     is_self = author_lower in fix_logins if fix_logins else False
@@ -543,39 +453,61 @@ def _schedule_matches_author_scope(pr: PRState, sched: SessionSchedule) -> bool:
 
     if sched.author_scope == "self" and not is_self:
         return False
-    if sched.author_scope == "team" and (is_self or is_bot):
-        return False
+    if sched.author_scope == "team":
+        if is_self or is_bot:
+            return False
+        trust = evaluate_author_trust(
+            pr,
+            policy=TrustPolicy(strategy=TrustStrategy.ORG_AND_COLLABORATORS),
+            label_events=label_events,
+        )
+        if not trust.is_trusted:
+            return False
     if sched.author_scope == "bots" and not is_bot:
         return False
     return True
 
 
-def _resolve_schedule_signal_and_action(
-    sched: SessionSchedule,
-    signals: dict[str, str],
-) -> tuple[str, PRAction] | None:
-    if sched.event_condition == "new_pr_or_commit" and "new_pr_or_commit" in signals:
-        return "new_pr_or_commit", PRAction.REVIEW
+def _match_triggers_for_pr(
+    pr: PRState,
+    matched_conditions: set[str],
+    sched_sessions: list[tuple[SessionSchedule, Session]],
+    label_events: list[dict[str, Any]] | None = None,
+    blocked_conditions: set[str] | None = None,
+) -> list[tuple[SessionSchedule, Session]]:
+    """Find all schedules whose conditions and author scopes match a PR."""
+    if pr.is_draft:
+        return []
 
-    if sched.event_condition == "ci_fail_or_conflict" and "ci_fail_or_conflict" in signals:
-        return "ci_fail_or_conflict", PRAction.FIX
-
-    if sched.event_condition == "review_comments" and "review_comments" in signals:
-        return "review_comments", PRAction.HYGIENE
-
-    if sched.event_condition == "any_actionable":
-        if "review_comments" in signals:
-            return "review_comments", PRAction.FIX
-        if "ci_fail_or_conflict" in signals:
-            return "ci_fail_or_conflict", PRAction.FIX
-        if "new_pr_or_commit" in signals:
-            return "new_pr_or_commit", PRAction.REVIEW
-
-    return None
+    matches: list[tuple[SessionSchedule, Session]] = []
+    for sched, session in sched_sessions:
+        if not sched.enabled or sched.trigger_type != "event":
+            continue
+        if sched.event_condition not in matched_conditions:
+            continue
+        if blocked_conditions and sched.event_condition in blocked_conditions:
+            continue
+        if _schedule_matches_author_scope(pr, sched, label_events):
+            matches.append((sched, session))
+    return matches
 
 
-def _action_dedupe_key(action: PRAction, schedule_id: int) -> str:
-    return f"{action.value}@s{schedule_id}"
+def _match_trigger_for_pr(
+    pr: PRState,
+    matched_conditions: set[str],
+    sched_sessions: list[tuple[SessionSchedule, Session]],
+    label_events: list[dict[str, Any]] | None = None,
+    blocked_conditions: set[str] | None = None,
+) -> tuple[SessionSchedule, Session] | None:
+    """Return the first matching schedule for legacy callers."""
+    matches = _match_triggers_for_pr(
+        pr,
+        matched_conditions,
+        sched_sessions,
+        label_events,
+        blocked_conditions,
+    )
+    return matches[0] if matches else None
 
 
 def _build_event_context(
@@ -583,10 +515,7 @@ def _build_event_context(
     sched: SessionSchedule,
     repo: str,
     pr_state: PRState,
-    matched_action: PRAction,
-    dedupe_action: str,
-    signal_name: str,
-    matched_reason: str,
+    condition: str,
 ) -> dict[str, Any]:
     return {
         "trigger_type": "event",
@@ -599,42 +528,12 @@ def _build_event_context(
         "base_ref": pr_state.base_ref,
         "title": pr_state.title,
         "author": pr_state.author_login,
-        "action": matched_action.value,
-        "action_key": dedupe_action,
-        "matched_condition": signal_name,
-        "cause": matched_reason,
+        "event_condition": condition,
+        "fork_no_push": bool(
+            pr_state.is_fork and not pr_state.raw_payload.get("maintainer_can_modify", False)
+        ),
+        "cause": f"Matched event condition: {condition}",
     }
-
-
-def _match_triggers_for_pr(
-    pr: PRState,
-    signals: dict[str, str],
-    sched_sessions: list[tuple[SessionSchedule, Session]],
-) -> list[tuple[SessionSchedule, Session, str, PRAction, str]]:
-    """Find all matching schedule/session pairs for the PR's actionable signals."""
-    matches: list[tuple[SessionSchedule, Session, str, PRAction, str]] = []
-    for sched, session in sched_sessions:
-        if not sched.enabled or sched.trigger_type != "event":
-            continue
-
-        if not _schedule_matches_author_scope(pr, sched):
-            continue
-
-        signal_match = _resolve_schedule_signal_and_action(sched, signals)
-        if signal_match is None:
-            continue
-
-        signal_name, action = signal_match
-
-        # Self PRs from forks without maintainer push cannot run fix/hygiene workflows.
-        if sched.author_scope == "self" and action in (PRAction.FIX, PRAction.HYGIENE) and pr.is_fork:
-            maintainer_can_modify = pr.raw_payload.get("maintainer_can_modify", False)
-            if not maintainer_can_modify:
-                continue
-
-        matches.append((sched, session, signal_name, action, signals[signal_name]))
-
-    return matches
 
 
 async def _dispatch_session_run(
@@ -834,40 +733,69 @@ async def _evaluate_and_dispatch_prs(
 
         pr_state, label_events = await _build_pr_state(client, repo, raw_pr, token)
 
-        signals = _collect_pr_signals(pr_state, label_events=label_events)
-        if not signals:
+        event_conditions = {
+            sched.event_condition
+            for sched, _sess in sched_sessions
+            if sched.enabled and sched.trigger_type == "event"
+        }
+        matched_conditions = evaluate_pr_conditions(
+            pr_state,
+            event_conditions=event_conditions,
+            quiet_period_seconds=float(settings.pr_watcher_debounce_seconds),
+        )
+        if not matched_conditions:
             continue
 
-        matches = _match_triggers_for_pr(pr_state, signals, sched_sessions)
+        matches = _match_triggers_for_pr(
+            pr_state,
+            matched_conditions,
+            sched_sessions,
+            label_events,
+        )
         if not matches:
-            log.debug("pr-watcher: PR %s#%d had signals %s but no matching schedules", repo, pr_state.pr_number, sorted(signals.keys()))
+            log.debug(
+                "pr-watcher: PR %s#%d matched conditions %s but no matching schedules",
+                repo,
+                pr_state.pr_number,
+                sorted(matched_conditions),
+            )
             continue
 
-        for sched, session, signal_name, matched_action, matched_reason in matches:
-            dedupe_action = _action_dedupe_key(matched_action, sched.id)
+        for sched, session in matches:
+            condition = sched.event_condition
             event_ctx = _build_event_context(
                 sched=sched,
                 repo=repo,
                 pr_state=pr_state,
-                matched_action=matched_action,
-                dedupe_action=dedupe_action,
-                signal_name=signal_name,
-                matched_reason=matched_reason,
+                condition=condition,
             )
             event_ctx_json = json.dumps(event_ctx)
 
-            if await is_blocked(db, repo, pr_state.pr_number, pr_state.head_sha, dedupe_action):
+            if await is_blocked(
+                db,
+                repo,
+                pr_state.pr_number,
+                pr_state.head_sha,
+                condition,
+                session_id=session.id,
+            ):
                 log.debug(
-                    "pr-watcher: PR %s#%d [%s] schedule=%d already in-flight, completed, or blocked on head SHA %s",
-                    repo, pr_state.pr_number, matched_action.value, sched.id, pr_state.head_sha[:8],
+                    "pr-watcher: PR %s#%d [%s] session=%d schedule=%d already in-flight, completed, or blocked on head SHA %s",
+                    repo,
+                    pr_state.pr_number,
+                    condition,
+                    session.id,
+                    sched.id,
+                    pr_state.head_sha[:8],
                 )
                 continue
+
             await _dispatch_session_run(
                 db,
                 session=session,
                 sched=sched,
                 event_ctx_json=event_ctx_json,
-                action_key=dedupe_action,
+                action_key=condition,
                 repo=repo,
                 pr_number=pr_state.pr_number,
                 head_sha=pr_state.head_sha,
