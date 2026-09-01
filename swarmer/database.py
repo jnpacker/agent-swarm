@@ -161,7 +161,7 @@ async def migrate_db() -> None:
         # 'shell' is an additional supported tool and must NOT be normalised to 'opencode'.
         "UPDATE sessions SET agent_tool = 'opencode' WHERE agent_tool NOT IN ('opencode', 'shell')",
         # ACM-37232 follow-up: Session.model renamed to Session.provider — the
-        # column now stores an AI provider selection ("claude"/"gemini" preset)
+        # column now stores an AI provider selection ("claude"/"gemini"/"openai" preset)
         # rather than a specific model ID. "no such column" (fresh DB already
         # created with "provider", or already migrated) is safely suppressed.
         "ALTER TABLE sessions RENAME COLUMN model TO provider",
@@ -277,6 +277,7 @@ async def migrate_db() -> None:
         "ALTER TABLE session_schedules ADD COLUMN event_condition VARCHAR(64) NOT NULL DEFAULT ''",
         "ALTER TABLE session_schedules ADD COLUMN author_scope VARCHAR(32) NOT NULL DEFAULT 'all'",
         "ALTER TABLE session_schedules ADD COLUMN fix_authors VARCHAR(512) NOT NULL DEFAULT ''",
+        "ALTER TABLE session_schedules ADD COLUMN include_event_context BOOLEAN NOT NULL DEFAULT 1",
         "ALTER TABLE session_runs ADD COLUMN trigger_type VARCHAR(32) NOT NULL DEFAULT 'manual'",
         "ALTER TABLE session_runs ADD COLUMN event_context TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE sessions ADD COLUMN event_context TEXT NOT NULL DEFAULT ''",
@@ -295,8 +296,14 @@ async def migrate_db() -> None:
             created_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now')),
             updated_at DATETIME NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now'))
         )""",
+        # ACM-43054: pr_action_state dispatch key includes session_id for multi-session fan-out
+        "ALTER TABLE pr_action_state ADD COLUMN session_id INTEGER DEFAULT NULL",
+        "DROP INDEX IF EXISTS uq_pr_action_state_key",
         """CREATE UNIQUE INDEX IF NOT EXISTS uq_pr_action_state_key
-           ON pr_action_state (repo, pr_number, head_sha, action)""",
+           ON pr_action_state (repo, pr_number, head_sha, action, session_id)""",
+        # ACM-42978: queued PR watcher dispatches need serialized event context
+        # so same-session fan-out can run reliably after the active session ends.
+        "ALTER TABLE pr_action_state ADD COLUMN event_context TEXT NOT NULL DEFAULT ''",
         """CREATE TABLE IF NOT EXISTS repo_etags (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             repo VARCHAR(255) NOT NULL UNIQUE,

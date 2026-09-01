@@ -189,8 +189,9 @@ class ScheduleEntryCreate(BaseModel):
     author_scope: str = Field("all", max_length=32, pattern=r"^(self|team|bots|all)$")
     fix_authors: str = Field("", max_length=512)
     label: str = ""
-    prompt_id: int | None = None
+    prompt_id: int
     instruction_prompt: str = ""
+    include_event_context: bool = True
     enabled: bool = True
 
 
@@ -203,6 +204,7 @@ class ScheduleEntryUpdate(BaseModel):
     label: str | None = None
     prompt_id: int | None = None
     instruction_prompt: str | None = None
+    include_event_context: bool | None = None
     enabled: bool | None = None
 
 
@@ -218,6 +220,7 @@ class ScheduleEntryOut(BaseModel):
     label: str
     prompt_id: int | None
     instruction_prompt: str
+    include_event_context: bool = True
     enabled: bool
     created_at: datetime
     updated_at: datetime
@@ -360,6 +363,7 @@ class CredentialsSave(BaseModel):
     google_cloud_project: str = ""
     vertex_location: str = ""
     google_api_key: str = ""
+    openai_api_key: str = ""
     application_default_credentials: str = ""
     shared: bool = False
 

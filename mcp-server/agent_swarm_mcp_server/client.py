@@ -314,7 +314,7 @@ class AgentSwarmClient:
     # ==================================================================
 
     async def list_session_schedules(self, ws_id: int, sid: int) -> list[dict]:
-        """List all cron schedules for a session."""
+        """List all schedules (cron and event triggers) for a session."""
         return await self._get(f"/api/v1/workspaces/{ws_id}/sessions/{sid}/schedules")
 
     async def create_session_schedule(
@@ -328,11 +328,16 @@ class AgentSwarmClient:
         author_scope: str = "all",
         fix_authors: str = "",
         label: str = "",
-        prompt_id: int | None = None,
+        prompt_id: int,
         instruction_prompt: str = "",
+        include_event_context: bool = True,
         enabled: bool = True,
     ) -> dict:
-        """Create a cron or event execution schedule for a session."""
+        """Create a cron or event execution schedule for a session.
+
+        Event conditions include: ci_fail_or_conflict, new_pr_or_commit,
+        review_comments, and any_actionable.
+        """
         body: dict = {
             "trigger_type": trigger_type,
             "cron_schedule": cron_schedule,
@@ -341,10 +346,10 @@ class AgentSwarmClient:
             "fix_authors": fix_authors,
             "label": label,
             "instruction_prompt": instruction_prompt,
+            "include_event_context": include_event_context,
             "enabled": enabled,
         }
-        if prompt_id is not None:
-            body["prompt_id"] = prompt_id
+        body["prompt_id"] = prompt_id
         return await self._post(f"/api/v1/workspaces/{ws_id}/sessions/{sid}/schedules", json=body)
 
     async def update_session_schedule(

@@ -358,7 +358,19 @@ async def _get_provider_options(
         )
     except Exception:
         pass
-    return tool.get_model_options(oc, has_vertex=has_vertex, has_gemini=has_gemini)
+    # Check gateway for OpenAI provider — key is stored on OpenShell, not Swarmer DB.
+    has_openai = False
+    try:
+        from swarmer import openshell_client
+        has_openai = await openshell_client.provider_exists(f"swarmer-ws-{ws_id}-openai")
+    except Exception:
+        pass
+    return tool.get_model_options(
+        oc,
+        has_vertex=has_vertex,
+        has_gemini=has_gemini,
+        has_openai=has_openai,
+    )
 
 router = APIRouter()
 templates = Jinja2Templates(directory="swarmer/templates")
@@ -1040,6 +1052,8 @@ def _build_expected_hosts(model: str, repos_data: list[dict], tool_name: str, mo
 
 async def _resolve_schedule_prompt(schedule_id: int, session: Session, db: AsyncSession) -> str:
     """Resolve a per-schedule prompt, falling back to session defaults for empty fields."""
+    import json as _json
+
     from swarmer.models.session_schedule import SessionSchedule
     sched = await db.get(SessionSchedule, schedule_id)
     if sched is None:
@@ -1061,11 +1075,28 @@ async def _resolve_schedule_prompt(schedule_id: int, session: Session, db: Async
     )
 
     if effective_instruction and base_prompt:
-        return effective_instruction + "\n\n" + base_prompt
+        resolved_prompt = effective_instruction + "\n\n" + base_prompt
     elif effective_instruction:
-        return effective_instruction
+        resolved_prompt = effective_instruction
     else:
-        return base_prompt
+        resolved_prompt = base_prompt
+
+    if sched.trigger_type == "event" and sched.include_event_context and session.event_context:
+        try:
+            event_context = _json.dumps(
+                _json.loads(session.event_context), indent=2, sort_keys=True
+            )
+        except (TypeError, ValueError):
+            event_context = session.event_context
+        resolved_prompt += (
+            "\n\n## GitHub Event Context\n"
+            "The following event data identifies the event that triggered this run:\n"
+            "```json\n"
+            f"{event_context}\n"
+            "```"
+        )
+
+    return resolved_prompt
 
 
 async def _do_launch(session: Session, ws: Workspace, db: AsyncSession, user_id: str = "") -> None:
@@ -1189,7 +1220,7 @@ async def _do_launch_openshell(
     tool = get_tool(session.agent_tool)
 
     # Resolve the provider first so it is available for provider registration and
-    # policy building. session.provider is a family preset name ("claude"/"gemini",
+    # policy building. session.provider is a family preset name ("claude"/"gemini"/"openai",
     # ACM-37232) — build_config_data() understands it directly. Everything else
     # (network policy, CLI --model flag, model.json state) needs a concrete model
     # ID, so it uses `model` — the provider resolved to its BUILD-role model —
@@ -1306,6 +1337,22 @@ async def _do_launch_openshell(
                 "_do_launch_openshell: could not check google-ai-studio provider for session %d",
                 session.id, exc_info=True,
             )
+    # OpenAI provider — key is stored on the gateway (not in Swarmer DB).
+    # Only required for OpenAI model sessions.
+    _openai_pname = f"swarmer-ws-{ws_id}-openai"
+    if tool.requires_ai_model() and model.split("/", 1)[0] == "openai":
+        try:
+            has_openai_provider = await openshell_client.provider_exists(_openai_pname)
+        except Exception:
+            log.warning(
+                "_do_launch_openshell: could not check openai provider for session %d",
+                session.id,
+                exc_info=True,
+            )
+            raise ValueError("Could not verify OpenAI API key configuration for this workspace")
+        if not has_openai_provider:
+            raise ValueError("OpenAI API key is not configured for this workspace")
+        provider_names.append(_openai_pname)
     # Vertex AI via google-cloud provider — ADC is stored on the gateway (not in Swarmer DB).
     # Attach the provider if it already exists (created via the secrets UI).
     _vertex_pname = f"swarmer-ws-{ws_id}-google-cloud"
@@ -2000,10 +2047,10 @@ async def _run_openshell_agent(
 
             async def _on_output(text: str) -> None:
                 _streamed[:] = [text]
-                # Redact secrets from shell output before persisting — the raw
-                # stdout/stderr of a shell command may contain credential values
-                # if the script calls printenv, env, or echoes config variables.
-                _safe = _redact_secrets(text, secret_values=injected_secrets) if agent_tool == "shell" else text
+                # Redact secrets before persisting streamed output for all tools.
+                # OpenCode may still surface env assignments (e.g. printenv),
+                # including gateway-injected keys not present in injected_secrets.
+                _safe = _redact_secrets(text, secret_values=injected_secrets)
                 await _update_db(last_output=_safe, raw_output=_safe)
 
             if oc_client is not None:
@@ -2038,19 +2085,18 @@ async def _run_openshell_agent(
             _streamed_text = _streamed[0] if _streamed else ""
             if agent_tool == "shell":
                 # Use streamed stdout; fall back to stderr on failure.
-                # Apply secret redaction: the raw shell command output may contain
-                # credential values if the script echoes env vars or config.
-                output = _redact_secrets(_streamed_text or stderr, secret_values=injected_secrets)
+                _raw_output = _streamed_text or stderr
             else:
                 if oc_client is not None:
                     res_opencode = await openshell_client.read_opencode_response(sandbox_name, client=oc_client)
                 else:
                     res_opencode = await openshell_client.read_opencode_response(sandbox_name)
-                output = (
+                _raw_output = (
                     res_opencode
                     or _streamed_text
                     or stderr
                 )
+            output = _redact_secrets(_raw_output, secret_values=injected_secrets)
 
             # Snapshot draft policy chunks before any sandbox deletion so the
             # Policy tab can show what was denied/proposed during this run.
@@ -2097,9 +2143,7 @@ async def _run_openshell_agent(
                     phase, session_id,
                 )
 
-            # For shell runs _streamed_text is already redacted (via _on_output);
-            # for AI-tool runs it passes through unmodified.
-            _final_raw = _streamed_text if agent_tool != "shell" else _redact_secrets(_streamed_text, secret_values=injected_secrets)
+            _final_raw = _redact_secrets(_streamed_text, secret_values=injected_secrets)
             await _update_db(
                 phase=phase,
                 last_output=output,
@@ -2506,6 +2550,7 @@ async def schedule_create(
     label: str = Form(""),
     prompt_id: str = Form(""),
     instruction_prompt: str = Form(""),
+    include_event_context: bool = Form(False),
     enabled: str = Form("on"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -2531,6 +2576,15 @@ async def schedule_create(
         cron_next_run = _croniter(cron_expr, datetime.now(timezone.utc)).get_next(datetime)
 
     pid = int(prompt_id) if prompt_id.strip().isdigit() else None
+    if pid is None:
+        return HTMLResponse("", status_code=422, headers={"HX-Trigger": "scheduleFormError"})
+    prompt_result = await db.execute(
+        select(WorkspacePrompt)
+        .join(WorkspacePromptSource, WorkspacePrompt.source_id == WorkspacePromptSource.id)
+        .where(WorkspacePrompt.id == pid, WorkspacePromptSource.workspace_id == ws_id)
+    )
+    if prompt_result.scalar_one_or_none() is None:
+        return HTMLResponse("", status_code=422, headers={"HX-Trigger": "scheduleFormError"})
     sched = SessionSchedule(
         session_id=sid,
         trigger_type=trigger_type,
@@ -2542,6 +2596,7 @@ async def schedule_create(
         label=label.strip(),
         prompt_id=pid,
         instruction_prompt=instruction_prompt,
+        include_event_context=include_event_context,
         enabled=(enabled == "on"),
     )
     db.add(sched)
@@ -2566,6 +2621,7 @@ async def schedule_edit(
     label: str = Form(""),
     prompt_id: str = Form(""),
     instruction_prompt: str = Form(""),
+    include_event_context: bool = Form(False),
     db: AsyncSession = Depends(get_db),
 ):
     from croniter import croniter as _croniter
@@ -2576,6 +2632,17 @@ async def schedule_edit(
     sched = await db.get(SessionSchedule, sched_id)
     if ws is None or session is None or session.workspace_id != ws_id or sched is None or sched.session_id != sid:
         return HTMLResponse("", status_code=404)
+
+    pid = int(prompt_id) if prompt_id.strip().isdigit() else None
+    if pid is None:
+        return HTMLResponse("", status_code=422, headers={"HX-Trigger": "scheduleFormError"})
+    prompt_result = await db.execute(
+        select(WorkspacePrompt)
+        .join(WorkspacePromptSource, WorkspacePrompt.source_id == WorkspacePromptSource.id)
+        .where(WorkspacePrompt.id == pid, WorkspacePromptSource.workspace_id == ws_id)
+    )
+    if prompt_result.scalar_one_or_none() is None:
+        return HTMLResponse("", status_code=422, headers={"HX-Trigger": "scheduleFormError"})
 
     trigger_type = trigger_type.strip().lower()
     if trigger_type not in ("cron", "event"):
@@ -2599,8 +2666,10 @@ async def schedule_edit(
         sched.fix_authors = ""
 
     sched.label = label.strip()
-    sched.prompt_id = int(prompt_id) if prompt_id.strip().isdigit() else None
+    sched.prompt_id = pid
     sched.instruction_prompt = instruction_prompt
+    if trigger_type == "event":
+        sched.include_event_context = include_event_context
     # Enabled/disabled state is managed exclusively by the schedule_toggle
     # endpoint. The inline edit form has no `enabled` field, so this handler
     # must never touch sched.enabled — doing so previously forced every edit

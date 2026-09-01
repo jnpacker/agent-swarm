@@ -8,15 +8,17 @@ import os
 from typing import Any
 
 import httpx
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from swarmer.config import settings
 from swarmer.pr_state import (
     DEFAULT_BOT_LOGINS,
-    PRAction,
     PRState,
     TrustPolicy,
     TrustStrategy,
-    classify_pr_action,
+    evaluate_author_trust,
+    evaluate_pr_conditions,
     is_bot_author,
     normalize_ci_checks,
     parse_iso_datetime,
@@ -27,6 +29,7 @@ from swarmer.models.session_schedule import SessionSchedule
 from swarmer.pr_watcher_store import (
     get_etag,
     is_blocked,
+    list_queued_dispatches,
     prune_etags,
     record_dispatch,
     resolve_event_triggers,
@@ -233,38 +236,16 @@ async def _fetch_review_comments(
         return []
 
 
-async def _fetch_reviews_rest(
-    client: httpx.AsyncClient, repo: str, pr_number: int, token: str | None
-) -> list[dict[str, Any]]:
-    """Fetch PR reviews via REST."""
-    url = f"https://api.github.com/repos/{repo}/pulls/{pr_number}/reviews"
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "Swarmer-PR-Watcher/1.0",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    try:
-        resp = await client.get(url, headers=headers, timeout=15)
-        if resp.is_success:
-            return resp.json()
-        return []
-    except Exception:
-        return []
-
-
 async def _fetch_reviews_and_threads(
-    client: httpx.AsyncClient, repo: str, pr_number: int, head_sha: str, token: str | None
-) -> tuple[int, int, bool]:
-    """Fetch review threads and reviews.
+    client: httpx.AsyncClient, repo: str, pr_number: int, token: str | None
+) -> tuple[int, int]:
+    """Fetch unresolved review-thread counts.
 
     Returns:
-        (unresolved_comments_count, coderabbit_unresolved_count, has_agent_review_on_head)
+        (unresolved_comments_count, coderabbit_unresolved_count)
     """
     if "/" not in repo:
-        return 0, 0, False
+        return 0, 0
     owner, name = repo.split("/", 1)
 
     if token:
@@ -282,13 +263,6 @@ async def _fetch_reviews_and_threads(
                       body
                     }
                   }
-                }
-              }
-              reviews(last: 20) {
-                nodes {
-                  author { login }
-                  state
-                  commit { oid }
                 }
               }
             }
@@ -317,16 +291,7 @@ async def _fetch_reviews_and_threads(
                             if any((c.get("author", {}).get("login") or "").lower().startswith("coderabbit") for c in comments):
                                 cr_count += 1
 
-                    has_agent_review = False
-                    for rev in pr_data.get("reviews", {}).get("nodes", []):
-                        rev_commit = (rev.get("commit", {}) or {}).get("oid", "")
-                        rev_author = ((rev.get("author", {}) or {}).get("login") or "").lower()
-                        rev_state = rev.get("state", "")
-                        if rev_commit == head_sha and rev_state in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED"):
-                            if is_bot_author(rev_author) or rev_author in DEFAULT_BOT_LOGINS:
-                                has_agent_review = True
-                                break
-                    return unresolved_count, cr_count, has_agent_review
+                    return unresolved_count, cr_count
         except Exception as exc:
             log.debug("pr-watcher: GraphQL review query failed for %s#%d: %s", repo, pr_number, exc)
 
@@ -335,13 +300,7 @@ async def _fetch_reviews_and_threads(
     unresolved_count = len(comments)
     cr_count = sum(1 for c in comments if (c.get("user", {}).get("login") or "").lower().startswith("coderabbit"))
 
-    reviews = await _fetch_reviews_rest(client, repo, pr_number, token)
-    has_agent_review = any(
-        r.get("commit_id") == head_sha and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "COMMENTED")
-        and (is_bot_author(r.get("user", {}).get("login", "")) or r.get("user", {}).get("login", "").lower() in DEFAULT_BOT_LOGINS)
-        for r in reviews
-    )
-    return unresolved_count, cr_count, has_agent_review
+    return unresolved_count, cr_count
 
 
 async def _fetch_label_events(
@@ -417,9 +376,7 @@ async def _build_pr_state(
     check_runs = await _fetch_check_runs(client, repo, head_sha, token)
     check_state = normalize_ci_checks(check_runs)
 
-    unresolved_count, cr_count, has_agent_review = await _fetch_reviews_and_threads(
-        client, repo, pr_number, head_sha, token
-    )
+    unresolved_count, cr_count = await _fetch_reviews_and_threads(client, repo, pr_number, token)
 
     label_events: list[dict[str, Any]] = []
     if "ok-to-review" in labels:
@@ -442,7 +399,6 @@ async def _build_pr_state(
         labels=labels,
         unresolved_review_comments=unresolved_count,
         coderabbit_unresolved_comments=cr_count,
-        has_agent_review_on_head=has_agent_review,
         created_at=parse_iso_datetime(full_pr.get("created_at")),
         updated_at=parse_iso_datetime(full_pr.get("updated_at")),
         check_state=check_state,
@@ -451,37 +407,311 @@ async def _build_pr_state(
     return pr_state, label_events
 
 
-def _match_trigger_for_pr(
+def _extract_event_pr_numbers(events: list[dict[str, Any]]) -> set[int]:
+    """Extract PR numbers from GitHub repository events payloads."""
+    pr_numbers: set[int] = set()
+    for event in events:
+        payload = event.get("payload") or {}
+        event_type = event.get("type", "")
+        number: int | None = None
+
+        if event_type in ("PullRequestEvent", "PullRequestReviewEvent", "PullRequestReviewCommentEvent"):
+            number = (payload.get("pull_request") or {}).get("number")
+        elif event_type == "IssueCommentEvent":
+            issue = payload.get("issue") or {}
+            if issue.get("pull_request"):
+                number = issue.get("number")
+        elif event_type == "CheckRunEvent":
+            prs = (payload.get("check_run") or {}).get("pull_requests") or []
+            for pr_ref in prs:
+                n = pr_ref.get("number")
+                if isinstance(n, int):
+                    pr_numbers.add(n)
+        elif event_type == "CheckSuiteEvent":
+            prs = (payload.get("check_suite") or {}).get("pull_requests") or []
+            for pr_ref in prs:
+                n = pr_ref.get("number")
+                if isinstance(n, int):
+                    pr_numbers.add(n)
+
+        if isinstance(number, int):
+            pr_numbers.add(number)
+
+    return pr_numbers
+
+
+def _schedule_matches_author_scope(
     pr: PRState,
-    action: PRAction,
+    sched: SessionSchedule,
+    label_events: list[dict[str, Any]] | None = None,
+) -> bool:
+    """Apply author routing after the event condition has matched."""
+    author_lower = pr.author_login.lower()
+    fix_logins = sched.fix_author_logins
+    is_self = author_lower in fix_logins if fix_logins else False
+    is_bot = is_bot_author(pr.author_login, set(DEFAULT_BOT_LOGINS))
+
+    if sched.author_scope == "self" and not is_self:
+        return False
+    if sched.author_scope == "team":
+        if is_self or is_bot:
+            return False
+        trust = evaluate_author_trust(
+            pr,
+            policy=TrustPolicy(strategy=TrustStrategy.ORG_AND_COLLABORATORS),
+            label_events=label_events,
+        )
+        if not trust.is_trusted:
+            return False
+    if sched.author_scope == "bots" and not is_bot:
+        return False
+    return True
+
+
+def _match_triggers_for_pr(
+    pr: PRState,
+    matched_conditions: set[str],
     sched_sessions: list[tuple[SessionSchedule, Session]],
-) -> tuple[SessionSchedule, Session] | None:
-    """Find a matching (SessionSchedule, Session) for an actionable PR."""
+    label_events: list[dict[str, Any]] | None = None,
+    blocked_conditions: set[str] | None = None,
+) -> list[tuple[SessionSchedule, Session]]:
+    """Find all schedules whose conditions and author scopes match a PR."""
+    if pr.is_draft:
+        return []
+
+    matches: list[tuple[SessionSchedule, Session]] = []
     for sched, session in sched_sessions:
         if not sched.enabled or sched.trigger_type != "event":
             continue
-
-        # Check author scope
-        author_lower = pr.author_login.lower()
-        fix_logins = sched.fix_author_logins
-        is_self = author_lower in fix_logins if fix_logins else False
-        is_bot = is_bot_author(pr.author_login, set(DEFAULT_BOT_LOGINS))
-
-        if sched.author_scope == "self" and not is_self:
+        if sched.event_condition not in matched_conditions:
             continue
-        if sched.author_scope == "team" and (is_self or is_bot):
+        if blocked_conditions and sched.event_condition in blocked_conditions:
             continue
-        if sched.author_scope == "bots" and not is_bot:
+        if _schedule_matches_author_scope(pr, sched, label_events):
+            matches.append((sched, session))
+    return matches
+
+
+def _match_trigger_for_pr(
+    pr: PRState,
+    matched_conditions: set[str],
+    sched_sessions: list[tuple[SessionSchedule, Session]],
+    label_events: list[dict[str, Any]] | None = None,
+    blocked_conditions: set[str] | None = None,
+) -> tuple[SessionSchedule, Session] | None:
+    """Return the first matching schedule for legacy callers."""
+    matches = _match_triggers_for_pr(
+        pr,
+        matched_conditions,
+        sched_sessions,
+        label_events,
+        blocked_conditions,
+    )
+    return matches[0] if matches else None
+
+
+def _build_event_context(
+    *,
+    sched: SessionSchedule,
+    repo: str,
+    pr_state: PRState,
+    condition: str,
+) -> dict[str, Any]:
+    return {
+        "trigger_type": "event",
+        "schedule_id": sched.id,
+        "schedule_label": sched.label or sched.trigger_label,
+        "repo": repo,
+        "pr_number": pr_state.pr_number,
+        "head_sha": pr_state.head_sha,
+        "head_ref": pr_state.head_ref,
+        "base_ref": pr_state.base_ref,
+        "title": pr_state.title,
+        "author": pr_state.author_login,
+        "event_condition": condition,
+        "fork_no_push": bool(
+            pr_state.is_fork and not pr_state.raw_payload.get("maintainer_can_modify", False)
+        ),
+        "cause": f"Matched event condition: {condition}",
+    }
+
+
+async def _dispatch_session_run(
+    db,
+    *,
+    session: Session,
+    sched: SessionSchedule,
+    event_ctx_json: str,
+    action_key: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    queue_if_active: bool,
+) -> bool:
+    """Dispatch a schedule run for a session, optionally queueing if the session is busy."""
+    if session.is_active:
+        if queue_if_active:
+            attempts = await record_dispatch(
+                db,
+                repo=repo,
+                pr_number=pr_number,
+                head_sha=head_sha,
+                action=action_key,
+                session_id=session.id,
+                status="queued",
+                event_context=event_ctx_json,
+            )
+            log.info(
+                "pr-watcher: session %d (%s) busy (%s) — queued PR %s#%d [%s], attempt=%d",
+                session.id,
+                session.name,
+                session.phase,
+                repo,
+                pr_number,
+                action_key,
+                attempts,
+            )
+        return False
+
+    ws = session.workspace
+    if not ws:
+        return False
+
+    try:
+        from swarmer.routers.sessions import _do_launch
+
+        session.mode = "prompt"
+        session.active_schedule_id = sched.id
+        session.event_context = event_ctx_json
+        await db.commit()
+
+        await _do_launch(session, ws, db)
+
+        attempts = await record_dispatch(
+            db,
+            repo=repo,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            action=action_key,
+            session_id=session.id,
+            status="dispatched",
+            event_context=event_ctx_json,
+        )
+        log.info("pr-watcher: session %d launched (phase=%s, attempt=%d)", session.id, session.phase, attempts)
+        return True
+    except Exception as exc:
+        log.exception("pr-watcher: failed to launch session %d for PR %s#%d: %s", session.id, repo, pr_number, exc)
+        attempts = await record_dispatch(
+            db,
+            repo=repo,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            action=action_key,
+            session_id=session.id,
+            status="failed",
+            error=str(exc),
+            event_context=event_ctx_json,
+        )
+        if attempts >= settings.pr_watcher_max_fix_attempts:
+            await record_dispatch(
+                db,
+                repo=repo,
+                pr_number=pr_number,
+                head_sha=head_sha,
+                action=action_key,
+                session_id=session.id,
+                status="blocked",
+                error=f"Max dispatch attempts ({attempts}) reached",
+                event_context=event_ctx_json,
+            )
+        return False
+
+
+async def _load_session_with_context(db, session_id: int) -> Session | None:
+    result = await db.execute(
+        select(Session)
+        .options(
+            selectinload(Session.workspace),
+            selectinload(Session.github_pat),
+            selectinload(Session.repos),
+            selectinload(Session.schedules),
+        )
+        .where(Session.id == session_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _drain_queued_dispatches(db) -> None:
+    """Replay queued watcher dispatches for sessions that are now idle."""
+    queued_rows = await list_queued_dispatches(db)
+    if not queued_rows:
+        return
+
+    launched_sessions: set[int] = set()
+    for row in queued_rows:
+        if not row.session_id or row.session_id in launched_sessions:
             continue
-        # sched.author_scope == "all" matches any author
 
-        # Check action condition
-        if action == PRAction.FIX and sched.event_condition in ("ci_fail_or_conflict", "review_comments", "any_actionable"):
-            return sched, session
-        if action == PRAction.REVIEW and sched.event_condition in ("new_pr_or_commit", "any_actionable"):
-            return sched, session
+        session = await _load_session_with_context(db, row.session_id)
+        if not session or session.is_active:
+            continue
 
-    return None
+        ctx_json = row.event_context or ""
+        try:
+            ctx = json.loads(ctx_json) if ctx_json else {}
+        except Exception:
+            ctx = {}
+        schedule_id = int(ctx.get("schedule_id") or 0)
+        if not schedule_id:
+            log.warning(
+                "pr-watcher: queued dispatch row %d missing schedule_id in event_context; marking failed",
+                row.id,
+            )
+            await record_dispatch(
+                db,
+                repo=row.repo,
+                pr_number=row.pr_number,
+                head_sha=row.head_sha,
+                action=row.action,
+                session_id=row.session_id,
+                status="failed",
+                error="queued dispatch missing schedule_id",
+                event_context=ctx_json,
+            )
+            continue
+
+        sched = next((s for s in (session.schedules or []) if s.id == schedule_id), None)
+        if not sched or not sched.enabled or sched.trigger_type != "event":
+            log.info(
+                "pr-watcher: dropping queued dispatch for session %d schedule %d (missing/disabled/non-event)",
+                session.id,
+                schedule_id,
+            )
+            await record_dispatch(
+                db,
+                repo=row.repo,
+                pr_number=row.pr_number,
+                head_sha=row.head_sha,
+                action=row.action,
+                session_id=row.session_id,
+                status="completed",
+                event_context=ctx_json,
+            )
+            continue
+
+        launched = await _dispatch_session_run(
+            db,
+            session=session,
+            sched=sched,
+            event_ctx_json=ctx_json,
+            action_key=row.action,
+            repo=row.repo,
+            pr_number=row.pr_number,
+            head_sha=row.head_sha,
+            queue_if_active=False,
+        )
+        if launched:
+            launched_sessions.add(session.id)
 
 
 async def _evaluate_and_dispatch_prs(
@@ -490,6 +720,7 @@ async def _evaluate_and_dispatch_prs(
     sched_sessions: list[tuple[SessionSchedule, Session]],
     token: str | None,
     db,
+    target_pr_numbers: set[int] | None = None,
 ) -> None:
     """Scan open PRs in repo, evaluate against trigger conditions, and dispatch sessions."""
     open_prs = await _fetch_open_prs(client, repo, token)
@@ -497,118 +728,79 @@ async def _evaluate_and_dispatch_prs(
         return
 
     for raw_pr in open_prs:
+        if target_pr_numbers is not None and raw_pr.get("number") not in target_pr_numbers:
+            continue
+
         pr_state, label_events = await _build_pr_state(client, repo, raw_pr, token)
 
-        # Collect configured fix_authors across all triggers for this repo
-        all_fix_authors: set[str] = set()
-        for sched, _sess in sched_sessions:
-            all_fix_authors.update(sched.fix_author_logins)
-
-        action, reason = classify_pr_action(
+        event_conditions = {
+            sched.event_condition
+            for sched, _sess in sched_sessions
+            if sched.enabled and sched.trigger_type == "event"
+        }
+        matched_conditions = evaluate_pr_conditions(
             pr_state,
-            fix_authors=all_fix_authors,
-            bot_logins=set(DEFAULT_BOT_LOGINS),
-            trust_policy=TrustPolicy(strategy=TrustStrategy.ORG_AND_COLLABORATORS),
-            label_events=label_events,
+            event_conditions=event_conditions,
             quiet_period_seconds=float(settings.pr_watcher_debounce_seconds),
         )
-
-        if action in (PRAction.IGNORE, PRAction.AUTO_MERGE_DEFER):
-            log.debug("pr-watcher: PR %s#%d -> %s (%s)", repo, pr_state.pr_number, action.value, reason)
+        if not matched_conditions:
             continue
 
-        # Check circuit breaker and deduplication
-        if await is_blocked(db, repo, pr_state.pr_number, pr_state.head_sha, action.value):
+        matches = _match_triggers_for_pr(
+            pr_state,
+            matched_conditions,
+            sched_sessions,
+            label_events,
+        )
+        if not matches:
             log.debug(
-                "pr-watcher: PR %s#%d [%s] already in-flight, completed, or blocked on head SHA %s",
-                repo, pr_state.pr_number, action.value, pr_state.head_sha[:8],
+                "pr-watcher: PR %s#%d matched conditions %s but no matching schedules",
+                repo,
+                pr_state.pr_number,
+                sorted(matched_conditions),
             )
             continue
 
-        match = _match_trigger_for_pr(pr_state, action, sched_sessions)
-        if not match:
-            log.debug("pr-watcher: PR %s#%d [%s] matched no active trigger condition", repo, pr_state.pr_number, action.value)
-            continue
-
-        sched, session = match
-
-        # Per-session serialization: if session is already active, skip this cycle (will re-evaluate next loop)
-        if session.is_active:
-            log.info(
-                "pr-watcher: session %d (%s) is already %s — deferring PR %s#%d dispatch",
-                session.id, session.name, session.phase, repo, pr_state.pr_number,
-            )
-            continue
-
-        ws = session.workspace
-        if not ws:
-            continue
-
-        # Prepare event context
-        event_ctx = {
-            "trigger_type": "event",
-            "schedule_id": sched.id,
-            "schedule_label": sched.label or sched.trigger_label,
-            "repo": repo,
-            "pr_number": pr_state.pr_number,
-            "head_sha": pr_state.head_sha,
-            "head_ref": pr_state.head_ref,
-            "base_ref": pr_state.base_ref,
-            "title": pr_state.title,
-            "author": pr_state.author_login,
-            "action": action.value,
-            "cause": reason,
-        }
-
-        # Attempt dispatch
-        try:
-            from swarmer.routers.sessions import _do_launch
-
-            session.mode = "prompt"
-            session.active_schedule_id = sched.id
-            session.event_context = json.dumps(event_ctx)
-            await db.commit()
-
-            log.info(
-                "pr-watcher: dispatching session %d (%s) for PR %s#%d [%s: %s]",
-                session.id, session.name, repo, pr_state.pr_number, action.value, reason,
-            )
-            await _do_launch(session, ws, db)
-
-            attempts = await record_dispatch(
-                db,
+        for sched, session in matches:
+            condition = sched.event_condition
+            event_ctx = _build_event_context(
+                sched=sched,
                 repo=repo,
-                pr_number=pr_state.pr_number,
-                head_sha=pr_state.head_sha,
-                action=action.value,
-                session_id=session.id,
-                status="dispatched",
+                pr_state=pr_state,
+                condition=condition,
             )
-            log.info("pr-watcher: session %d launched (phase=%s, attempt=%d)", session.id, session.phase, attempts)
+            event_ctx_json = json.dumps(event_ctx)
 
-        except Exception as exc:
-            log.exception("pr-watcher: failed to launch session %d for PR %s#%d: %s", session.id, repo, pr_state.pr_number, exc)
-            attempts = await record_dispatch(
+            if await is_blocked(
                 db,
-                repo=repo,
-                pr_number=pr_state.pr_number,
-                head_sha=pr_state.head_sha,
-                action=action.value,
+                repo,
+                pr_state.pr_number,
+                pr_state.head_sha,
+                condition,
                 session_id=session.id,
-                status="failed",
-                error=str(exc),
-            )
-            if attempts >= settings.pr_watcher_max_fix_attempts:
-                await record_dispatch(
-                    db,
-                    repo=repo,
-                    pr_number=pr_state.pr_number,
-                    head_sha=pr_state.head_sha,
-                    action=action.value,
-                    session_id=session.id,
-                    status="blocked",
-                    error=f"Max dispatch attempts ({attempts}) reached",
+            ):
+                log.debug(
+                    "pr-watcher: PR %s#%d [%s] session=%d schedule=%d already in-flight, completed, or blocked on head SHA %s",
+                    repo,
+                    pr_state.pr_number,
+                    condition,
+                    session.id,
+                    sched.id,
+                    pr_state.head_sha[:8],
                 )
+                continue
+
+            await _dispatch_session_run(
+                db,
+                session=session,
+                sched=sched,
+                event_ctx_json=event_ctx_json,
+                action_key=condition,
+                repo=repo,
+                pr_number=pr_state.pr_number,
+                head_sha=pr_state.head_sha,
+                queue_if_active=True,
+            )
 
 
 async def _pr_watcher_loop() -> None:
@@ -629,6 +821,8 @@ async def _pr_watcher_loop() -> None:
 
                     if all_active_repos:
                         await prune_etags(db, all_active_repos)
+
+                    await _drain_queued_dispatches(db)
 
                     now_ts = datetime.now(timezone.utc).timestamp()
                     is_sweep_due = (now_ts - last_sweep) >= settings.pr_watcher_sweep_interval
@@ -651,11 +845,19 @@ async def _pr_watcher_loop() -> None:
                                     if status == 200:
                                         if new_etag:
                                             await save_etag(db, repo, new_etag)
+                                        target_prs = _extract_event_pr_numbers(events)
                                         log.info(
-                                            "pr-watcher: ws=%d %s 200 OK (%d events) — evaluating PRs",
-                                            ws_id, repo, len(events),
+                                            "pr-watcher: ws=%d %s 200 OK (%d events, prs=%d) — evaluating PRs",
+                                            ws_id, repo, len(events), len(target_prs),
                                         )
-                                        await _evaluate_and_dispatch_prs(client, repo, sched_sessions, token, db)
+                                        await _evaluate_and_dispatch_prs(
+                                            client,
+                                            repo,
+                                            sched_sessions,
+                                            token,
+                                            db,
+                                            target_pr_numbers=target_prs or None,
+                                        )
                             except Exception as repo_err:
                                 log.warning(
                                     "pr-watcher: error processing ws=%d repo %s: %s",
