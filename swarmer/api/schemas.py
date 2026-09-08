@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+from urllib.parse import urlparse
 
 
 # ============================================================
@@ -13,9 +14,110 @@ from pydantic import BaseModel, Field
 # ============================================================
 
 
+class WorkspaceGatewayCreate(BaseModel):
+    gateway_url: str = Field(..., min_length=1, max_length=1024)
+    auth_mode: str = Field("oidc", max_length=32)
+    oidc_issuer: str | None = None
+    oidc_client_id: str | None = None
+    oidc_audience: str | None = None
+    refresh_token: str | None = None
+    access_token: str | None = None
+    bearer_token: str | None = None
+    tls_ca: str | None = None
+    tls_cert: str | None = None
+    tls_key: str | None = None
+    tls_verify: bool = True
+
+
+class WorkspaceGatewayOut(BaseModel):
+    workspace_id: int
+    gateway_url: str
+    auth_mode: str
+    oidc_issuer: str | None = None
+    oidc_client_id: str | None = None
+    oidc_audience: str | None = None
+    has_refresh_token: bool = False
+    has_access_token: bool = False
+    access_token_expires_at: datetime | None = None
+    has_bearer_token: bool = False
+    has_tls_cert: bool = False
+    has_tls_key: bool = False
+    tls_ca: str | None = None
+    tls_verify: bool = True
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ParseGatewayCommandIn(BaseModel):
+    command: str = Field(..., min_length=1)
+
+
+class ParseGatewayCommandOut(BaseModel):
+    gateway_url: str = ""
+    auth_mode: str = "oidc"
+    oidc_issuer: str | None = None
+    oidc_client_id: str | None = None
+    oidc_audience: str | None = None
+    bearer_token: str | None = None
+    tls_verify: bool = True
+    suggested_name: str | None = None
+    errors: list[str] = Field(default_factory=list)
+
+
+class ParseTokenIn(BaseModel):
+    token_input: str = Field(..., min_length=1)
+
+
+class ParseTokenOut(BaseModel):
+    refresh_token: str = ""
+    access_token: str = ""
+    expires_at: int | None = None
+    issuer: str | None = None
+    client_id: str | None = None
+    format_detected: str = "raw"
+    status: str = "valid"
+    message: str = ""
+    char_count: int = 0
+
+
+class TestGatewayConnectionIn(BaseModel):
+    workspace_id: int | None = None
+    gateway_url: str = Field(..., min_length=1)
+    auth_mode: str = "oidc"
+    oidc_issuer: str | None = None
+    oidc_client_id: str | None = None
+    oidc_audience: str | None = None
+    refresh_token: str | None = None
+    bearer_token: str | None = None
+    tls_ca: str | None = None
+    tls_cert: str | None = None
+    tls_key: str | None = None
+    tls_verify: bool = True
+
+    @field_validator("gateway_url")
+    @classmethod
+    def validate_gateway_url(cls, value: str) -> str:
+        value = value.strip()
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("gateway_url must be an http(s) URL with a host")
+        return value
+
+
+class TestGatewayConnectionOut(BaseModel):
+    status: str = "ok"
+    gateway_url: str = ""
+    auth_mode: str = ""
+    sandboxes_count: int = 0
+    detail: str = ""
+
+
 class WorkspaceCreate(BaseModel):
     display_name: str = Field(..., min_length=1, max_length=255)
     description: str = ""
+    gateway: WorkspaceGatewayCreate | None = None
 
 
 class WorkspaceUpdate(BaseModel):
@@ -29,6 +131,7 @@ class WorkspaceOut(BaseModel):
     namespace: str
     description: str
     owner_id: str = ""
+    gateway: WorkspaceGatewayOut | None = None
     created_at: datetime
     updated_at: datetime
     ai_provider_warning: bool = False
