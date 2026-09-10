@@ -687,6 +687,53 @@ class TestDoLaunchOpenshell:
         assert gemini_pname not in call_kwargs.get("provider_names", [])
 
     @pytest.mark.asyncio
+    async def test_vertex_provider_injects_project_and_location_env_vars(self, client):
+        """When a google-cloud provider exists on the gateway, project and location env vars are injected into sandbox env_vars."""
+        ws = await _create_workspace(client)
+        # Configure OpencodeSecret with project and location
+        await client.post(
+            f"/api/v1/workspaces/{ws['id']}/secrets/credentials",
+            json={
+                "google_cloud_project": "test-gcp-proj",
+                "vertex_location": "us-central1",
+            },
+        )
+        s_resp = await client.post(
+            f"/api/v1/workspaces/{ws['id']}/sessions",
+            json={"name": "s-vertex", "mode": "prompt", "agent_tool": "opencode", "provider": "claude"},
+        )
+        assert s_resp.status_code == 201, s_resp.text
+        s = s_resp.json()
+        expected_pname = f"swarmer-ws-{ws['id']}-google-cloud"
+
+        patches = self._patch_openshell()
+        with patches["create_provider"], \
+             patches["ensure_provider"], \
+             patches["configure_provider_credential"], patches["attach_sandbox_provider"], \
+             patches["create_sandbox"], patches["write_agent_config"], \
+             patches["write_agents_md"], patches["exec_command"], \
+             patches["start_agent"], patches["delete_sandbox"], \
+             patches["build_policy"], patches["run_agent"], \
+             patches["setup_sandbox"] as mock_setup, \
+             patches["get_image"]:
+            with patch(
+                "swarmer.openshell_client.provider_exists",
+                new=AsyncMock(side_effect=lambda name, **kw: name == expected_pname),
+            ):
+                await client.post(
+                    f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/launch"
+                )
+                await asyncio.sleep(0)
+
+        call_kwargs = mock_setup.call_args.kwargs if mock_setup.call_args else {}
+        assert expected_pname in call_kwargs.get("provider_names", [])
+        env_vars = call_kwargs.get("env_vars", {})
+        assert env_vars.get("GOOGLE_CLOUD_PROJECT") == "test-gcp-proj"
+        assert env_vars.get("VERTEX_PROJECT") == "test-gcp-proj"
+        assert env_vars.get("GOOGLE_CLOUD_LOCATION") == "us-central1"
+        assert env_vars.get("VERTEX_LOCATION") == "us-central1"
+
+    @pytest.mark.asyncio
     async def test_openai_provider_attached_when_configured_on_gateway(self, client):
         """When an OpenAI provider exists on the gateway, attach it to the sandbox."""
         ws = await _create_workspace(client)
@@ -765,7 +812,7 @@ class TestDoLaunchOpenshell:
 
     @pytest.mark.asyncio
     async def test_openai_provider_not_attached_when_absent_from_gateway(self, client):
-        """OpenAI model launches must fail early when the gateway provider is absent."""
+        """OpenAI model launches must fall back when the gateway provider is absent."""
         ws = await _create_workspace(client)
         s_resp = await client.post(
             f"/api/v1/workspaces/{ws['id']}/sessions",
@@ -773,6 +820,7 @@ class TestDoLaunchOpenshell:
         )
         assert s_resp.status_code == 201, s_resp.text
         s = s_resp.json()
+        openai_pname = f"swarmer-ws-{ws['id']}-openai"
 
         patches = self._patch_openshell()
         with patches["create_provider"], patches["ensure_provider"], \
@@ -792,8 +840,117 @@ class TestDoLaunchOpenshell:
                 )
                 await asyncio.sleep(0)
 
+        assert resp.status_code == 200
+        call_kwargs = mock_setup.call_args.kwargs if mock_setup.call_args else {}
+        assert openai_pname not in call_kwargs.get("provider_names", [])
+
+    @pytest.mark.asyncio
+    async def test_launch_fails_when_all_ai_providers_absent_from_gateway(self, client):
+        """Launch must fail early when no AI provider exists on the gateway."""
+        ws = await _create_workspace(client)
+        s_resp = await client.post(
+            f"/api/v1/workspaces/{ws['id']}/sessions",
+            json={"name": "s-no-providers", "mode": "prompt", "agent_tool": "opencode", "provider": "openai"},
+        )
+        assert s_resp.status_code == 201, s_resp.text
+        s = s_resp.json()
+
+        patches = self._patch_openshell()
+        with patches["create_provider"], patches["ensure_provider"], \
+             patches["configure_provider_credential"], patches["attach_sandbox_provider"], \
+              patches["create_sandbox"], patches["write_agent_config"], \
+              patches["write_agents_md"], patches["exec_command"], \
+              patches["start_agent"], patches["delete_sandbox"], \
+              patches["build_policy"], patches["run_agent"], \
+              patches["setup_sandbox"] as mock_setup, \
+              patches["get_image"]:
+            with patch(
+                "swarmer.openshell_client.provider_exists",
+                new=AsyncMock(return_value=False),
+            ):
+                resp = await client.post(
+                    f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/launch"
+                )
+                await asyncio.sleep(0)
+
         assert resp.status_code == 500
-        assert "OpenAI API key is not configured for this workspace" in resp.text
+        assert "No AI provider is configured for this workspace" in resp.text
+        mock_setup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_gemini_falls_back_to_openai_when_gemini_removed_from_gateway(self, client):
+        """When gemini was saved on a session but removed from workspace, launch must fall back to openai."""
+        ws = await _create_workspace(client)
+        s_resp = await client.post(
+            f"/api/v1/workspaces/{ws['id']}/sessions",
+            json={"name": "s-gemini-fallback", "mode": "prompt", "agent_tool": "opencode", "provider": "gemini"},
+        )
+        assert s_resp.status_code == 201, s_resp.text
+        s = s_resp.json()
+        openai_pname = f"swarmer-ws-{ws['id']}-openai"
+        gemini_pname = f"swarmer-ws-{ws['id']}-google-ai-studio"
+
+        patches = self._patch_openshell()
+        with patches["create_provider"], patches["ensure_provider"], \
+             patches["configure_provider_credential"], patches["attach_sandbox_provider"], \
+              patches["create_sandbox"], patches["write_agent_config"], \
+              patches["write_agents_md"], patches["exec_command"], \
+              patches["start_agent"], patches["delete_sandbox"], \
+              patches["build_policy"], patches["run_agent"], \
+              patches["setup_sandbox"] as mock_setup, \
+              patches["get_image"]:
+            # Only openai provider is present on the gateway
+            with patch(
+                "swarmer.openshell_client.provider_exists",
+                new=AsyncMock(side_effect=lambda name, **kw: name == openai_pname),
+            ):
+                resp = await client.post(
+                    f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/launch"
+                )
+                await asyncio.sleep(0)
+
+        assert resp.status_code == 200
+        call_kwargs = mock_setup.call_args.kwargs if mock_setup.call_args else {}
+        assert gemini_pname not in call_kwargs.get("provider_names", [])
+        assert openai_pname in call_kwargs.get("provider_names", [])
+
+    @pytest.mark.asyncio
+    async def test_launch_rejects_when_requested_provider_probe_fails(self, client):
+        """When requested provider probe fails with an exception, launch must fail fast rather than falling back."""
+        ws = await _create_workspace(client)
+        s_resp = await client.post(
+            f"/api/v1/workspaces/{ws['id']}/sessions",
+            json={"name": "s-probe-fail", "mode": "prompt", "agent_tool": "opencode", "provider": "gemini"},
+        )
+        assert s_resp.status_code == 201, s_resp.text
+        s = s_resp.json()
+        gemini_pname = f"swarmer-ws-{ws['id']}-google-ai-studio"
+
+        def _mock_exists(name, **kw):
+            if name == gemini_pname:
+                raise RuntimeError("Gateway connection dropped")
+            return True
+
+        patches = self._patch_openshell()
+        with patches["create_provider"], patches["ensure_provider"], \
+             patches["configure_provider_credential"], patches["attach_sandbox_provider"], \
+              patches["create_sandbox"], patches["write_agent_config"], \
+              patches["write_agents_md"], patches["exec_command"], \
+              patches["start_agent"], patches["delete_sandbox"], \
+              patches["build_policy"], patches["run_agent"], \
+              patches["setup_sandbox"] as mock_setup, \
+              patches["get_image"]:
+            with patch(
+                "swarmer.openshell_client.provider_exists",
+                new=AsyncMock(side_effect=_mock_exists),
+            ):
+                resp = await client.post(
+                    f"/api/v1/workspaces/{ws['id']}/sessions/{s['id']}/launch"
+                )
+                await asyncio.sleep(0)
+
+        assert resp.status_code == 500
+        assert "Could not verify the 'gemini' provider for this workspace" in resp.text
         mock_setup.assert_not_called()
 
     @pytest.mark.asyncio
@@ -1972,6 +2129,22 @@ class TestExecCommandTimeout:
 
         mock_client.exec.assert_called_once_with("test-id", ["ls"], stdin=None, timeout_seconds=None, env={})
 
+    @pytest.mark.asyncio
+    async def test_exec_command_default_client_is_none(self):
+        """exec_command allows omitting client; defaults to None and resolves _get_client()."""
+        from swarmer.openshell_client import exec_command
+        from unittest.mock import patch, MagicMock
+
+        mock_client = MagicMock()
+        mock_client.get.return_value = MagicMock(id="test-id-default")
+        mock_client.exec.return_value = MagicMock(exit_code=0, stdout="", stderr="")
+
+        with patch("swarmer.openshell_client._get_client", return_value=mock_client):
+            # Positional call omitting client completely — must not raise TypeError
+            await exec_command("sb-name", ["echo", "test"])
+
+        mock_client.exec.assert_called_once_with("test-id-default", ["echo", "test"], stdin=None, timeout_seconds=None, env={})
+
 
 
 
@@ -2763,9 +2936,9 @@ class TestPolicyRulesEndpoints:
         )
 
     @pytest.mark.asyncio
-    async def test_add_chunk_preserves_existing_rules_on_endpoints(self, client):
-        """Promoting a chunk whose endpoints already have rules should preserve
-        them and must NOT add access=full."""
+    async def test_add_chunk_broadens_endpoints_to_access_full(self, client):
+        """Promoting a chunk broadens the endpoint to access=full and strips narrow rules/path
+        so subsequent requests or dependencies on the approved host do not silently fail at L7."""
         import json as _j
         ws = await _create_workspace(client)
         s = await _create_session(client, ws["id"])
@@ -2797,8 +2970,10 @@ class TestPolicyRulesEndpoints:
 
         rules = _j.loads(sess.custom_policies)
         ep = rules[0]["endpoints"][0]
-        assert "access" not in ep, f"access must not be added when rules are present, got: {ep}"
-        assert ep["rules"], "rules should be preserved"
+        assert ep.get("access") == "full", f"expected access=full on promoted endpoint, got: {ep}"
+        assert "rules" not in ep, f"narrow rules should be stripped on promotion, got: {ep}"
+        assert "path" not in ep, f"narrow path should be stripped on promotion, got: {ep}"
+        assert ep.get("enforcement") == "enforce"
 
     @pytest.mark.asyncio
     async def test_add_chunk_preserves_existing_access_on_endpoints(self, client):

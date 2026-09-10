@@ -867,3 +867,362 @@ def test_get_client_builds_mtls_config_without_custom_ca(sdk_client):
     assert tls_kwargs["ca_path"] is None
     assert str(tls_kwargs["cert_path"]) == "client.crt"
     assert str(tls_kwargs["key_path"]) == "client.key"
+
+
+@pytest.mark.asyncio
+async def test_ensure_provider_auto_imports_openai_profile(sdk_client):
+    """ensure_provider('...-openai', 'openai', ...) auto-imports the OpenAI profile with endpoints."""
+    with patch.object(oc, "_get_client", return_value=sdk_client):
+        await oc.ensure_provider("swarmer-ws-1-openai", "openai", {}, credentials={"OPENAI_API_KEY": "sk-test"})
+
+    sdk_client._stub.ImportProviderProfiles.assert_called_once()
+    import_req = sdk_client._stub.ImportProviderProfiles.call_args.args[0]
+    assert len(import_req.profiles) == 1
+    imported_profile = import_req.profiles[0].profile
+    assert imported_profile.id == "openai"
+    assert len(imported_profile.endpoints) == 1
+    assert imported_profile.endpoints[0].host == "api.openai.com"
+    assert imported_profile.endpoints[0].port == 443
+
+
+@pytest.mark.asyncio
+async def test_import_provider_profiles_maps_endpoints_and_binaries(sdk_client):
+    """import_provider_profiles correctly translates endpoints and binaries to protobuf."""
+    profiles = [
+        {
+            "id": "test-prof",
+            "display_name": "Test Profile",
+            "credentials": [{"name": "KEY", "env_vars": ["KEY"]}],
+            "endpoints": [
+                {
+                    "host": "api.example.com",
+                    "port": 443,
+                    "protocol": "rest",
+                    "access": "read-write",
+                    "enforcement": "enforce",
+                }
+            ],
+            "binaries": [{"path": "/usr/bin/curl"}],
+        }
+    ]
+    with patch.object(oc, "_get_client", return_value=sdk_client):
+        await oc.import_provider_profiles(profiles)
+
+    sdk_client._stub.ImportProviderProfiles.assert_called_once()
+    req = sdk_client._stub.ImportProviderProfiles.call_args.args[0]
+    p = req.profiles[0].profile
+    assert p.id == "test-prof"
+    assert len(p.endpoints) == 1
+    assert p.endpoints[0].host == "api.example.com"
+    assert len(p.binaries) == 1
+    assert p.binaries[0].path == "/usr/bin/curl"
+
+
+def test_jira_provider_profile_binds_atlassian_endpoints():
+    """The Jira credential profile authorizes its Atlassian destinations."""
+    from swarmer.openshell_client import CUSTOM_PROVIDER_PROFILES
+
+    jira = next(profile for profile in CUSTOM_PROVIDER_PROFILES if profile["id"] == "jira")
+    endpoints = {(endpoint["host"], endpoint["port"]) for endpoint in jira["endpoints"]}
+
+    assert endpoints == {
+        ("*.atlassian.net", 443),
+        ("redhat.atlassian.net", 443),
+    }
+
+
+@pytest.mark.asyncio
+async def test_import_provider_profiles_updates_existing_profile_on_already_exists():
+    """When ImportProviderProfiles encounters ALREADY_EXISTS, it calls UpdateProviderProfiles."""
+    import grpc
+    from openshell._proto import openshell_pb2
+
+    mock_client = MagicMock()
+
+    class MockRpcError(grpc.RpcError, grpc.Call):
+        def code(self):
+            return grpc.StatusCode.ALREADY_EXISTS
+
+    mock_client._stub.ImportProviderProfiles.side_effect = MockRpcError()
+    mock_client._timeout = 10
+
+    # Mock GetProviderProfile to return an existing profile with resource_version=5
+    existing_resp = MagicMock()
+    existing_resp.profile.resource_version = 5
+    mock_client._stub.GetProviderProfile.return_value = existing_resp
+
+    profile_dict = {
+        "id": "jira",
+        "display_name": "Jira",
+        "credentials": [{"name": "JIRA_ACCESS_TOKEN", "env_vars": ["JIRA_ACCESS_TOKEN"]}],
+        "endpoints": [
+            {
+                "host": "redhat.atlassian.net",
+                "port": 443,
+                "protocol": "rest",
+                "access": "read-write",
+                "enforcement": "enforce",
+            }
+        ],
+    }
+
+    await oc.import_provider_profiles([profile_dict], client=mock_client)
+
+    # Verify GetProviderProfile was called for "jira"
+    mock_client._stub.GetProviderProfile.assert_called_once()
+    get_req = mock_client._stub.GetProviderProfile.call_args.args[0]
+    assert get_req.id == "jira"
+
+    # Verify UpdateProviderProfiles was called with expected_resource_version=5
+    mock_client._stub.UpdateProviderProfiles.assert_called_once()
+    up_req = mock_client._stub.UpdateProviderProfiles.call_args.args[0]
+    assert up_req.id == "jira"
+    assert up_req.expected_resource_version == 5
+    assert up_req.profile.profile.id == "jira"
+    assert up_req.profile.profile.resource_version == 5
+    assert len(up_req.profile.profile.endpoints) == 1
+    assert up_req.profile.profile.endpoints[0].host == "redhat.atlassian.net"
+
+
+@pytest.mark.asyncio
+async def test_import_provider_profiles_handles_mixed_existing_and_missing_profiles():
+    """When batch import hits ALREADY_EXISTS, existing profiles are updated and missing profiles are imported."""
+    import grpc
+
+    mock_client = MagicMock()
+
+    class MockAlreadyExists(grpc.RpcError, grpc.Call):
+        def code(self):
+            return grpc.StatusCode.ALREADY_EXISTS
+
+    class MockNotFound(grpc.RpcError, grpc.Call):
+        def code(self):
+            return grpc.StatusCode.NOT_FOUND
+
+    import_calls = []
+
+    def mock_import(req, timeout=None):
+        import_calls.append(req)
+        if len(import_calls) == 1:
+            raise MockAlreadyExists()
+        return MagicMock()
+
+    mock_client._stub.ImportProviderProfiles.side_effect = mock_import
+    mock_client._timeout = 10
+
+    existing_resp = MagicMock()
+    existing_resp.profile.resource_version = 7
+
+    def mock_get(req, timeout=None):
+        if req.id == "existing-p":
+            return existing_resp
+        raise MockNotFound()
+
+    mock_client._stub.GetProviderProfile.side_effect = mock_get
+
+    profiles = [
+        {"id": "existing-p", "display_name": "Existing"},
+        {"id": "missing-p", "display_name": "Missing"},
+    ]
+
+    await oc.import_provider_profiles(profiles, client=mock_client)
+
+    # Verify GetProviderProfile called for both profiles
+    assert mock_client._stub.GetProviderProfile.call_count >= 2
+
+    # Verify UpdateProviderProfiles called for existing-p
+    mock_client._stub.UpdateProviderProfiles.assert_called_once()
+    up_req = mock_client._stub.UpdateProviderProfiles.call_args.args[0]
+    assert up_req.id == "existing-p"
+    assert up_req.expected_resource_version == 7
+
+    # Verify ImportProviderProfiles called a second time to import missing-p individually
+    assert len(import_calls) == 2
+    single_req = import_calls[1]
+    assert len(single_req.profiles) == 1
+    assert single_req.profiles[0].profile.id == "missing-p"
+    assert getattr(single_req, "workspace", "") == ""
+
+
+@pytest.mark.asyncio
+async def test_import_provider_profiles_preserves_global_workspace_on_reimport_after_fallback_check():
+    """When global GetProviderProfile fails and fallback lookup also fails, re-import retains empty workspace."""
+    import grpc
+
+    mock_client = MagicMock()
+
+    class MockAlreadyExists(grpc.RpcError, grpc.Call):
+        def code(self):
+            return grpc.StatusCode.ALREADY_EXISTS
+
+    class MockNotFound(grpc.RpcError, grpc.Call):
+        def code(self):
+            return grpc.StatusCode.NOT_FOUND
+
+    import_calls = []
+
+    def mock_import(req, timeout=None):
+        import_calls.append(req)
+        if len(import_calls) == 1:
+            raise MockAlreadyExists()
+        return MagicMock()
+
+    mock_client._stub.ImportProviderProfiles.side_effect = mock_import
+    mock_client._timeout = 10
+
+    class FakeGetReq:
+        def __init__(self, id=""):
+            self.id = id
+            self.workspace = ""
+
+    class FakeImportReq:
+        def __init__(self):
+            self.workspace = ""
+            self.profiles = []
+
+    get_workspaces = []
+
+    def mock_get(req, timeout=None):
+        get_workspaces.append(getattr(req, "workspace", ""))
+        raise MockNotFound()
+
+    mock_client._stub.GetProviderProfile.side_effect = mock_get
+
+    from openshell._proto import openshell_pb2
+    profiles = [{"id": "global-missing", "display_name": "Global Missing"}]
+    with patch.object(openshell_pb2, "GetProviderProfileRequest", FakeGetReq), \
+         patch.object(openshell_pb2, "ImportProviderProfilesRequest", FakeImportReq):
+        await oc.import_provider_profiles(profiles, client=mock_client)
+
+    # First lookup was global (""), second lookup was default ("default")
+    assert get_workspaces == ["", "default"]
+
+    # Re-import must use global workspace (""), NOT the fallback "default"
+    assert len(import_calls) == 2
+    single_req = import_calls[1]
+    assert getattr(single_req, "workspace", "") == ""
+
+
+@pytest.mark.asyncio
+async def test_import_provider_profiles_uses_matched_workspace_on_update_not_found():
+    """When a profile matched in default workspace raises NOT_FOUND on update, recovery import uses matched workspace."""
+    import grpc
+
+    mock_client = MagicMock()
+
+    class MockAlreadyExists(grpc.RpcError, grpc.Call):
+        def code(self):
+            return grpc.StatusCode.ALREADY_EXISTS
+
+    class MockNotFound(grpc.RpcError, grpc.Call):
+        def code(self):
+            return grpc.StatusCode.NOT_FOUND
+
+    import_calls = []
+
+    def mock_import(req, timeout=None):
+        import_calls.append(req)
+        if len(import_calls) == 1:
+            raise MockAlreadyExists()
+        return MagicMock()
+
+    mock_client._stub.ImportProviderProfiles.side_effect = mock_import
+    mock_client._timeout = 10
+
+    class FakeGetReq:
+        def __init__(self, id=""):
+            self.id = id
+            self.workspace = ""
+
+    class FakeImportReq:
+        def __init__(self):
+            self.workspace = ""
+            self.profiles = []
+
+    class FakeUpdateReq:
+        def __init__(self, id="", profile=None, expected_resource_version=0):
+            self.id = id
+            self.profile = profile
+            self.expected_resource_version = expected_resource_version
+            self.workspace = ""
+
+    existing_resp = MagicMock()
+    existing_resp.profile.resource_version = 3
+
+    def mock_get(req, timeout=None):
+        if getattr(req, "workspace", "") == "default":
+            return existing_resp
+        raise MockNotFound()
+
+    mock_client._stub.GetProviderProfile.side_effect = mock_get
+    mock_client._stub.UpdateProviderProfiles.side_effect = MockNotFound()
+
+    from openshell._proto import openshell_pb2
+    profiles = [{"id": "default-scoped", "display_name": "Default Scoped"}]
+    with patch.object(openshell_pb2, "GetProviderProfileRequest", FakeGetReq), \
+         patch.object(openshell_pb2, "ImportProviderProfilesRequest", FakeImportReq), \
+         patch.object(openshell_pb2, "UpdateProviderProfilesRequest", FakeUpdateReq):
+        await oc.import_provider_profiles(profiles, client=mock_client)
+
+    # UpdateProviderProfiles was called with matched_workspace ("default")
+    mock_client._stub.UpdateProviderProfiles.assert_called_once()
+    up_req = mock_client._stub.UpdateProviderProfiles.call_args.args[0]
+    assert getattr(up_req, "workspace", "") == "default"
+
+    # Recovery ImportProviderProfiles was called with matched_workspace ("default")
+    assert len(import_calls) == 2
+    recovery_req = import_calls[1]
+    assert getattr(recovery_req, "workspace", "") == "default"
+
+
+def test_gemini_provider_profile_binds_all_gemini_credentials_and_endpoints():
+    """The Google AI Studio credential profile defines all Gemini credentials and binds its endpoint."""
+    from swarmer.openshell_client import CUSTOM_PROVIDER_PROFILES
+
+    gemini = next(profile for profile in CUSTOM_PROVIDER_PROFILES if profile["id"] == "google-ai-studio")
+    cred_names = [c["name"] for c in gemini["credentials"]]
+    assert "GOOGLE_API_KEY" in cred_names
+    assert "GOOGLE_GENERATIVE_AI_API_KEY" in cred_names
+    assert "GEMINI_API_KEY" in cred_names
+    endpoints = {(endpoint["host"], endpoint["port"]) for endpoint in gemini["endpoints"]}
+    assert ("generativelanguage.googleapis.com", 443) in endpoints
+
+
+@pytest.mark.asyncio
+async def test_ensure_provider_auto_imports_gemini_profile(sdk_client):
+    """ensure_provider('...-google-ai-studio', 'google-ai-studio', ...) auto-imports the Gemini profile."""
+    with patch.object(oc, "_get_client", return_value=sdk_client):
+        await oc.ensure_provider(
+            "swarmer-ws-1-google-ai-studio",
+            "google-ai-studio",
+            {},
+            credentials={
+                "GOOGLE_API_KEY": "test-key",
+                "GOOGLE_GENERATIVE_AI_API_KEY": "test-key",
+                "GEMINI_API_KEY": "test-key",
+            },
+        )
+
+    sdk_client._stub.ImportProviderProfiles.assert_called_once()
+    import_req = sdk_client._stub.ImportProviderProfiles.call_args.args[0]
+    assert len(import_req.profiles) == 1
+    imported_profile = import_req.profiles[0].profile
+    assert imported_profile.id == "google-ai-studio"
+    cred_names = [c.name for c in imported_profile.credentials]
+    assert "GOOGLE_API_KEY" in cred_names
+    assert "GOOGLE_GENERATIVE_AI_API_KEY" in cred_names
+    assert "GEMINI_API_KEY" in cred_names
+    assert len(imported_profile.endpoints) == 1
+    assert imported_profile.endpoints[0].host == "generativelanguage.googleapis.com"
+
+
+@pytest.mark.asyncio
+async def test_import_provider_profiles_registers_globally_with_empty_workspace(sdk_client):
+    """Custom provider profiles must be imported into global scope (workspace='') so all workspaces and supervisors find them."""
+    with patch.object(oc, "_get_client", return_value=sdk_client):
+        await oc.import_provider_profiles([{"id": "test-profile"}])
+
+    sdk_client._stub.ImportProviderProfiles.assert_called_once()
+    import_req = sdk_client._stub.ImportProviderProfiles.call_args.args[0]
+    if hasattr(import_req, "workspace"):
+        assert import_req.workspace == ""

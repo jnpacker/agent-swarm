@@ -146,6 +146,36 @@ async def _run_openshell_tui(
                     if mcp.jira_email:
                         tui_env["JIRA_EMAIL"] = mcp.jira_email
                     break
+            from sqlalchemy import or_ as _sa_or
+            from swarmer.models.opencode_secret import OpencodeSecret as _OpencodeSecret
+            _user_filter = [_OpencodeSecret.workspace_id == session.workspace_id]
+            if getattr(session, "user_id", None):
+                _user_filter.append(
+                    _sa_or(
+                        _OpencodeSecret.user_id == session.user_id,
+                        _OpencodeSecret.shared == True,  # noqa: E712
+                        _OpencodeSecret.user_id == "",
+                    )
+                )
+            _sec_result = await db.execute(
+                _sa_select(_OpencodeSecret).where(*_user_filter)
+            )
+            _oc_all = _sec_result.scalars().all()
+            _oc_secret = None
+            if getattr(session, "user_id", None):
+                for s in _oc_all:
+                    if s.user_id == session.user_id:
+                        _oc_secret = s
+                        break
+            if _oc_secret is None and _oc_all:
+                _oc_secret = _oc_all[0]
+            if _oc_secret:
+                if _oc_secret.vertex_location:
+                    tui_env["GOOGLE_CLOUD_LOCATION"] = _oc_secret.vertex_location
+                    tui_env["VERTEX_LOCATION"] = _oc_secret.vertex_location
+                if _oc_secret.google_cloud_project:
+                    tui_env["GOOGLE_CLOUD_PROJECT"] = _oc_secret.google_cloud_project
+                    tui_env["VERTEX_PROJECT"] = _oc_secret.google_cloud_project
             break
     except Exception:
         log.warning("TUI: failed to load workspace env vars for session %d", session.id, exc_info=True)
@@ -153,6 +183,9 @@ async def _run_openshell_tui(
     # OPENCODE_CONFIG is the env-var equivalent of --config (there is no CLI flag).
     if session.agent_tool == "opencode":
         tui_env["OPENCODE_CONFIG"] = "/sandbox/opencode.json"
+        from swarmer.config import settings
+        if settings.opencode_experimental_plan_mode:
+            tui_env["OPENCODE_EXPERIMENTAL_PLAN_MODE"] = "true"
 
     command = ["sh", "-c", tui_shell]
 
@@ -255,5 +288,3 @@ async def _run_openshell_tui(
             await websocket.close()
         except Exception:
             pass
-
-

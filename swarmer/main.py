@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
+
+# Avoid gRPC c-ares resolver failures on Kubernetes pods with ndots:5
+os.environ.setdefault("GRPC_DNS_RESOLVER", "native")
 from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
@@ -16,6 +20,7 @@ from swarmer.config import settings
 from swarmer.crypto import derive_session_secret, init_crypto
 from swarmer.database import checkpoint_db, create_tables, migrate_db, init_db
 from swarmer.deps import NotAuthenticated
+from swarmer.openshell_client import CUSTOM_PROVIDER_PROFILES as _OPENSHELL_CUSTOM_PROFILES
 from swarmer.api.v1 import router as api_v1_router
 from swarmer.routers import admins as admins_router
 from swarmer.routers import auth as auth_router
@@ -43,41 +48,6 @@ log = logging.getLogger(__name__)
 # removes itself via add_done_callback once it completes (or is cancelled).
 _iat_refresh_restart_tasks: set[asyncio.Task] = set()
 
-# Custom provider profiles swarmer registers in the OpenShell gateway at startup.
-# google-vertex-ai is built-in since OpenShell 0.0.55 — no need to import it.
-_OPENSHELL_CUSTOM_PROFILES = [
-    {
-        "id": "google-ai-studio",
-        "display_name": "Google AI Studio",
-        "inference_capable": True,
-        "credentials": [
-            {
-                # Credential name IS the env var injected into the sandbox.
-                # env_vars is used by the gateway proxy for HTTP request rewriting.
-                "name": "GOOGLE_API_KEY",
-                "env_vars": ["GOOGLE_API_KEY"],
-                "required": True,
-                "auth_style": "header",
-                "header_name": "x-goog-api-key",
-            }
-        ],
-    },
-    {
-        "id": "jira",
-        "display_name": "Jira",
-        "inference_capable": False,
-        "credentials": [
-            # JIRA_ACCESS_TOKEN is a secret credential — the gateway stores it securely
-            # and injects it as an opaque reference token (openshell:resolve:...) into
-            # the sandbox via GetSandboxProviderEnvironment.
-            # JIRA_SERVER_URL and JIRA_EMAIL are non-secret; they go into provider config
-            # (not credentials) and the gateway injects them as plain env vars alongside
-            # the credential reference tokens.
-            {"name": "JIRA_ACCESS_TOKEN", "env_vars": ["JIRA_ACCESS_TOKEN"], "required": True},
-        ],
-    },
-]
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -97,6 +67,7 @@ async def lifespan(app: FastAPI):
     await _sync_k8s_workspace_members()
     if settings.openshell_gateway_url:
         await _ensure_openshell_provider_profiles()
+        await _track_default_gateway_version()
     await _restart_prompt_pollers()
     if settings.openshell_gateway_url:
         await _restart_server_sessions()
@@ -137,6 +108,28 @@ async def _ensure_openshell_provider_profiles() -> None:
         log.info("OpenShell provider profiles registered: %s", [p["id"] for p in _OPENSHELL_CUSTOM_PROFILES])
     except Exception:
         log.warning("Failed to import OpenShell provider profiles — sessions may lack Google AI Studio support", exc_info=True)
+
+
+async def _track_default_gateway_version() -> None:
+    """Observe the shared gateway and invalidate stale AI provider flags."""
+    from swarmer import openshell_client
+    from swarmer.database import get_db
+    from swarmer.gateway_version import observe_gateway_version
+
+    try:
+        config = openshell_client.default_gateway_config()
+        client = openshell_client.get_client_for_config(config)
+        try:
+            async for db in get_db():
+                await observe_gateway_version(config, client, db)
+                await db.commit()
+                break
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    except Exception:
+        log.warning("OpenShell gateway version tracking skipped (non-fatal)", exc_info=True)
 
 
 async def _restart_prompt_pollers() -> None:

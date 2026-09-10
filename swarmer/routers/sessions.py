@@ -1032,6 +1032,9 @@ def _build_expected_hosts(model: str, repos_data: list[dict], tool_name: str, mo
     if provider in ("google", "vertexai", "google-vertex-anthropic"):
         hosts.add("generativelanguage.googleapis.com")
         hosts.add("aiplatform.googleapis.com")
+        hosts.add("*-aiplatform.googleapis.com")
+        hosts.add("*.aiplatform.googleapis.com")
+        hosts.add("aiplatform.*.rep.googleapis.com")
         hosts.add("oauth2.googleapis.com")
     if provider == "gemini":
         hosts.add("generativelanguage.googleapis.com")
@@ -1256,6 +1259,7 @@ async def _do_launch_openshell(
         "openai": f"swarmer-ws-{session.workspace_id}-openai",
     }
     _available_providers: dict[str, bool] = {}
+    _probe_failed: set[str] = set()
     oc_client = await openshell_client.get_client_for_workspace(ws, db)
     if tool.requires_ai_model():
         for _name, _gateway_name in _provider_names.items():
@@ -1265,6 +1269,7 @@ async def _do_launch_openshell(
                 )
             except Exception:
                 _available_providers[_name] = False
+                _probe_failed.add(_name)
     _preferred_provider = requested_provider if requested_provider in _provider_names else ""
     _preferred_raw_model = ""
     if not _preferred_provider and requested_provider and "/" in requested_provider:
@@ -1277,29 +1282,33 @@ async def _do_launch_openshell(
         if _raw_provider_family and tool.is_valid_model(requested_provider):
             _preferred_provider = _raw_provider_family
             _preferred_raw_model = requested_provider
-    if _preferred_provider and _available_providers.get(_preferred_provider):
+    if not tool.requires_ai_model():
+        raw_model = requested_provider or ""
+    elif _preferred_provider and _available_providers.get(_preferred_provider):
         raw_model = _preferred_raw_model or _preferred_provider
         log.info(
             "_do_launch_openshell: session %d using provider %r (tool=%s)",
             session.id, raw_model, tool.name,
         )
-    elif requested_provider in _provider_names:
-        # Keep an explicit preset so provider-specific validation below can
-        # return an actionable error instead of silently changing models.
-        raw_model = requested_provider
-        log.info(
-            "_do_launch_openshell: session %d requested provider %r is unavailable",
-            session.id, requested_provider,
-        )
     else:
+        if _preferred_provider and _preferred_provider in _probe_failed:
+            raise ValueError(
+                f"Could not verify the {_preferred_provider!r} provider for this workspace"
+            )
         _fallback = next((p for p in ("claude", "gemini", "openai") if _available_providers.get(p)), "")
-        if tool.requires_ai_model() and not _fallback:
+        if not _fallback:
             raise ValueError("No AI provider is configured for this workspace")
         raw_model = _fallback or tool.get_default_model(has_adc)
-        log.info(
-            "_do_launch_openshell: session %d provider %r unavailable — falling back to %r",
-            session.id, requested_provider, raw_model,
-        )
+        if requested_provider:
+            log.info(
+                "_do_launch_openshell: session %d provider %r unavailable — falling back to %r",
+                session.id, requested_provider, raw_model,
+            )
+        else:
+            log.info(
+                "_do_launch_openshell: session %d using provider %r (tool=%s)",
+                session.id, raw_model, tool.name,
+            )
     raw_model = raw_model.strip("\r\n")  # strip any stray line endings before embedding in shell commands
     model = tool.resolve_build_model(raw_model)
 
@@ -1428,6 +1437,13 @@ async def _do_launch_openshell(
                 "_do_launch_openshell: could not check google-cloud provider for session %d",
                 session.id, exc_info=True,
             )
+    if _has_google_cloud_provider and oc_secret:
+        if oc_secret.vertex_location:
+            env_vars["GOOGLE_CLOUD_LOCATION"] = oc_secret.vertex_location
+            env_vars["VERTEX_LOCATION"] = oc_secret.vertex_location
+        if oc_secret.google_cloud_project:
+            env_vars["GOOGLE_CLOUD_PROJECT"] = oc_secret.google_cloud_project
+            env_vars["VERTEX_PROJECT"] = oc_secret.google_cloud_project
     # 1b cont. GitHub App IAT — minted above before commit; now register the provider.
     _app_pname: str | None = None
 
@@ -2987,18 +3003,30 @@ async def session_policy_rules_add(
     now_iso = datetime.now(timezone.utc).isoformat()
 
     def _normalize_endpoints(raw_eps: list) -> list:
-        """Ensure every L7-protocol endpoint has access or rules.
+        """Ensure every L7-protocol endpoint has access and enforcement set.
 
         Draft chunks from OPA include host/port/protocol but omit these fields,
         which causes gateway validation to fail with 'protocol requires rules or
-        access to define allowed traffic'. Default to access=full for
-        user-approved traffic.
+        access to define allowed traffic'. When promoting/adding rules, default
+        to access=full and strip restrictive path/rules so subsequent dependencies
+        or requests on the approved host do not silently fail at L7.
         """
         result = []
         for ep in raw_eps:
+            host = (ep.get("host") or "").strip()
+            if not host and not ep.get("allowed_ips"):
+                # OpenShell rejects empty endpoint hosts with INVALID_ARGUMENT
+                continue
             ep = dict(ep)
-            if ep.get("protocol") and not ep.get("access") and not ep.get("rules"):
+            ep["host"] = host
+            if not ep.get("enforcement"):
+                ep["enforcement"] = "enforce"
+            if ep.get("protocol"):
                 ep["access"] = "full"
+                ep.pop("path", None)
+                ep.pop("rules", None)
+            if ep.get("host") == "registry.npmjs.org":
+                ep["allow_encoded_slash"] = True
             result.append(ep)
         return result
 

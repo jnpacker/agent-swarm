@@ -96,6 +96,21 @@ async def test_probe_gateway_connectivity_mock():
         mock_client.list.assert_called_once_with()
 
 
+@pytest.mark.asyncio
+async def test_probe_gateway_connectivity_get_gateway_info_failure_is_non_fatal():
+    cfg = GatewayConfig(gateway_url="https://gw.example.com", auth_mode="none")
+    mock_client = MagicMock()
+    mock_client.list.return_value = ["sb-1"]
+    mock_client.list_for_all_workspaces.return_value = ["sb-1"]
+    mock_client._stub.GetGatewayInfo.side_effect = RuntimeError("RPC failed")
+
+    with patch("swarmer.openshell_client.get_client_for_config", return_value=mock_client):
+        res = await probe_gateway_connectivity(cfg)
+        assert res["status"] == "ok"
+        assert res["sandboxes_count"] == 1
+        assert res["gateway_version"] == ""
+
+
 @respx.mock
 @pytest.mark.asyncio
 async def test_oidc_auth_refresh_inside_event_loop():
@@ -121,6 +136,33 @@ async def test_oidc_auth_refresh_inside_event_loop():
 
     token = auth.current_access_token()
     assert token == "loop-access-token"
+    auth.close()
+
+
+@respx.mock
+def test_oidc_rejects_insecure_http_token_endpoint():
+    from swarmer.openshell_oidc import OidcAuthError
+
+    issuer = "https://keycloak.example.com/realms/test"
+    respx.get(f"{issuer}/.well-known/openid-configuration").respond(
+        200,
+        json={"issuer": issuer, "token_endpoint": "http://evil.example.com/token"},
+    )
+    auth = OidcGatewayAuth(issuer=issuer, client_id="test-client", workspace_id=99)
+    auth.seed(refresh_token="some-token")
+    with pytest.raises(OidcAuthError, match="HTTPS is required"):
+        auth.current_access_token()
+    auth.close()
+
+
+def test_oidc_rejects_insecure_http_issuer():
+    from swarmer.openshell_oidc import OidcAuthError
+
+    issuer = "http://insecure-idp.example.com/realms/test"
+    auth = OidcGatewayAuth(issuer=issuer, client_id="test-client", workspace_id=99)
+    auth.seed(refresh_token="some-token")
+    with pytest.raises(OidcAuthError, match="Insecure OIDC issuer.*HTTPS is required"):
+        auth.current_access_token()
     auth.close()
 
 
@@ -196,3 +238,95 @@ def test_oidc_gateway_auth_inline_tls_ca_uses_ssl_context():
     create_ctx.assert_called_once_with()
     ctx.load_verify_locations.assert_called_once_with(cadata=pem.strip())
     assert http_client.call_args.kwargs["verify"] is ctx
+
+
+@respx.mock
+def test_oidc_auth_client_credentials_flow():
+    """Verify Service Account authentication using client_credentials grant."""
+    issuer = "https://keycloak.example.com/realms/test"
+    client_id = "test-service-account"
+    client_secret = "test-client-secret"
+
+    # Mock discovery
+    respx.get(f"{issuer}/.well-known/openid-configuration").respond(
+        200,
+        json={"issuer": issuer, "token_endpoint": f"{issuer}/protocol/openid-connect/token"},
+    )
+
+    # Mock token endpoint
+    token_route = respx.post(f"{issuer}/protocol/openid-connect/token").respond(
+        200,
+        json={
+            "access_token": "sa-access-token-123",
+            "token_type": "Bearer",
+            "expires_in": 300,
+        },
+    )
+
+    auth = OidcGatewayAuth(
+        issuer=issuer,
+        client_id=client_id,
+        workspace_id=10,
+        client_secret=client_secret,
+        service_account_subject="service-account-test",
+    )
+
+    token = auth.current_access_token()
+    assert token == "sa-access-token-123"
+    assert auth._bundle["access_token"] == "sa-access-token-123"
+    assert token_route.call_count == 1
+
+    # Check request payload sent to Keycloak
+    req_body = token_route.calls.last.request.content.decode("utf-8")
+    assert "grant_type=client_credentials" in req_body
+    assert f"client_id={client_id}" in req_body
+    assert f"client_secret={client_secret}" in req_body
+    assert "subject=service-account-test" in req_body
+
+    # Second call should return cached fresh token without hitting token endpoint again
+    token2 = auth.current_access_token()
+    assert token2 == "sa-access-token-123"
+    assert token_route.call_count == 1
+    auth.close()
+
+
+@pytest.mark.asyncio
+async def test_resolve_gateway_config_with_client_secret():
+    """Verify GatewayConfig resolves client_secret and service_account_subject."""
+    ws = Workspace(id=55, display_name="SA WS", namespace="sa-ws")
+    gw = WorkspaceGateway(
+        workspace_id=55,
+        gateway_url="https://gw-sa.example.com:443",
+        auth_mode="oidc",
+        oidc_issuer="https://idp.example.com/realms/test",
+        oidc_client_id="sa-client",
+        service_account_subject="sa-subject",
+    )
+    gw.client_secret = "sa-secret-value"
+    ws.gateway = gw
+
+    cfg = await resolve_gateway_config(ws)
+    assert cfg.gateway_url == "https://gw-sa.example.com:443"
+    assert cfg.auth_mode == "oidc"
+    assert cfg.client_secret == "sa-secret-value"
+    assert cfg.service_account_subject == "sa-subject"
+    assert callable(cfg.bearer_callable)
+
+
+@pytest.mark.asyncio
+async def test_import_provider_profiles_idempotent_on_already_exists():
+    """Verify import_provider_profiles ignores ALREADY_EXISTS and UNIMPLEMENTED errors."""
+    import grpc
+    from swarmer.openshell_client import import_provider_profiles
+
+    mock_client = MagicMock()
+
+    class MockRpcError(grpc.RpcError, grpc.Call):
+        def code(self):
+            return grpc.StatusCode.ALREADY_EXISTS
+
+    mock_client._stub.ImportProviderProfiles.side_effect = MockRpcError()
+    mock_client._timeout = 10
+
+    # Should succeed idempotently without raising
+    await import_provider_profiles([{"id": "openai"}], client=mock_client)
