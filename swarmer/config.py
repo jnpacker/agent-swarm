@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     openshell_tls_cert: str = ""        # path to client TLS cert
     openshell_tls_key: str = ""         # path to client TLS key
     openshell_tls_ca: str = ""          # path to CA bundle
+    openshell_tls_verify: bool = True   # verify gateway server certificates
     openshell_bearer_token: str = ""    # bearer token for gateway/supervisor auth
     sandbox_gc_interval: int = 300      # seconds between sandbox GC sweeps
     log_level: str = "INFO"             # Python logging level: DEBUG, INFO, WARNING, ERROR
@@ -63,8 +64,8 @@ class Settings(BaseSettings):
     gemini_preset_plan_model: str = "google/gemini-3.7-flash"
     gemini_preset_build_model: str = "google/gemini-3.7-flash"
     gemini_preset_small_model: str = "google/gemini-3.5-flash-lite"
-    openai_preset_plan_model: str = "openai/gpt-5.6-terra-pro"
-    openai_preset_build_model: str = "openai/gpt-5.6-luna-pro"
+    openai_preset_plan_model: str = "openai/gpt-5.6-terra"
+    openai_preset_build_model: str = "openai/gpt-5.6-luna"
     openai_preset_small_model: str = "openai/gpt-5.6-luna-fast"
     # Enables the opencode plan agent so the preset "plan" model is actually used
     # by `opencode run` (see docs/USER_GUIDE.md — Model Selection).

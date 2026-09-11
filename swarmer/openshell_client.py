@@ -216,6 +216,7 @@ def default_gateway_config() -> GatewayConfig:
         tls_ca=settings.openshell_tls_ca or None,
         tls_cert=settings.openshell_tls_cert or None,
         tls_key=settings.openshell_tls_key or None,
+        tls_verify=settings.openshell_tls_verify,
         bearer_token=settings.openshell_bearer_token or None,
     )
 
@@ -256,7 +257,12 @@ def _tls_material_path(value: str) -> tuple[pathlib.Path, bool]:
 
 
 def get_client_for_config(config: GatewayConfig):
-    """Factory — builds a SandboxClient from a GatewayConfig."""
+    """Factory — builds a SandboxClient from a GatewayConfig.
+
+    The OpenShell SDK exposes TLS material but no certificate-verification
+    toggle. ``tls_verify`` is therefore intentionally consumed only by the
+    HTTP/WebSocket proxy; SDK connections always use gRPC's verified TLS.
+    """
     from openshell import SandboxClient, TlsConfig  # noqa: F401 (optional dep)
 
     endpoint = _normalize_gateway_endpoint(config.gateway_url)
